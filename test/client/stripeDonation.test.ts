@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  GIVEBUTTER_CAMPAIGN,
   STRIPE_CHECKOUT_PATH,
   STRIPE_FREQ_MONTHLY_LABEL,
   STRIPE_FREQ_ONCE_LABEL,
@@ -9,6 +10,8 @@ import {
   STRIPE_PORTAL_PATH,
   STRIPE_RESULT_PATH,
   STRIPE_US_COUNTRY_CODE,
+  givebutterEmbedUrl,
+  givebutterHostedUrl,
   isStripeHostedUrl,
   isStripeResultPath,
   stripeCheckoutBody,
@@ -83,6 +86,16 @@ describe("Stripe donor browser contract", () => {
       "Su diezmo u ofrenda apoya a esta iglesia en El Salvador. Se procesa en EE. UU. a través de una organización estadounidense 501c3 y recibirá un recibo deducible de impuestos en EE. UU. por correo."
     );
   });
+
+  it("builds the production Givebutter alternative from deployment configuration", () => {
+    expect(GIVEBUTTER_CAMPAIGN).toBe("example-campaign");
+    expect(givebutterEmbedUrl({ amount: "100.00", monthly: true })).toBe(
+      "https://givebutter.com/embed/c/example-campaign?amount=100&frequency=monthly&goalBar=false"
+    );
+    expect(givebutterHostedUrl({ amount: "100.00", monthly: true })).toBe(
+      "https://givebutter.com/example-campaign?amount=100&frequency=monthly"
+    );
+  });
 });
 
 describe("Stripe donor page source contract", () => {
@@ -101,7 +114,8 @@ describe("Stripe donor page source contract", () => {
       donarSource.indexOf("{/* US Stripe step"),
       donarSource.indexOf("{/* Paso 3", donarSource.indexOf("{/* US Stripe step"))
     );
-    expect(usBlock).not.toContain("<iframe");
+    expect(usBlock).toContain('title="Formulario de donación Givebutter"');
+    expect(usBlock).not.toContain("payment_method_types");
     expect(stripeFormSource).toContain("<EmbeddedCheckoutProvider");
     expect(stripeFormSource).toContain("<EmbeddedCheckout />");
     expect(stripeFormSource).not.toContain("ExpressCheckoutElement");
@@ -113,10 +127,12 @@ describe("Stripe donor page source contract", () => {
     );
   });
 
-  it("has no Givebutter runtime dependency", () => {
-    expect(`${donationSource}\n${donarSource}\n${stripeFormSource}\n${resultSource}\n${appSource}\n${mainSource}`).not.toMatch(
-      /givebutter/i
-    );
+  it("keeps Givebutter as an explicit donor-selected alternative to the default Stripe form", () => {
+    expect(donarSource).toContain("Dar con Givebutter");
+    expect(donarSource).toContain("Formulario en inglés");
+    expect(donarSource).toContain("givebutterEmbedUrl({ amount: form.amount, monthly })");
+    expect(donarSource).toContain('usProvider === "stripe"');
+    expect(donarSource).toContain('usProvider === "givebutter"');
   });
 
   it("keeps transactional vocabulary out of every Stripe-owned donor surface", () => {

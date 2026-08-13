@@ -37,6 +37,7 @@ Each file contains only these required keys:
 
 ```dotenv
 DIEZMOSSV_DEPLOY_TARGET=staging
+VITE_GIVEBUTTER_CAMPAIGN=example-campaign
 DIEZMOSSV_APP_ORIGIN=https://staging.example.invalid
 DIEZMOSSV_DONOR_LOGO_FILE=/absolute/private/path/logo.png
 ```
@@ -52,7 +53,7 @@ npm run build:private -- --env staging
 npm run build:private -- --env production
 ```
 
-The wrapper validates the selected target-bound private deploy file before running `npm run build`. It does not inject the configured origin, donor logo, operator credentials, or Stripe values into the Vite client. Stripe is runtime-only: its restricted key, webhook secret, payment-method configuration, Billing Portal configuration, legal name, and EIN are Cloudflare secrets described in [`docs/stripe-us-giving.md`](stripe-us-giving.md). Plain `npm run build` remains available for public clones and tests.
+The wrapper validates the selected target-bound private deploy file before running `npm run build`. It injects only the public `VITE_GIVEBUTTER_CAMPAIGN` slug used by the donor-selected U.S. alternative; it does not inject the configured origin, donor logo, operator credentials, or Stripe values into the Vite client. Stripe is runtime-only: its restricted key, webhook secret, payment-method configuration, Billing Portal configuration, legal name, and EIN are Cloudflare secrets described in [`docs/stripe-us-giving.md`](stripe-us-giving.md). Plain `npm run build` remains available for public clones and tests, where the neutral campaign placeholder keeps URL helpers deterministic.
 
 Logo migration uses an external operator env file. Staging reuses `env/staging-smoke.env`; production uses the distinct `env/production-operator.env`. Override either with the absolute `DIEZMOSSV_OPERATOR_ENV_FILE`. The file accepts target-prefixed pairs (`STAGING_EMAIL`/`STAGING_PASSWORD` or `PRODUCTION_EMAIL`/`PRODUCTION_PASSWORD`) or the generic `DIEZMOSSV_OPERATOR_EMAIL`/`DIEZMOSSV_OPERATOR_PASSWORD` pair and follows the same external, regular, owner-owned `0600`, no-symlink rules.
 

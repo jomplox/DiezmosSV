@@ -387,9 +387,10 @@ describe("remote provisioning documentation", () => {
   );
 
   it.each(releaseSafetyReadmes)(
-    "keeps the removed client campaign configuration out of the %s",
+    "documents the target-bound Givebutter alternative in the %s",
     (_name, document) => {
-      expect(document).not.toMatch(/givebutter|VITE_GIVEBUTTER/i);
+      expect(document).toContain("Givebutter");
+      expect(document).toContain("VITE_GIVEBUTTER_CAMPAIGN");
     }
   );
 

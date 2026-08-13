@@ -1,5 +1,6 @@
 import { markDonorBrandingSettled } from "./donorReady";
 import svFlag from "./assets/sv-flag.svg";
+import { GIVEBUTTER_ICON_DATA_URI } from "./assets/givebutterIcon";
 import { AlertCircle, CheckCircle2, ShieldCheck } from "lucide-react";
 import { type FormEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
@@ -44,6 +45,7 @@ import {
   DONAR_WIDGET_LOADING_MESSAGE,
   DONAR_WIDGET_VERIFYING_MESSAGE,
   DONAR_WOMPI_CHECKOUT_ORIGIN,
+  GIVEBUTTER_RENDER_TIMEOUT_MS,
   STRIPE_CANCELED_MESSAGE,
   STRIPE_CHECKOUT_PATH,
   STRIPE_FREQ_MONTHLY_LABEL,
@@ -64,6 +66,8 @@ import {
   donationStep2FieldErrors,
   firstDonationFieldError,
   doorFromSearch,
+  givebutterEmbedUrl,
+  givebutterHostedUrl,
   stripeCheckoutBody,
   stripeIntro,
   graciasDisplayFromSearch,
@@ -435,6 +439,8 @@ export function DonarPage() {
   // promise that initializes Stripe Embedded Checkout inside Paso 2.
   const [monthly, setMonthly] = useState(false);
   const [stripeGiftType, setStripeGiftType] = useState<StripeGiftType>("TITHE");
+  const [usProvider, setUsProvider] = useState<"stripe" | "givebutter">("stripe");
+  const [givebutterFrameStatus, setGivebutterFrameStatus] = useState<"loading" | "ready" | "delayed">("loading");
   const stripeAttemptRef = useRef<{ fingerprint: string; requestId: string } | null>(null);
   const [stripeSessionAttempt, setStripeSessionAttempt] = useState<{
     fingerprint: string;
@@ -471,6 +477,7 @@ export function DonarPage() {
       ? DONAR_GIFT_TYPE_LABEL[form.giftType]
       : "";
   const frequencyLabel = monthly ? STRIPE_FREQ_MONTHLY_LABEL : STRIPE_FREQ_ONCE_LABEL;
+  const givebutterFrameUrl = givebutterEmbedUrl({ amount: form.amount, monthly });
 
   // Choose a door: record it in ?ruta (composing with — never clobbering — any
   // existing query) so a refresh keeps the door, then swap the view. null returns
@@ -494,6 +501,7 @@ export function DonarPage() {
     setForm((current) => ({ ...current, foreignResident: false, pais: "" }));
     setMonthly(false);
     setStripeGiftType("TITHE");
+    setUsProvider("stripe");
     stripeAttemptRef.current = null;
     setStripeSessionAttempt(null);
     setStep(1);
@@ -605,6 +613,26 @@ export function DonarPage() {
     link.href = DONAR_WOMPI_CHECKOUT_ORIGIN;
     document.head.appendChild(link);
   }, [door, usDonation]);
+
+  // Givebutter's embed is mounted only after the donor explicitly selects it. A
+  // slow frame exposes the same hosted-page escape hatch as the production form;
+  // switching back to Stripe cancels this timer and removes the iframe entirely.
+  useEffect(() => {
+    if (!usDonation || step !== 2 || usProvider !== "givebutter") {
+      return;
+    }
+    let cancelled = false;
+    setGivebutterFrameStatus("loading");
+    const timeout = window.setTimeout(() => {
+      if (!cancelled) {
+        setGivebutterFrameStatus((status) => status === "ready" ? status : "delayed");
+      }
+    }, GIVEBUTTER_RENDER_TIMEOUT_MS);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [givebutterFrameUrl, step, usDonation, usProvider]);
 
   // Listen for the thank-you page's postMessage (fired when it runs inside the
   // widget iframe modal) so we can swap to the thank-you state directly.
@@ -871,9 +899,11 @@ export function DonarPage() {
     // the donor could never reach the SV form again.
     if (door === "sv" && usDonation) {
       setMonthly(false);
+      setUsProvider("stripe");
       update({ pais: "" });
       return;
     }
+    setUsProvider("stripe");
     setStep(1);
   }
 
@@ -891,6 +921,7 @@ export function DonarPage() {
       setStripeSessionAttempt(null);
     }
     setStage("form");
+    setUsProvider("stripe");
     setStep(1);
   }
 
@@ -1216,6 +1247,7 @@ export function DonarPage() {
                       params.set(DONAR_ROUTE_PARAM, "eeuu");
                       window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
                       setStripeGiftType(form.giftType === "OFRENDA" ? "OFFERING" : "TITHE");
+                      setUsProvider("stripe");
                       stripeAttemptRef.current = null;
                       setStripeSessionAttempt(null);
                       update({ foreignResident: false, pais: "" });
@@ -1293,12 +1325,74 @@ export function DonarPage() {
             {summary}
             <div className="donar-handoff">
               <p className="donar-intro">{stripeIntro(organizationName)}</p>
-              {stripeSessionAttempt && (
-                <StripeDonationForm
-                  key={stripeSessionAttempt.sequence}
-                  session={stripeSessionAttempt.session}
-                  onRetry={retryStripeSession}
-                />
+              {usProvider === "stripe" && (
+                <>
+                  <button
+                    type="button"
+                    className="donar-provider-choice donar-provider-choice-givebutter"
+                    onClick={() => setUsProvider("givebutter")}
+                  >
+                    <img
+                      src={GIVEBUTTER_ICON_DATA_URI}
+                      alt=""
+                      aria-hidden="true"
+                    />
+                    <span className="donar-provider-choice-copy">
+                      <strong>Dar con Givebutter</strong>
+                      <small>Formulario en inglés</small>
+                    </span>
+                    <span className="donar-provider-choice-arrow" aria-hidden="true">→</span>
+                  </button>
+                  {stripeSessionAttempt && (
+                    <StripeDonationForm
+                      key={stripeSessionAttempt.sequence}
+                      session={stripeSessionAttempt.session}
+                      onRetry={retryStripeSession}
+                    />
+                  )}
+                </>
+              )}
+              {usProvider === "givebutter" && (
+                <div className="donar-givebutter-surface">
+                  <button
+                    type="button"
+                    className="donar-provider-choice donar-provider-choice-stripe"
+                    onClick={() => setUsProvider("stripe")}
+                  >
+                    <span className="donar-provider-stripe-mark" aria-hidden="true" />
+                    <span className="donar-provider-choice-copy">
+                      <strong>Volver a Stripe</strong>
+                      <small>Formulario en español</small>
+                    </span>
+                    <span className="donar-provider-choice-arrow" aria-hidden="true">←</span>
+                  </button>
+                  <iframe
+                    className="donar-givebutter-frame"
+                    title="Formulario de donación Givebutter"
+                    src={givebutterFrameUrl}
+                    allow="payment *; clipboard-write"
+                    referrerPolicy="strict-origin-when-cross-origin"
+                    onLoad={() => setGivebutterFrameStatus("ready")}
+                  />
+                  {givebutterFrameStatus === "delayed" && (
+                    <a
+                      className="primary donar-givebutter-fallback"
+                      href={givebutterHostedUrl({ amount: form.amount, monthly })}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      Abrir Givebutter en otra pestaña
+                    </a>
+                  )}
+                  <a
+                    className="donar-givebutter-hint"
+                    href={givebutterHostedUrl({ amount: form.amount, monthly })}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    ¿Problemas con el formulario? Abrir Givebutter
+                  </a>
+                </div>
               )}
             </div>
           </div>

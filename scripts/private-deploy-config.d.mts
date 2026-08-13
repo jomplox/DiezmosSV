@@ -2,6 +2,7 @@ export type PrivateDeployTarget = "staging" | "production";
 
 export interface PrivateDeployConfig {
   target: PrivateDeployTarget;
+  campaign: string;
   origin: string;
   donorLogo: {
     path: string;

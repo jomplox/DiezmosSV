@@ -593,6 +593,7 @@ function runtimeConfig(origin: string, options: {
   const bytes = options.bytes ?? localRasterBytes;
   return {
     target: "staging" as const,
+    campaign: "campaign-fixture",
     origin,
     donorLogo: {
       path: "/private-fixture/logo.png",
@@ -620,6 +621,7 @@ function cliFixture(origin: string, options: {
   writeFileSync(logoPath, logoBytes, { mode: 0o600 });
   writeFileSync(configPath, [
     "DIEZMOSSV_DEPLOY_TARGET=staging",
+    "VITE_GIVEBUTTER_CAMPAIGN=campaign-fixture",
     `DIEZMOSSV_APP_ORIGIN=${origin}`,
     `DIEZMOSSV_DONOR_LOGO_FILE=${logoPath}`,
     ""

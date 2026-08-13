@@ -40,6 +40,7 @@ describe("private deployment configuration", () => {
       })
     ).toMatchObject({
       target: "staging",
+      campaign: "campaign-fixture",
       origin: "https://staging.example.invalid",
       donorLogo: { contentType: "image/png", bytes: pngBytes }
     });
@@ -89,6 +90,7 @@ describe("private deployment configuration", () => {
 
   it.each([
     "DIEZMOSSV_DEPLOY_TARGET",
+    "VITE_GIVEBUTTER_CAMPAIGN",
     "DIEZMOSSV_APP_ORIGIN",
     "DIEZMOSSV_DONOR_LOGO_FILE"
   ])("names %s when that required setting is absent", (key) => {
@@ -113,6 +115,26 @@ describe("private deployment configuration", () => {
         repositoryRoot: fixture.repositoryRoot
       }), fixture
     );
+  });
+
+  it.each([
+    ["example-campaign", /placeholder/],
+    ["campaign/with/path", /single Givebutter campaign slug/]
+  ])("rejects the unusable Givebutter campaign value %s", (campaign, expected) => {
+    const fixture = deploymentFixture();
+    writeFileSync(
+      fixture.configPath,
+      fixture.configContents.replace("campaign-fixture", campaign),
+      { mode: 0o600 }
+    );
+
+    expect(() =>
+      loadPrivateDeployConfig({
+        target: "staging",
+        env: { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath },
+        repositoryRoot: fixture.repositoryRoot
+      })
+    ).toThrow(expected);
   });
 
   it("rejects a missing config file and an empty one without disclosure", () => {
@@ -400,6 +422,7 @@ function deploymentFixture(options: {
   const configPath = join(privateRoot, "staging.env");
   const configContents = [
     `DIEZMOSSV_DEPLOY_TARGET=${options.target ?? "staging"}`,
+    "VITE_GIVEBUTTER_CAMPAIGN=campaign-fixture",
     `DIEZMOSSV_APP_ORIGIN=${options.origin ?? "https://staging.example.invalid"}`,
     `DIEZMOSSV_DONOR_LOGO_FILE=${logoPath}`,
     ""

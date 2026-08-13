@@ -88,9 +88,52 @@ export const STRIPE_CANCELED_MESSAGE =
 export const STRIPE_RESULT_POLL_INTERVAL_MS = 5_000;
 export const STRIPE_RESULT_POLL_TIMEOUT_MS = 3 * 60 * 1_000;
 
-// Keep the production US-door explanation unchanged while Stripe replaces the
-// previous hosted form. The formal receipt still supplies the configured
-// legal entity name and EIN independently of this familiar donor-facing copy.
+// Givebutter remains an explicit donor-selected alternative on the U.S. step.
+// Its campaign slug is target-bound build configuration, never a reusable-source
+// literal. Public/local builds keep a neutral placeholder so tests and fresh clones
+// remain runnable; the private release wrapper rejects that placeholder.
+const GIVEBUTTER_CAMPAIGN_FALLBACK = "example-campaign";
+const buildEnv: Record<string, string | undefined> =
+  typeof import.meta === "object" && import.meta !== null
+    ? ((import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {})
+    : {};
+export const GIVEBUTTER_CAMPAIGN =
+  buildEnv.VITE_GIVEBUTTER_CAMPAIGN?.trim() || GIVEBUTTER_CAMPAIGN_FALLBACK;
+export const GIVEBUTTER_EMBED_BASE_URL =
+  `https://givebutter.com/embed/c/${GIVEBUTTER_CAMPAIGN}`;
+export const GIVEBUTTER_RENDER_TIMEOUT_MS = 4_000;
+
+function givebutterPrefillParams(input: {
+  amount: string;
+  monthly: boolean;
+}): URLSearchParams {
+  const params = new URLSearchParams();
+  const amount = Number.parseFloat(input.amount.trim());
+  if (Number.isFinite(amount) && amount > 0) {
+    params.set("amount", String(amount));
+  }
+  if (input.monthly) {
+    params.set("frequency", "monthly");
+  }
+  return params;
+}
+
+export function givebutterEmbedUrl(input: { amount: string; monthly: boolean }): string {
+  const params = givebutterPrefillParams(input);
+  params.set("goalBar", "false");
+  return `${GIVEBUTTER_EMBED_BASE_URL}?${params.toString()}`;
+}
+
+export function givebutterHostedUrl(input: { amount: string; monthly: boolean }): string {
+  const params = givebutterPrefillParams(input);
+  const query = params.toString();
+  return `https://givebutter.com/${GIVEBUTTER_CAMPAIGN}${query ? `?${query}` : ""}`;
+}
+
+// Keep the production US-door explanation unchanged while Stripe remains the
+// default form and Givebutter remains an explicit alternative. The formal receipt
+// still supplies the configured legal entity name and EIN independently of this
+// familiar donor-facing copy.
 export function stripeIntro(organizationName: string | null): string {
   const name = organizationName?.trim();
   if (!name) {

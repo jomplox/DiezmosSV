@@ -8,6 +8,7 @@ import {
 import { homedir } from "node:os";
 import { extname, isAbsolute, join, relative, sep } from "node:path";
 import { parseEnv } from "node:util";
+import { assertDonationLaneConfigured } from "./assert-donation-lane-config.mjs";
 
 const TARGETS = new Set(["staging", "production"]);
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -38,6 +39,11 @@ export function loadPrivateDeployConfig({
     throw sanitizedError("The private deploy config does not match the selected target");
   }
 
+  const campaign = requiredValue(parsed, "VITE_GIVEBUTTER_CAMPAIGN", "deploy config");
+  assertDonationLaneConfigured({
+    environment: { VITE_GIVEBUTTER_CAMPAIGN: campaign }
+  });
+
   const originValue = requiredValue(parsed, "DIEZMOSSV_APP_ORIGIN", "deploy config");
   const origin = validatedOrigin(originValue);
   const logoPath = requiredValue(parsed, "DIEZMOSSV_DONOR_LOGO_FILE", "deploy config");
@@ -63,6 +69,7 @@ export function loadPrivateDeployConfig({
 
   return {
     target,
+    campaign,
     origin,
     donorLogo: {
       path: resolvedLogo,

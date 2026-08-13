@@ -1228,7 +1228,8 @@ describe("Stripe donar page source contract", () => {
       pageSource.indexOf("{/* US Stripe step"),
       pageSource.indexOf("{/* Paso 3", pageSource.indexOf("{/* US Stripe step"))
     );
-    expect(stripeBlock).not.toContain("<iframe");
+    expect(stripeBlock).toContain('title="Formulario de donación Givebutter"');
+    expect(stripeBlock).not.toContain("payment_method_types");
     expect(stripeBlock).toContain("<StripeDonationForm");
     expect(stripeBlock).not.toContain("donar-stripe-assurance");
   });

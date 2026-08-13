@@ -138,8 +138,9 @@ Solo se emiten los eventos con `ResultadoTransaccion = ExitosaAprobada`. Todo lo
 Wompi o al donante queda registrado en D1 y en la bitácora de auditoría.
 
 La página pública `/donar` abre con una portada de dos puertas: **El Salvador y el mundo** dirige al
-formulario fiscal SV (Wompi + CDE), y **EE. UU.** dirige a Stripe Embedded Checkout en español y dentro de la misma página sobre la
-cuenta 501(c)(3) estadounidense para entregas únicas o mensuales (`?ruta=sv` / `?ruta=eeuu` enlaza directo a una puerta). Toda la
+formulario fiscal SV (Wompi + CDE), y **EE. UU.** usa por defecto Stripe Embedded Checkout en español y dentro de la misma página sobre la
+cuenta 501(c)(3) estadounidense para entregas únicas o mensuales. En ese paso el donante puede desmontar Stripe
+explícitamente y usar el formulario existente de Givebutter en inglés (`?ruta=sv` / `?ruta=eeuu` enlaza directo a una puerta). Toda la
 interfaz web (páginas del donante y panel de administración) usa **Gotham**, autoalojada como woff2
 del subconjunto latino en `src/client/fonts/` — los OTF licenciados nunca se versionan; solo se
 versionan los subconjuntos woff2 generados.
@@ -368,6 +369,7 @@ fuera de este repositorio y sin enlaces simbólicos:
 ```dotenv
 # /ruta/privada/absoluta/staging.env
 DIEZMOSSV_DEPLOY_TARGET=staging
+VITE_GIVEBUTTER_CAMPAIGN=example-campaign
 DIEZMOSSV_APP_ORIGIN=https://staging.example.invalid
 DIEZMOSSV_DONOR_LOGO_FILE=/ruta/privada/absoluta/logo.png
 ```
@@ -443,7 +445,7 @@ Dos guardas de despliegue hacen fallar el comando en vez de publicar un desplieg
 | Guarda | Se ejecuta en | Bloquea salvo que |
 |---|---|---|
 | `scripts/assert-fiscal-cutover.mjs` | `cf:migrate:prod`, `cf:deploy:prod`, `cf:cutover:staging` | `FISCAL_CUTOVER_QUIESCED=1` esté definido. Las migraciones 0020/0021 y el Worker con soporte de claims deben entrar en **una sola ventana de mantenimiento con tráfico detenido**: drene las solicitudes del Worker anterior, pause colas/cron y el tráfico que muta datos, y luego reconozca la ventana. |
-| `scripts/run-private-build.mjs` | `build:private`, y a través de él `cf:deploy:staging` y `cf:deploy:prod` | El archivo de despliegue vinculado al ambiente y exclusivo del dueño, el origen y el raster del donante pasan validación. Los valores de Stripe son solo de runtime y nunca se inyectan en Vite. |
+| `scripts/run-private-build.mjs` | `build:private`, y a través de él `cf:deploy:staging` y `cf:deploy:prod` | El archivo de despliegue vinculado al ambiente y exclusivo del dueño, el slug de campaña Givebutter, el origen y el raster del donante pasan validación. Solo el slug público se inyecta en Vite; los valores de Stripe siguen siendo solo de runtime. |
 
 Guarde los parámetros de la prueba de humo en ese archivo `0600` fuera del árbol del repositorio. El
 runner usa esa ruta aprobada por defecto, así que `npm run smoke:staging` basta salvo que
@@ -592,8 +594,8 @@ configuración privada seleccionada y se duplican por ambiente de Wrangler:
 | `STRIPE_API_PROXY_URL` | Puente HTTP opcional y exclusivo de loopback para entornos locales de `workerd` sin HTTPS saliente. Ejecute `npm run dev:stripe-api-proxy`; staging, producción, hosts que no sean loopback, credenciales y rutas URL se rechazan. |
 
 **Frontera de tiempo de build.** La envoltura vinculada al ambiente
-`npm run build:private -- --env staging|production` valida el archivo externo de release/marca, pero
-no inyecta ningún valor de proveedor en Vite. Las claves, IDs de configuración, identidad legal y
+`npm run build:private -- --env staging|production` valida el archivo externo de release/marca e
+inyecta únicamente el slug público `VITE_GIVEBUTTER_CAMPAIGN` usado por la alternativa elegida por el donante. Las claves, IDs de configuración, identidad legal y
 política BNPL de Stripe son configuración de runtime del Worker. Solo la clave publicable se devuelve
 al navegador, junto con una sesión de Embedded Checkout creada; la clave restringida y el secreto del webhook
 nunca salen del Worker. Colocar cualquiera en un valor `VITE_*` está prohibido porque fijaría el ambiente
@@ -735,6 +737,11 @@ Checkout Session idempotente para esa selección y la verifica de nuevo mediante
 de resultado lee el estado durable de D1, no el regreso del navegador. Un contribuyente estadounidense
 necesita un acuse de EE. UU., no un CDE salvadoreño, por lo que este carril **nunca toca Wompi,
 `donation_intents` ni la tubería del CDE**.
+
+Stripe sigue siendo el formulario estadounidense predeterminado. Un botón claramente rotulado **Dar con
+Givebutter — Formulario en inglés** desmonta Stripe Embedded Checkout y monta la campaña Givebutter vinculada
+al ambiente con el mismo monto y la misma selección Única/Mensual. **Volver a Stripe — Formulario en español**
+revierte la elección y reutiliza la Session de Stripe existente en vez de crear otra.
 
 El asistente SV no crea un enlace Wompi en el Paso 1, cuando todavía se desconoce la residencia del
 donante. Si después el donante de la ruta SV selecciona Estados Unidos, la ruta de seguridad conserva el

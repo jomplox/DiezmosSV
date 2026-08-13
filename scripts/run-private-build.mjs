@@ -10,14 +10,15 @@ export async function runPrivateBuild({
   repositoryRoot = process.cwd(),
   spawnImpl = spawn
 } = {}) {
-  // Validate the owner-only target, origin, and donor-logo contract before Vite
-  // starts. Stripe configuration is runtime-only and is never baked into the client.
-  loadPrivateDeployConfig({ target, env, repositoryRoot });
+  // Validate the owner-only target, campaign, origin, and donor-logo contract
+  // before Vite starts. Only the public Givebutter campaign slug enters the
+  // client build; Stripe credentials remain runtime-only.
+  const config = loadPrivateDeployConfig({ target, env, repositoryRoot });
 
   return new Promise((resolve, reject) => {
     const child = spawnImpl(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "build"], {
       cwd: repositoryRoot,
-      env,
+      env: { ...env, VITE_GIVEBUTTER_CAMPAIGN: config.campaign },
       stdio: "inherit"
     });
     child.once("error", reject);

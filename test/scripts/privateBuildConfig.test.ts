@@ -17,7 +17,7 @@ afterEach(() => {
 
 describe("private release builds", () => {
   it.each(["staging", "production"] as const)(
-    "builds %s without injecting private deployment values into the client environment",
+    "builds %s while injecting only the public campaign into the client environment",
     async (target) => {
       const fixture = deploymentFixture(target);
       const { calls, spawnImpl } = recordingSpawn(0);
@@ -48,11 +48,12 @@ describe("private release builds", () => {
       const [call] = calls;
       expect(call.command).toBe(process.platform === "win32" ? "npm.cmd" : "npm");
       expect(call.args).toEqual(["run", "build"]);
-      expect(call.options.env.VITE_GIVEBUTTER_CAMPAIGN).toBeUndefined();
+      expect(call.options.env.VITE_GIVEBUTTER_CAMPAIGN).toBe("campaign-fixture");
       expect(call.options.env.INHERITED_TEST_VALUE).toBe("available-to-build");
       expect(call.options.env.DIEZMOSSV_APP_ORIGIN).toBeUndefined();
       expect(call.options.env.DIEZMOSSV_DONOR_LOGO_FILE).toBeUndefined();
       expect(call.options.env.DIEZMOSSV_OPERATOR_EMAIL).toBeUndefined();
+      expect(capturedOutput).not.toContain("campaign-fixture");
       expect(capturedOutput).toBe("");
     }
   );
@@ -103,6 +104,7 @@ function deploymentFixture(target: "staging" | "production"): Fixture {
     configPath,
     [
       `DIEZMOSSV_DEPLOY_TARGET=${target}`,
+      "VITE_GIVEBUTTER_CAMPAIGN=campaign-fixture",
       `DIEZMOSSV_APP_ORIGIN=https://${target}.example.invalid`,
       `DIEZMOSSV_DONOR_LOGO_FILE=${logoPath}`,
       ""

@@ -488,6 +488,15 @@ test("Paso 2 reports every invalid field at once and clears each error as it is 
 
 test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", async ({ page }) => {
   const checkoutBodies: Array<Record<string, unknown>> = [];
+  const givebutterRequests: string[] = [];
+  await page.route("https://givebutter.com/**", (route) => {
+    givebutterRequests.push(route.request().url());
+    return route.fulfill({
+      status: 200,
+      contentType: "text/html; charset=utf-8",
+      body: "<html lang=\"en\"><body>Givebutter test form</body></html>"
+    });
+  });
   await page.route("**/api/donations/stripe/checkout", async (route) => {
     checkoutBodies.push(route.request().postDataJSON() as Record<string, unknown>);
     if (checkoutBodies.length === 1) {
@@ -616,6 +625,28 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   await expect(page.getByLabel("Correo electrónico")).toHaveCount(0);
   await expect(page.getByRole("radio", { name: "Tarjeta" })).toHaveCount(0);
   await expect(page.getByRole("radio", { name: "Cuenta bancaria de EE. UU." })).toHaveCount(0);
+
+  // Givebutter is an explicit alternative. Selecting it removes Stripe's embedded
+  // tree entirely, preserves the amount/frequency prefill, and can return to the
+  // already-created Stripe Session without minting another one.
+  const givebutterChoice = page.getByRole("button", { name: /Dar con Givebutter.*Formulario en inglés/i });
+  await expect(givebutterChoice).toBeVisible();
+  await expect(givebutterChoice.locator("img")).toBeVisible();
+  expect(givebutterRequests).toEqual([]);
+  await givebutterChoice.click();
+  await expect(page.locator(".donar-stripe-embedded")).toHaveCount(0);
+  const givebutterFrame = page.getByTitle("Formulario de donación Givebutter");
+  await expect(givebutterFrame).toBeVisible();
+  await expect(givebutterFrame).toHaveAttribute(
+    "src",
+    "https://givebutter.com/embed/c/example-campaign?amount=100&frequency=monthly&goalBar=false"
+  );
+  expect(givebutterRequests).toEqual([
+    "https://givebutter.com/embed/c/example-campaign?amount=100&frequency=monthly&goalBar=false"
+  ]);
+  await page.getByRole("button", { name: /Volver a Stripe.*Formulario en español/i }).click();
+  await expect(givebutterFrame).toHaveCount(0);
+  await expect(page.locator(".donar-stripe-embedded")).toBeVisible();
 
   // Stripe reuses the Wompi handoff shell: the hosted surface is full-bleed on
   // mobile and aligns to the raised card edges on tablet/desktop. Only the

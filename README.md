@@ -136,8 +136,9 @@ Only events with `ResultadoTransaccion = ExitosaAprobada` are issued. Everything
 Wompi, or the donor is recorded in D1 and the audit log.
 
 The public `/donar` page opens on a two-door landing: **El Salvador y el mundo** routes to the
-SV fiscal form (Wompi + CDE), and **EE. UU.** routes to Stripe's Spanish Embedded Checkout form on the US 501(c)(3)
-account for one-time or monthly gifts (`?ruta=sv` / `?ruta=eeuu` deep-links a door). The whole web UI (donor pages
+SV fiscal form (Wompi + CDE), and **EE. UU.** defaults to Stripe's Spanish Embedded Checkout form on the US 501(c)(3)
+account for one-time or monthly gifts. On that U.S. step the donor may explicitly unmount Stripe and use the
+existing English Givebutter form instead (`?ruta=sv` / `?ruta=eeuu` deep-links a door). The whole web UI (donor pages
 and admin) uses **Gotham**, self-hosted as latin-subset woff2 under `src/client/fonts/` — the
 licensed OTFs are never committed; only the generated woff2 subsets are.
 
@@ -357,6 +358,7 @@ owner-owned `0600` files outside this repository, without symlinks:
 ```dotenv
 # /absolute/private/path/staging.env
 DIEZMOSSV_DEPLOY_TARGET=staging
+VITE_GIVEBUTTER_CAMPAIGN=example-campaign
 DIEZMOSSV_APP_ORIGIN=https://staging.example.invalid
 DIEZMOSSV_DONOR_LOGO_FILE=/absolute/private/path/logo.png
 ```
@@ -430,7 +432,7 @@ Two deploy guards fail the command closed rather than shipping a broken deployme
 | Guard | Runs on | Blocks unless |
 |---|---|---|
 | `scripts/assert-fiscal-cutover.mjs` | `cf:migrate:prod`, `cf:deploy:prod`, `cf:cutover:staging` | `FISCAL_CUTOVER_QUIESCED=1` is set. Migrations 0020/0021 and the claim-aware Worker must land in **one quiesced maintenance window**: drain old Worker requests, pause queues/cron and mutating traffic, then acknowledge. |
-| `scripts/run-private-build.mjs` | `build:private`, and through it `cf:deploy:staging` and `cf:deploy:prod` | The selected target-bound owner-only deploy file, origin, and donor raster pass validation. Stripe values are runtime-only and are never injected into Vite. |
+| `scripts/run-private-build.mjs` | `build:private`, and through it `cf:deploy:staging` and `cf:deploy:prod` | The selected target-bound owner-only deploy file, Givebutter campaign slug, origin, and donor raster pass validation. Only the public campaign slug is injected into Vite; Stripe values remain runtime-only. |
 
 Store the smoke settings in that `0600` out-of-tree file. The runner uses this approved path by
 default, so `npm run smoke:staging` is sufficient unless you intentionally select another file.
@@ -574,7 +576,8 @@ selected private config and are duplicated per Wrangler environment:
 | `STRIPE_API_PROXY_URL` | Optional loopback-only HTTP bridge for local `workerd` environments without outbound HTTPS. Run `npm run dev:stripe-api-proxy`; staging, production, non-loopback hosts, credentials, and URL paths are rejected. |
 
 **Build-time boundary.** The target-bound `npm run build:private -- --env staging|production`
-wrapper validates the external release/branding file but injects no provider setting into Vite.
+wrapper validates the external release/branding file and injects only the public
+`VITE_GIVEBUTTER_CAMPAIGN` slug used by the donor-selected alternative.
 Stripe keys, configuration IDs, legal identity, and BNPL policy are Worker runtime configuration.
 Only the publishable key is returned to the browser, together with a created Embedded Checkout Session; the
 restricted key and webhook secret never leave the Worker. Putting any of them in a `VITE_*` value is
@@ -705,6 +708,11 @@ the page on the connected US 501(c)(3) account. The Worker creates one idempoten
 selection and verifies it again through signed Stripe webhooks; the result page reads durable D1 state instead
 of trusting a browser return. A US taxpayer needs a US acknowledgment, not a Salvadoran CDE, so this lane
 **never touches Wompi, `donation_intents`, or the CDE pipeline**.
+
+Stripe remains the default U.S. form. A clearly labeled **Dar con Givebutter — Formulario en inglés**
+button unmounts Stripe Embedded Checkout and mounts the target-bound Givebutter campaign with the same
+amount and one-time/monthly prefill. **Volver a Stripe — Formulario en español** reverses the choice and
+reuses the existing Stripe Session rather than creating another one.
 
 The SV wizard does not mint a Wompi link on Step 1, while the donor's residence is still unknown. If an
 SV-path donor later selects Estados Unidos, the safety route preserves the truthful amount and Diezmo/Ofrenda
