@@ -1,5 +1,8 @@
 import { expect, test, type Locator } from "@playwright/test";
-import { DONAR_VERIFYING_NOTICE_DELAY_MS } from "../src/client/donation";
+import {
+  DONAR_VERIFYING_NOTICE_DELAY_MS,
+  GIVEBUTTER_RENDER_TIMEOUT_MS
+} from "../src/client/donation";
 
 /**
  * End-to-end test for the PUBLIC donor-checkout pages against a REAL local
@@ -582,7 +585,9 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   await expect(page.getByText("Paso 2 de 2")).toBeVisible();
   await expect(page.getByText("Su entrega", { exact: true })).toBeVisible();
   await expect(page.getByText("Ofrenda · Mensual · $100.00")).toBeVisible();
-  await expect(page.locator(".donar-intro")).toContainText(`apoya a ${BRANDING_DISPLAY_NAME} en El Salvador`);
+  await expect(page.locator(".donar-intro")).toHaveText(
+    `Su diezmo u ofrenda apoya a ${BRANDING_DISPLAY_NAME} en El Salvador. Se procesa en EE. UU. a través de Friends of ${BRANDING_DISPLAY_NAME} (501c3) y recibirá un recibo deducible de impuestos en EE. UU. por correo.`
+  );
   await expect(
     page.getByText("Stripe mostrará en español las opciones disponibles para usted de forma segura.")
   ).toHaveCount(0);
@@ -628,7 +633,7 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   // Givebutter is an explicit alternative. Selecting it removes Stripe's embedded
   // tree entirely, preserves the amount/frequency prefill, and can return to the
   // already-created Stripe Session without minting another one.
-  const givebutterChoice = page.getByRole("button", { name: /Dar con Givebutter.*Formulario en inglés/i });
+  const givebutterChoice = page.getByRole("button", { name: /Ofrendar con Givebutter.*Formulario en inglés/i });
   await expect(givebutterChoice).toBeVisible();
   await expect(givebutterChoice.locator("img")).toBeVisible();
   const givebutterChoiceBox = await givebutterChoice.boundingBox();
@@ -684,11 +689,31 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   expect(hatchBox).not.toBeNull();
   expect(frameBox).not.toBeNull();
   expect(hatchBox!.y).toBeLessThan(frameBox!.y);
-  await page.getByRole("button", { name: /Volver a Stripe.*Formulario en español/i }).click();
+  await expect(givebutterHatch).toHaveText("Abrir Givebutter en otra pestaña", {
+    timeout: GIVEBUTTER_RENDER_TIMEOUT_MS + 5_000
+  });
+  expect(await givebutterHatch.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      backgroundColor: style.backgroundColor,
+      borderWidth: style.borderTopWidth,
+      borderRadius: style.borderRadius,
+      textDecorationLine: style.textDecorationLine,
+      whiteSpace: style.whiteSpace
+    };
+  })).toEqual({
+    backgroundColor: "rgba(0, 0, 0, 0)",
+    borderWidth: "0px",
+    borderRadius: "0px",
+    textDecorationLine: "underline",
+    whiteSpace: "nowrap"
+  });
+  const stripeReturn = page.getByRole("button", { name: /Volver a Stripe.*Formulario en español/i });
+  await expect(stripeReturn.locator(".donar-provider-stripe-mark")).toBeVisible();
+  await stripeReturn.click();
   await expect(givebutterFrame).toHaveCount(0);
   await expect(page.locator(".donar-stripe-embedded")).toBeVisible();
-  await expect(page.locator(".donar-intro")).toContainText("una organización estadounidense 501(c)(3)");
-  await expect(page.locator(".donar-intro")).not.toContainText("Friends of");
+  await expect(page.locator(".donar-intro")).toContainText(`Friends of ${BRANDING_DISPLAY_NAME} (501c3)`);
 
   // Stripe reuses the Wompi handoff shell: the hosted surface is full-bleed on
   // mobile and aligns to the raised card edges on tablet/desktop. Only the
@@ -764,6 +789,9 @@ test("a terminal Stripe Session failure releases the current browser request ide
   await expect(page.getByRole("alert")).toContainText("Inicie una nueva entrega");
   await page.getByRole("button", { name: "Intentar de nuevo" }).click();
   await expect(page.getByText("Simulación local del formulario alojado por Stripe")).toBeVisible();
+  await expect(page.getByRole("button", {
+    name: /Diezmar con Givebutter.*Formulario en inglés/i
+  })).toBeVisible();
 
   expect(checkoutBodies).toHaveLength(2);
   expect(checkoutBodies[1]).toMatchObject({

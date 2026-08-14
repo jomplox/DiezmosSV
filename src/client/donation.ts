@@ -173,15 +173,14 @@ export function givebutterHostedUrl(
   return params ? `https://givebutter.com/${GIVEBUTTER_CAMPAIGN}?${params.toString()}` : null;
 }
 
-// Public branding names the beneficiary church, not the separate U.S. legal entity.
-// The formal receipt supplies the configured legal name and EIN; this public surface
-// stays neutral unless a genuine public legal-identity seam is introduced.
+// Keep the named introduction aligned with the established production donor copy.
+// The unnamed fallback stays generic because it has no church name to interpolate.
 export function stripeIntro(organizationName: string | null): string {
   const name = organizationName?.trim();
   if (!name) {
-    return "Su diezmo u ofrenda apoya a esta iglesia en El Salvador. Se procesa en EE. UU. a través de una organización estadounidense 501(c)(3) y recibirá un recibo deducible de impuestos en EE. UU. por correo.";
+    return "Su diezmo u ofrenda apoya a esta iglesia en El Salvador. Se procesa en EE. UU. a través de una organización estadounidense 501c3 y recibirá un recibo deducible de impuestos en EE. UU. por correo.";
   }
-  return `Su diezmo u ofrenda apoya a ${name} en El Salvador. Se procesa en EE. UU. a través de una organización estadounidense 501(c)(3) y recibirá un recibo deducible de impuestos en EE. UU. por correo.`;
+  return `Su diezmo u ofrenda apoya a ${name} en El Salvador. Se procesa en EE. UU. a través de Friends of ${name} (501c3) y recibirá un recibo deducible de impuestos en EE. UU. por correo.`;
 }
 
 export function stripeCheckoutBody(input: {

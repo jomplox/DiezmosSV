@@ -4072,8 +4072,7 @@ pre {
   white-space: nowrap;
 }
 
-/* One column for the whole US surface: this control, the Givebutter frame and the
-   promoted escape hatch all measure min(100%, 440px). */
+/* The provider controls and Givebutter frame share the same 440px column. */
 .donar-provider-choice {
   width: min(100%, 440px);
   min-height: 50px;
@@ -4104,17 +4103,6 @@ pre {
   outline-offset: 3px;
 }
 
-/* The return control carries no vendor mark — Stripe's identity is not ours to draw —
-   so its first column stays reserved and empty and both buttons' text shares one left
-   edge. The ← arrow already says "back". */
-.donar-provider-choice-stripe .donar-provider-choice-copy {
-  grid-column: 2;
-}
-
-.donar-provider-choice-stripe .donar-provider-choice-arrow {
-  grid-column: 3;
-}
-
 .donar-provider-choice img {
   display: block;
   width: 30px;
@@ -4122,6 +4110,23 @@ pre {
   border-radius: 8px;
   object-fit: contain;
   background: #febf10;
+}
+
+.donar-provider-stripe-mark {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: #635bff;
+}
+
+.donar-provider-stripe-mark::after {
+  content: "S";
+  color: #ffffff;
+  font-family: Arial, sans-serif;
+  font-size: 19px;
+  font-weight: 700;
 }
 
 .donar-provider-choice-copy {
@@ -4192,24 +4197,7 @@ pre {
   font-size: 12px;
   text-align: center;
   text-underline-offset: 3px;
-}
-
-/* Promoted state of that same hint, once the render budget elapses. Stronger than the
-   hint but deliberately not .primary — the page's strongest CTA belongs to the
-   donation itself, never to the way out of an embed that did not render. */
-.donar-givebutter-fallback {
-  display: grid;
-  place-items: center;
-  width: min(100%, 440px);
-  min-height: 44px;
-  padding: 0 16px;
-  border: 1px solid #000000;
-  border-radius: 999px;
-  color: #000000;
-  background: #ffffff;
-  font-size: 14px;
-  text-align: center;
-  text-decoration: none;
+  white-space: nowrap;
 }
 
 /* The manual Wompi backup link inherits the admin teal .link-button — repaint it

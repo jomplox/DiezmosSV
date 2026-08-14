@@ -636,7 +636,7 @@ export function DonarPage() {
   // way out. Switching back to Stripe cancels this timer and removes the iframe.
   // Layout effect, not a passive one: the reset has to commit before paint, or a second
   // entry (Givebutter → Stripe → Givebutter) paints one frame carrying the previous
-  // session's promoted pill and no placeholder before collapsing to the quiet hint.
+  // session's delayed copy and no placeholder before collapsing to the quiet hint.
   useLayoutEffect(() => {
     if (!usDonation || step !== 2 || usProvider !== "givebutter" || !givebutterFrameUrl) {
       return;
@@ -1399,7 +1399,7 @@ export function DonarPage() {
                         aria-hidden="true"
                       />
                       <span className="donar-provider-choice-copy">
-                        <strong>Dar con Givebutter</strong>
+                        <strong>{stripeGiftType === "TITHE" ? "Diezmar con Givebutter" : "Ofrendar con Givebutter"}</strong>
                         <small>Formulario en inglés</small>
                       </span>
                       <span className="donar-provider-choice-arrow" aria-hidden="true">→</span>
@@ -1418,6 +1418,7 @@ export function DonarPage() {
                       setUsProvider("stripe");
                     }}
                   >
+                    <span className="donar-provider-stripe-mark" aria-hidden="true" />
                     <span className="donar-provider-choice-copy">
                       <strong>Volver a Stripe</strong>
                       <small>Formulario en español</small>
@@ -1427,11 +1428,11 @@ export function DonarPage() {
                   <p className="donar-givebutter-confirmation">
                     Confirme en Givebutter el tipo de entrega, el monto y la frecuencia antes de continuar; estos datos se envían solo como valores iniciales.
                   </p>
-                  {/* The single escape hatch, above the 760px frame: a donor staring at a
-                      blank embed must not have to scroll past it to find the way out. Quiet
-                      hint by default, promoted in place once the render budget elapses. */}
+                  {/* The single escape hatch stays above the 760px frame: a donor staring
+                      at a blank embed must not have to scroll past it to find the way out.
+                      It uses the same quiet, single-line link treatment as Wompi. */}
                   <a
-                    className={givebutterFrameDelayed ? "donar-givebutter-hint donar-givebutter-fallback" : "donar-givebutter-hint"}
+                    className={givebutterFrameDelayed ? "link-button donar-givebutter-hint donar-givebutter-fallback" : "link-button donar-givebutter-hint"}
                     href={givebutterHostedPageUrl}
                     target="_blank"
                     rel="noopener noreferrer"
@@ -1440,12 +1441,9 @@ export function DonarPage() {
                       ? "Abrir Givebutter en otra pestaña"
                       : "¿Problemas con el formulario? Abrir Givebutter"}
                   </a>
-                  {/* The placeholder is positioned against the frame's own box, not the
-                      surface: the escape hatch above grows when promoted, so an offset
-                      measured from the surface would drift up onto the controls. It also
-                      clears once the budget elapses — a frame whose host never answers
-                      would otherwise keep saying "preparando" beside the promoted pill
-                      that says the embed failed. The promoted pill is the only signal. */}
+                  {/* The placeholder is positioned against the frame's own box. It clears
+                      once the budget elapses so a frame whose host never answers does not
+                      keep saying "preparando" beside the explicit fallback link. */}
                   <div className="donar-givebutter-frame-area">
                     {!givebutterFrameLoaded && !givebutterFrameDelayed && (
                       <p className="donar-givebutter-loading" aria-live="polite">

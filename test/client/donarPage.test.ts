@@ -1219,7 +1219,7 @@ describe("Stripe donar page source contract", () => {
   it("shows the production 501c3 explanation and mounts the Stripe form in place", () => {
     const intro = stripeIntro("Iglesia Ejemplo Central");
     expect(donarSource).toContain("stripeIntro(organizationName)");
-    expect(intro).toContain("501(c)(3)");
+    expect(intro).toContain("Friends of Iglesia Ejemplo Central (501c3)");
     // The US door funds the SAME church — the intro says so, never implying a
     // different beneficiary.
     expect(intro).toContain("apoya a Iglesia Ejemplo Central en El Salvador");
@@ -1229,7 +1229,7 @@ describe("Stripe donar page source contract", () => {
 
   it("uses neutral donor copy when public branding has no configured organization", () => {
     expect(stripeIntro(null)).toContain("apoya a esta iglesia en El Salvador");
-    expect(stripeIntro("   ")).toContain("una organización estadounidense 501(c)(3)");
+    expect(stripeIntro("   ")).toContain("una organización estadounidense 501c3");
     expect(stripeIntro(null)).not.toMatch(/ExampleOrganization|ExamplePerson1/);
   });
 
@@ -1269,7 +1269,7 @@ describe("Stripe donar page source contract", () => {
     // Stripe carries the Spanish form and the tax receipt, so it owns the
     // "understand → pay" flow; the alternative follows it in DOM order.
     const stripeForm = branch.indexOf("<StripeDonationForm");
-    const givebutterChoice = branch.indexOf("Dar con Givebutter");
+    const givebutterChoice = branch.indexOf("Ofrendar con Givebutter");
     expect(stripeForm).toBeGreaterThan(-1);
     expect(givebutterChoice).toBeGreaterThan(stripeForm);
     // The move changes nothing about the form's guard or its per-attempt key.
@@ -1284,7 +1284,7 @@ describe("Stripe donar page source contract", () => {
     const choiceRules = [...stylesSource.matchAll(/^\.donar-provider-choice\s*\{[^}]*\}/gm)];
     expect(choiceRules).toHaveLength(1);
     const choiceRule = choiceRules[0][0];
-    // One column for the switch controls, the frame and the promoted escape hatch.
+    // The provider switch controls share the frame's 440px column.
     expect(choiceRule).toContain("width: min(100%, 440px);");
     expect(choiceRule).toContain("min-height: 50px;");
     expect(choiceRule).toContain("border: 1px solid #d8d8d8;");
@@ -1295,15 +1295,9 @@ describe("Stripe donar page source contract", () => {
     // The bundled favicon keeps its brand swatch — that mark IS the recognition.
     expect(stylesSource).toMatch(/\.donar-provider-choice img\s*\{[^}]*background:\s*#febf10;/);
     expect(donarSource).toContain("GIVEBUTTER_ICON_DATA_URI");
-    // Stripe's identity is not ours to draw: the hand-made mark is gone, and the return
-    // button reserves the empty first column so both labels share one left edge.
-    expect(`${donarSource}\n${stylesSource}`).not.toContain("donar-provider-stripe-mark");
-    expect(stylesSource).toMatch(
-      /\.donar-provider-choice-stripe \.donar-provider-choice-copy\s*\{[^}]*grid-column:\s*2;/
-    );
-    expect(stylesSource).toMatch(
-      /\.donar-provider-choice-stripe \.donar-provider-choice-arrow\s*\{[^}]*grid-column:\s*3;/
-    );
+    // Both provider controls carry a recognizable bundled provider mark.
+    expect(donarSource).toContain("donar-provider-stripe-mark");
+    expect(stylesSource).toMatch(/\.donar-provider-stripe-mark\s*\{[^}]*background:\s*#635bff;/);
   });
 
   it("puts one Givebutter escape hatch above the frame instead of two below it", () => {
@@ -1319,21 +1313,22 @@ describe("Stripe donar page source contract", () => {
     expect(hatch).toBeGreaterThan(-1);
     expect(frame).toBeGreaterThan(-1);
     expect(hatch).toBeLessThan(frame);
-    // One anchor, two states — the promoted look is a class + copy swap on that same
+    // One anchor, two states — the delayed copy is a class + copy swap on that same
     // element, never a second link to the same href.
     expect(surface.match(/href=\{givebutterHostedPageUrl\}/g)).toHaveLength(1);
     expect(surface).toContain("¿Problemas con el formulario? Abrir Givebutter");
     expect(surface).toContain("Abrir Givebutter en otra pestaña");
+    expect(surface).toContain('"link-button donar-givebutter-hint');
     // The escape hatch never spends the page's strongest CTA style.
     expect(surface).not.toContain('className="primary');
     // The 760px void gets the shared loading copy until the frame loads — or until the
-    // budget elapses, after which the promoted pill is the only signal. A host that
+    // budget elapses, after which the explicit fallback link is the only signal. A host that
     // never answers must not show "preparando" and "the embed failed" at once.
     expect(surface).toContain("{!givebutterFrameLoaded && !givebutterFrameDelayed && (");
     expect(surface).toContain("DONAR_WIDGET_LOADING_MESSAGE");
   });
 
-  it("lets the render budget promote the escape hatch even after the frame fires load", () => {
+  it("lets the render budget update the escape hatch even after the frame fires load", () => {
     // A cross-origin iframe fires load for the browser's own error documents, so load
     // must only clear the placeholder — it can neither set nor suppress "delayed".
     expect(donarSource).toContain("onLoad={() => setGivebutterFrameLoaded(true)}");
@@ -1342,7 +1337,7 @@ describe("Stripe donar page source contract", () => {
     const timerCallback = donarSource.slice(effectStart, donarSource.indexOf("GIVEBUTTER_RENDER_TIMEOUT_MS", effectStart));
     expect(timerCallback).toContain("setGivebutterFrameDelayed(true)");
     expect(timerCallback).not.toContain("givebutterFrameLoaded");
-    // The delayed flag alone gates the promotion, on the render budget the plan pins.
+    // The delayed flag alone gates the copy change, on the render budget the plan pins.
     expect(donarSource).toContain("givebutterFrameDelayed ?");
     expect(GIVEBUTTER_RENDER_TIMEOUT_MS).toBe(4_000);
   });

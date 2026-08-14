@@ -83,15 +83,15 @@ describe("Stripe donor browser contract", () => {
     expect(stripeSessionIdFromSearch("")).toBeNull();
   });
 
-  it("uses the configured church only as beneficiary and never invents a U.S. legal identity", () => {
+  it("preserves the production U.S. donor introduction", () => {
     expect(STRIPE_MONTHLY_LABEL).toBe("Frecuencia de la entrega");
     expect(STRIPE_FREQ_ONCE_LABEL).toBe("Única");
     expect(STRIPE_FREQ_MONTHLY_LABEL).toBe("Mensual");
     expect(stripeIntro("Iglesia Ejemplo Central")).toBe(
-      "Su diezmo u ofrenda apoya a Iglesia Ejemplo Central en El Salvador. Se procesa en EE. UU. a través de una organización estadounidense 501(c)(3) y recibirá un recibo deducible de impuestos en EE. UU. por correo."
+      "Su diezmo u ofrenda apoya a Iglesia Ejemplo Central en El Salvador. Se procesa en EE. UU. a través de Friends of Iglesia Ejemplo Central (501c3) y recibirá un recibo deducible de impuestos en EE. UU. por correo."
     );
     expect(stripeIntro(null)).toBe(
-      "Su diezmo u ofrenda apoya a esta iglesia en El Salvador. Se procesa en EE. UU. a través de una organización estadounidense 501(c)(3) y recibirá un recibo deducible de impuestos en EE. UU. por correo."
+      "Su diezmo u ofrenda apoya a esta iglesia en El Salvador. Se procesa en EE. UU. a través de una organización estadounidense 501c3 y recibirá un recibo deducible de impuestos en EE. UU. por correo."
     );
   });
 
