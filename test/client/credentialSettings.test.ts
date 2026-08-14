@@ -1,8 +1,16 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, test } from "vitest";
-import type { CredentialStatus, EmailTemplateSettings } from "../../src/client/types";
-import { certificateExpiryStatus, credentialSectionState, credentialSettingsSections } from "../../src/client/credentialSettings";
+import type { CredentialStatus, EmailTemplateSettings, StripeSettingsState } from "../../src/client/types";
+import {
+  certificateExpiryStatus,
+  credentialSectionState,
+  credentialSettingsSections,
+  reconcileStripeOrganizationDraft,
+  resolveStripeOrganizationHydration,
+  stripeOrganizationDirtyPatch,
+  stripeOrganizationPendingWrite
+} from "../../src/client/credentialSettings";
 import { scopedEmailTemplates } from "../../src/client/credentialsPanel";
 
 const credentialsPanelSource = readFileSync(resolve(import.meta.dirname, "../../src/client/credentialsPanel.tsx"), "utf8");
@@ -60,6 +68,80 @@ const status: CredentialStatus = {
     localProxyConfigured: false
   }
 };
+
+const stripeOrganization: StripeSettingsState["configuration"] = {
+  legalName: "Iglesia Elim USA",
+  ein: "12-3456789",
+  timeZone: "America/Chicago",
+  organizationPhone: "+1 555 0100",
+  organizationWebsite: "https://example.org",
+  organizationMailingAddress: "1 Main St\nDallas, TX 75001",
+  signerName: "Pastor",
+  signerTitle: "Tesorero"
+};
+
+describe("Stripe organization owner reconciliation", () => {
+  test("builds a trimmed patch containing only fields dirty from the authoritative baseline", () => {
+    expect(stripeOrganizationDirtyPatch({
+      ...stripeOrganization,
+      legalName: "  Iglesia Elim USA  ",
+      organizationPhone: "  +1 555 0199  "
+    }, stripeOrganization)).toEqual({
+      organizationPhone: "+1 555 0199"
+    });
+
+    expect(stripeOrganizationDirtyPatch(stripeOrganization, stripeOrganization)).toEqual({});
+  });
+
+  test("guards only dirty organization fields the server reports as updated", () => {
+    expect(stripeOrganizationPendingWrite(
+      {
+        legalName: "Iglesia Elim USA Nueva",
+        organizationPhone: "+1 555 0199"
+      },
+      ["STRIPE_RESTRICTED_KEY", "STRIPE_US_PHONE"],
+      1_770_000_000_000
+    )).toEqual({
+      values: { organizationPhone: "+1 555 0199" },
+      savedAt: 1_770_000_000_000
+    });
+
+    expect(stripeOrganizationPendingWrite(
+      { legalName: "Iglesia Elim USA Nueva" },
+      ["STRIPE_RESTRICTED_KEY"],
+      1_770_000_000_000
+    )).toBeNull();
+  });
+
+  test("expires partial pending values and replaces an untouched stale draft with the latest server value", () => {
+    const pending = {
+      values: { organizationPhone: "+1 555 0199" },
+      savedAt: 1_770_000_000_000
+    };
+    const server = { ...stripeOrganization, organizationPhone: "+1 555 0177" };
+    const current = { ...stripeOrganization, organizationPhone: "+1 555 0199" };
+    const baseline = { ...stripeOrganization, organizationPhone: "+1 555 0199" };
+
+    const resolved = resolveStripeOrganizationHydration(server, pending, 1_770_000_120_001);
+
+    expect(resolved).toEqual({ configuration: server, pendingWrite: null });
+    expect(reconcileStripeOrganizationDraft(current, baseline, resolved.configuration)).toEqual(server);
+  });
+
+  test("preserves a local edit made during refresh while accepting fresh untouched fields", () => {
+    const current = { ...stripeOrganization, signerTitle: "Director ejecutivo" };
+    const server = {
+      ...stripeOrganization,
+      organizationWebsite: "https://fresh.example.org",
+      signerTitle: "Cargo remoto"
+    };
+
+    expect(reconcileStripeOrganizationDraft(current, stripeOrganization, server)).toEqual({
+      ...server,
+      signerTitle: "Director ejecutivo"
+    });
+  });
+});
 
 describe("credentialSectionState", () => {
   test("combines Ministerio de Hacienda API and signer credentials into one navigation section", () => {

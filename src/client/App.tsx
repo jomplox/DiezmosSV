@@ -45,7 +45,17 @@ import { passwordResetConfirmValidationMessage } from "./passwordReset";
 import { isDonarGraciasPath, isDonarPath, isStripeResultPath } from "./donation";
 import { DonarGraciasPage, DonarPage } from "./donarPage";
 import { StripeResultPage } from "./stripeResultPage";
-import { type CredentialSettingsSectionId } from "./credentialSettings";
+import {
+  STRIPE_ORGANIZATION_PENDING_WRITE_TTL_MS,
+  createStripeSettingsRequestGate,
+  reconcileStripeOrganizationDraft,
+  resolveStripeOrganizationHydration,
+  stripeOrganizationDirtyPatch,
+  stripeOrganizationPendingWrite,
+  type CredentialSettingsSectionId,
+  type StripeOrganizationConfiguration,
+  type StripeOrganizationPendingWrite
+} from "./credentialSettings";
 import { AnalyticsView } from "./analyticsView";
 import { analyticsRangePresets, type AnalyticsRangePreset, type GiftTypeFilter } from "./analytics";
 import { DonorsView } from "./donorsView";
@@ -165,6 +175,12 @@ interface AutomaticRefreshFlight {
   state: "pending" | "completed";
   followerQueued: boolean;
   retryUsed: boolean;
+}
+
+interface StripeSettingsRefresh {
+  settings: StripeSettingsState;
+  baseline: StripeOrganizationConfiguration | null;
+  commit: (operation: () => void) => boolean;
 }
 
 // The general Documents status picker keeps a combined fiscal failure option. The
@@ -428,6 +444,10 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   // con éxito, con su hora, para que ninguna rehidratación revierta el campo recién
   // guardado mientras dura esa ventana.
   const stripeOrganizationPendingWriteRef = useRef<StripeOrganizationPendingWrite | null>(null);
+  const stripeOrganizationPendingExpiryTimerRef = useRef<number | null>(null);
+  const stripeOrganizationBaselineRef = useRef<StripeOrganizationConfiguration | null>(null);
+  const stripeOrganizationLatestServerRef = useRef<StripeOrganizationConfiguration | null>(null);
+  const stripeSettingsRequestsRef = useRef(createStripeSettingsRequestGate());
   // CRM contacts export customization: period preset (with optional custom range), a
   // gift-type filter, and the selected CSV columns (all on by default).
   const [contactsPeriod, setContactsPeriod] = useState<ContactsPeriod>("todo");
@@ -829,6 +849,17 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     return runAccountOperation(() => api<T>(path, token, options));
   }
 
+  async function fetchStripeSettings(): Promise<StripeSettingsRefresh | null> {
+    const stripeSettingsRequest = stripeSettingsRequestsRef.current.start();
+    const baseline = stripeOrganizationBaselineRef.current;
+    const result = await accountApi<{ stripe: StripeSettingsState }>("/api/settings/stripe");
+    return {
+      settings: result.stripe,
+      baseline,
+      commit: stripeSettingsRequest.commit
+    };
+  }
+
   function commitRefreshState(control: RunActionControl | undefined, operation: () => void): boolean {
     if (control) {
       return control.commit(operation);
@@ -927,9 +958,9 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       commitRefreshState(control, () => setEmissionEnvironment(environmentResult.emissionEnvironment));
     }
     if (view === "credentials" && can(user, "OWNER")) {
-      const [credentialResult, stripeResult, acknowledgmentResult, environmentResult, emailTemplateResult, emailSenderResult, wompiNotificationResult, alertEmailResult] = await Promise.all([
+      const [credentialResult, stripeRefresh, acknowledgmentResult, environmentResult, emailTemplateResult, emailSenderResult, wompiNotificationResult, alertEmailResult] = await Promise.all([
         accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
-        accountApi<{ stripe: StripeSettingsState }>("/api/settings/stripe"),
+        fetchStripeSettings(),
         accountApi<{ acknowledgments: StripeAcknowledgmentReconciliationItem[] }>("/api/settings/stripe/acknowledgments"),
         accountApi<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment"),
         accountApi<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates"),
@@ -939,8 +970,9 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       ]);
       commitRefreshState(control, () => {
         setCredentials(credentialResult.credentials);
-        applyStripeSettings(stripeResult.stripe);
-        setStripeRotationStatusStale(false);
+        if (stripeRefresh && applyStripeSettingsRefresh(stripeRefresh)) {
+          setStripeRotationStatusStale(false);
+        }
         setStripeAcknowledgmentReconciliation(acknowledgmentResult.acknowledgments);
         setEmissionEnvironment(environmentResult.emissionEnvironment);
         applyEmailTemplates(emailTemplateResult.emailTemplates);
@@ -1118,7 +1150,14 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     stripeStatementSearchInputGenerationRef.current += 1;
     annualReportOperationClaimsRef.current.clear();
     automaticRefreshFlightRef.current = null;
+    stripeSettingsRequestsRef.current.invalidate();
     stripeOrganizationPendingWriteRef.current = null;
+    stripeOrganizationBaselineRef.current = null;
+    stripeOrganizationLatestServerRef.current = null;
+    if (stripeOrganizationPendingExpiryTimerRef.current !== null) {
+      window.clearTimeout(stripeOrganizationPendingExpiryTimerRef.current);
+      stripeOrganizationPendingExpiryTimerRef.current = null;
+    }
     setSettledCertificateSearchRevision(certificateSearchInputGenerationRef.current);
     setSettledStripeStatementSearchRevision(stripeStatementSearchInputGenerationRef.current);
     const certificateResetYear = String(new Date().getFullYear());
@@ -2299,51 +2338,52 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
 
   async function updateStripeCredentials() {
     await runAction("stripe-credentials", async (control) => {
-      const organization = {
-        legalName: credentialInput.stripeLegalName,
-        ein: credentialInput.stripeEin,
-        timeZone: credentialInput.stripeTimeZone,
-        organizationPhone: credentialInput.stripeOrganizationPhone,
-        organizationWebsite: credentialInput.stripeOrganizationWebsite,
-        organizationMailingAddress: credentialInput.stripeOrganizationMailingAddress,
-        signerName: credentialInput.stripeSignerName,
-        signerTitle: credentialInput.stripeSignerTitle
-      };
+      const organization = stripeOrganizationFromCredentialInput(credentialInput);
+      const organizationBaseline = stripeOrganizationBaselineRef.current;
+      if (!organizationBaseline) {
+        setToast("Actualice la configuración de Stripe antes de guardar cambios.");
+        return;
+      }
+      const organizationPatch = stripeOrganizationDirtyPatch(organization, organizationBaseline);
       const body = {
         restrictedKey: credentialInput.stripeRestrictedKey,
         publishableKey: credentialInput.stripePublishableKey,
         paymentMethodConfigurationId: credentialInput.stripePaymentMethodConfigurationId,
         billingPortalConfigurationId: credentialInput.stripeBillingPortalConfigurationId,
-        ...organization
+        ...organizationPatch
       };
       const result = await accountApi<{ updated: string[] }>("/api/settings/stripe", { method: "POST", body });
+      stripeSettingsRequestsRef.current.invalidate();
       if (!control.commit(() => {
-        // El guardado publica una versión nueva del Worker, así que el GET de refresco
-        // puede atenderlo un isolate que todavía tiene el env anterior. El formulario se
-        // siembra con los valores que el worker acaba de aceptar, nunca con esa lectura:
-        // rehidratarla revertiría visiblemente el campo recién guardado y el siguiente
-        // guardado reenviaría el valor viejo sobre el nuevo. El mismo riesgo corren las
-        // demás rehidrataciones (botón "Actualizar", refresco automático, carga inicial),
-        // así que se registra lo escrito hasta que el servidor lo confirme.
-        stripeOrganizationPendingWriteRef.current = {
-          values: trimmedStripeOrganization(organization),
-          savedAt: Date.now()
-        };
+        const pendingWrite = stripeOrganizationPendingWrite(organizationPatch, result.updated, Date.now());
+        if (pendingWrite) {
+          stripeOrganizationPendingWriteRef.current = {
+            values: {
+              ...stripeOrganizationPendingWriteRef.current?.values,
+              ...pendingWrite.values
+            },
+            savedAt: pendingWrite.savedAt
+          };
+          stripeOrganizationBaselineRef.current = {
+            ...organizationBaseline,
+            ...pendingWrite.values
+          };
+          scheduleStripeOrganizationPendingExpiry();
+        }
         setCredentialInput((current) => ({
           ...current,
-          ...emptyStripeWriteOnlyInput(),
-          ...stripeOrganizationCredentialInput(organization)
+          ...emptyStripeWriteOnlyInput()
         }));
         setToast(`Configuración de Stripe actualizada: ${result.updated.length}`);
       })) {
         return;
       }
       let credentialResult: { credentials: CredentialStatus };
-      let stripeResult: { stripe: StripeSettingsState };
+      let stripeRefresh: StripeSettingsRefresh | null;
       try {
-        [credentialResult, stripeResult] = await Promise.all([
+        [credentialResult, stripeRefresh] = await Promise.all([
           accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
-          accountApi<{ stripe: StripeSettingsState }>("/api/settings/stripe")
+          fetchStripeSettings()
         ]);
       } catch (error) {
         if (isApiError(error) && error.status === 401) {
@@ -2356,8 +2396,9 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       }
       control.commit(() => {
         setCredentials(credentialResult.credentials);
-        applyStripeSettings(stripeResult.stripe, false);
-        setStripeRotationStatusStale(false);
+        if (stripeRefresh && applyStripeSettingsRefresh(stripeRefresh)) {
+          setStripeRotationStatusStale(false);
+        }
       });
     });
   }
@@ -2368,6 +2409,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
         method: "POST",
         body: { webhookSecretNext: credentialInput.stripeWebhookSecretNext }
       });
+      stripeSettingsRequestsRef.current.invalidate();
       if (!control.commit(() => {
         setCredentialInput((current) => ({ ...current, stripeWebhookSecretNext: "" }));
         setToast("Secreto siguiente preparado");
@@ -2375,11 +2417,11 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
         return;
       }
       let credentialResult: { credentials: CredentialStatus };
-      let stripeResult: { stripe: StripeSettingsState };
+      let stripeRefresh: StripeSettingsRefresh | null;
       try {
-        [credentialResult, stripeResult] = await Promise.all([
+        [credentialResult, stripeRefresh] = await Promise.all([
           accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
-          accountApi<{ stripe: StripeSettingsState }>("/api/settings/stripe")
+          fetchStripeSettings()
         ]);
       } catch (error) {
         if (isApiError(error) && error.status === 401) {
@@ -2393,8 +2435,9 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       }
       control.commit(() => {
         setCredentials(credentialResult.credentials);
-        applyStripeSettings(stripeResult.stripe, false);
-        setStripeRotationStatusStale(false);
+        if (stripeRefresh && applyStripeSettingsRefresh(stripeRefresh)) {
+          setStripeRotationStatusStale(false);
+        }
       });
     });
   }
@@ -2402,19 +2445,21 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   async function promoteStripeWebhookSecret() {
     await runAction("stripe-webhook-promote", async (control) => {
       await accountApi("/api/settings/stripe/webhook-secret/promote", { method: "POST" });
+      stripeSettingsRequestsRef.current.invalidate();
       if (!control.commit(() => {
         setStripeRotationStatusStale(true);
         setToast("Secreto preparado promovido");
       })) return;
       try {
-        const [credentialResult, stripeResult] = await Promise.all([
+        const [credentialResult, stripeRefresh] = await Promise.all([
           accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
-          accountApi<{ stripe: StripeSettingsState }>("/api/settings/stripe")
+          fetchStripeSettings()
         ]);
         control.commit(() => {
           setCredentials(credentialResult.credentials);
-          applyStripeSettings(stripeResult.stripe, false);
-          setStripeRotationStatusStale(false);
+          if (stripeRefresh && applyStripeSettingsRefresh(stripeRefresh)) {
+            setStripeRotationStatusStale(false);
+          }
         });
       } catch (error) {
         if (isApiError(error) && error.status === 401) throw error;
@@ -2428,19 +2473,21 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   async function cancelStripeWebhookSecret() {
     await runAction("stripe-webhook-cancel", async (control) => {
       await accountApi("/api/settings/stripe/webhook-secret/cancel", { method: "POST" });
+      stripeSettingsRequestsRef.current.invalidate();
       if (!control.commit(() => {
         setStripeRotationStatusStale(true);
         setToast("Secreto preparado cancelado");
       })) return;
       try {
-        const [credentialResult, stripeResult] = await Promise.all([
+        const [credentialResult, stripeRefresh] = await Promise.all([
           accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
-          accountApi<{ stripe: StripeSettingsState }>("/api/settings/stripe")
+          fetchStripeSettings()
         ]);
         control.commit(() => {
           setCredentials(credentialResult.credentials);
-          applyStripeSettings(stripeResult.stripe, false);
-          setStripeRotationStatusStale(false);
+          if (stripeRefresh && applyStripeSettingsRefresh(stripeRefresh)) {
+            setStripeRotationStatusStale(false);
+          }
         });
       } catch (error) {
         if (isApiError(error) && error.status === 401) throw error;
@@ -2493,18 +2540,70 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     setEmailTemplateDraft(cloneEmailTemplates(settings.templates));
   }
 
-  function applyStripeSettings(settings: StripeSettingsState, hydrateConfiguration = true) {
-    setStripeSettings(settings);
-    if (hydrateConfiguration) {
-      // `stripeSettings` conserva siempre la lectura cruda del servidor; solo el
-      // formulario se protege de una lectura previa a la propagación.
+  function scheduleStripeOrganizationPendingExpiry() {
+    if (stripeOrganizationPendingExpiryTimerRef.current !== null) {
+      window.clearTimeout(stripeOrganizationPendingExpiryTimerRef.current);
+      stripeOrganizationPendingExpiryTimerRef.current = null;
+    }
+    const pendingWrite = stripeOrganizationPendingWriteRef.current;
+    if (!pendingWrite) return;
+    const delay = Math.max(
+      0,
+      pendingWrite.savedAt + STRIPE_ORGANIZATION_PENDING_WRITE_TTL_MS - Date.now() + 1
+    );
+    stripeOrganizationPendingExpiryTimerRef.current = window.setTimeout(() => {
+      stripeOrganizationPendingExpiryTimerRef.current = null;
+      if (stripeOrganizationPendingWriteRef.current !== pendingWrite) {
+        scheduleStripeOrganizationPendingExpiry();
+        return;
+      }
+      const latestServerConfiguration = stripeOrganizationLatestServerRef.current;
+      if (latestServerConfiguration) {
+        const baseline = stripeOrganizationBaselineRef.current ?? latestServerConfiguration;
+        const resolved = resolveStripeOrganizationHydration(latestServerConfiguration, pendingWrite, Date.now());
+        if (resolved.pendingWrite) {
+          scheduleStripeOrganizationPendingExpiry();
+          return;
+        }
+        stripeOrganizationPendingWriteRef.current = null;
+        stripeOrganizationBaselineRef.current = resolved.configuration;
+        setCredentialInput((current) => {
+          const currentOrganization = stripeOrganizationFromCredentialInput(current);
+          const reconciled = reconcileStripeOrganizationDraft(currentOrganization, baseline, resolved.configuration);
+          return { ...current, ...stripeOrganizationCredentialInput(reconciled) };
+        });
+      }
+      void fetchStripeSettings()
+        .then((refresh) => {
+          if (refresh) applyStripeSettingsRefresh(refresh);
+        })
+        .catch((error) => {
+          if (!(error instanceof StaleAccountStateError)) setStripeRotationStatusStale(true);
+        });
+    }, delay);
+  }
+
+  function applyStripeSettingsRefresh(refresh: StripeSettingsRefresh): boolean {
+    return refresh.commit(() => {
+      const { settings } = refresh;
+      setStripeSettings(settings);
+      stripeOrganizationLatestServerRef.current = settings.configuration;
       const resolved = resolveStripeOrganizationHydration(settings.configuration, stripeOrganizationPendingWriteRef.current, Date.now());
       stripeOrganizationPendingWriteRef.current = resolved.pendingWrite;
-      setCredentialInput((current) => ({
-        ...current,
-        ...stripeOrganizationCredentialInput(resolved.configuration)
-      }));
-    }
+      const baseline = refresh.baseline ?? stripeOrganizationBaselineRef.current;
+      setCredentialInput((current) => {
+        const currentOrganization = stripeOrganizationFromCredentialInput(current);
+        const reconciled = baseline
+          ? reconcileStripeOrganizationDraft(currentOrganization, baseline, resolved.configuration)
+          : resolved.configuration;
+        return {
+          ...current,
+          ...stripeOrganizationCredentialInput(reconciled)
+        };
+      });
+      stripeOrganizationBaselineRef.current = resolved.configuration;
+      scheduleStripeOrganizationPendingExpiry();
+    });
   }
 
   function applyEmailSender(sender: EmailSenderState) {
@@ -3170,9 +3269,9 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
             onBootstrapWriter={bootstrapCredentialWriter}
             runAccountOperation={runAccountOperation}
             onRefresh={async () => {
-              const [credentialResult, stripeResult, acknowledgmentResult, environmentResult, emailTemplateResult, emailSenderResult, wompiNotificationResult, alertEmailResult] = await Promise.all([
+              const [credentialResult, stripeRefresh, acknowledgmentResult, environmentResult, emailTemplateResult, emailSenderResult, wompiNotificationResult, alertEmailResult] = await Promise.all([
                 accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
-                accountApi<{ stripe: StripeSettingsState }>("/api/settings/stripe"),
+                fetchStripeSettings(),
                 accountApi<{ acknowledgments: StripeAcknowledgmentReconciliationItem[] }>("/api/settings/stripe/acknowledgments"),
                 accountApi<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment"),
                 accountApi<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates"),
@@ -3181,8 +3280,9 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
                 accountApi<AlertEmailState>("/api/settings/alert-email")
               ]);
               setCredentials(credentialResult.credentials);
-              applyStripeSettings(stripeResult.stripe);
-              setStripeRotationStatusStale(false);
+              if (stripeRefresh && applyStripeSettingsRefresh(stripeRefresh)) {
+                setStripeRotationStatusStale(false);
+              }
               setStripeAcknowledgmentReconciliation(acknowledgmentResult.acknowledgments);
               setEmissionEnvironment(environmentResult.emissionEnvironment);
               applyEmailTemplates(emailTemplateResult.emailTemplates);
@@ -4956,10 +5056,9 @@ function emptyStripeWriteOnlyInput(): Pick<
   };
 }
 
-// Los ocho campos de la organización de Stripe se precargan del servidor y se
-// envían en cada guardado, así que un reinicio del formulario que los vacíe hace
-// que el siguiente guardado los mande en blanco y el worker lo rechace. Todo
-// reinicio que no rehidrate desde /api/settings/stripe debe conservarlos.
+// Los ocho campos de la organización de Stripe se precargan del servidor. Un reinicio
+// ajeno a Stripe debe conservar cualquier edición local para que el parche posterior
+// pueda compararla con la última línea base aceptada del servidor.
 function preservedStripeOrganizationInput(
   current: CredentialFormInput
 ): ReturnType<typeof stripeOrganizationCredentialInput> {
@@ -4975,68 +5074,19 @@ function preservedStripeOrganizationInput(
   };
 }
 
-type StripeOrganizationConfiguration = StripeSettingsState["configuration"];
-
-const STRIPE_ORGANIZATION_FIELDS: Array<keyof StripeOrganizationConfiguration> = [
-  "legalName",
-  "ein",
-  "timeZone",
-  "organizationPhone",
-  "organizationWebsite",
-  "organizationMailingAddress",
-  "signerName",
-  "signerTitle"
-];
-
-export function trimmedStripeOrganization(
-  organization: Record<keyof StripeOrganizationConfiguration, string>
+function stripeOrganizationFromCredentialInput(
+  input: CredentialFormInput
 ): StripeOrganizationConfiguration {
   return {
-    legalName: organization.legalName.trim(),
-    ein: organization.ein.trim(),
-    timeZone: organization.timeZone.trim(),
-    organizationPhone: organization.organizationPhone.trim(),
-    organizationWebsite: organization.organizationWebsite.trim(),
-    organizationMailingAddress: organization.organizationMailingAddress.trim(),
-    signerName: organization.signerName.trim(),
-    signerTitle: organization.signerTitle.trim()
+    legalName: input.stripeLegalName,
+    ein: input.stripeEin,
+    timeZone: input.stripeTimeZone,
+    organizationPhone: input.stripeOrganizationPhone,
+    organizationWebsite: input.stripeOrganizationWebsite,
+    organizationMailingAddress: input.stripeOrganizationMailingAddress,
+    signerName: input.stripeSignerName,
+    signerTitle: input.stripeSignerTitle
   };
-}
-
-export interface StripeOrganizationPendingWrite {
-  values: StripeOrganizationConfiguration;
-  savedAt: number;
-}
-
-// La propagación de una versión nueva del Worker se mide en segundos. Pasado este plazo
-// una lectura que sigue sin coincidir ya no se explica por la propagación: la explicación
-// probable es que otra persona propietaria cambió esos campos, y seguir superponiendo lo
-// que este cliente escribió ocultaría su trabajo y lo revertiría en el próximo guardado.
-export const STRIPE_ORGANIZATION_PENDING_WRITE_TTL_MS = 120_000;
-
-// Un guardado de la organización de Stripe publica una versión nueva del Worker y
-// GET /api/settings/stripe lee `env`, así que durante la propagación la lectura puede
-// devolver los valores anteriores. Mientras haya una escritura pendiente vigente, esta
-// función la superpone sobre la lectura del servidor; cuando el servidor ya devuelve los
-// ocho campos escritos —o cuando venció el plazo— la escritura pendiente se descarta.
-export function resolveStripeOrganizationHydration(
-  configuration: StripeOrganizationConfiguration,
-  pendingWrite: StripeOrganizationPendingWrite | null,
-  now: number
-): { configuration: StripeOrganizationConfiguration; pendingWrite: StripeOrganizationPendingWrite | null } {
-  if (!pendingWrite) {
-    return { configuration, pendingWrite: null };
-  }
-  if (now - pendingWrite.savedAt > STRIPE_ORGANIZATION_PENDING_WRITE_TTL_MS) {
-    return { configuration, pendingWrite: null };
-  }
-  const propagated = STRIPE_ORGANIZATION_FIELDS.every(
-    (field) => (configuration?.[field] ?? "").trim() === pendingWrite.values[field].trim()
-  );
-  if (propagated) {
-    return { configuration, pendingWrite: null };
-  }
-  return { configuration: { ...configuration, ...pendingWrite.values }, pendingWrite };
 }
 
 function stripeOrganizationCredentialInput(
