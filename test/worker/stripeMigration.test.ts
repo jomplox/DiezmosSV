@@ -217,6 +217,68 @@ describe("Stripe U.S. donation persistence", () => {
     });
   });
 
+  it("backfills email evidence on a legacy row the provider already saw", async () => {
+    const evidence = JSON.stringify({ version: 1, subject: "Asunto", text: "Cuerpo", html: "<p>Cuerpo</p>" });
+    const legacyFailure = {
+      id: "annual_email_legacy_dispatched",
+      donorKey: "caro@example.org",
+      snapshotHash: "c".repeat(64),
+      dispatchStartedAt: "2026-01-01T00:00:00.000Z"
+    };
+
+    // 0041 alone wedges this row: its exemption also demanded a null
+    // dispatch_started_at, which no retry-safe FAILED row carries.
+    const wedged = track(openDatabases, migratedDatabaseThrough("0041"));
+    insertRetrySafeAnnualFailure(wedged, legacyFailure);
+    await expect(claimStripeAnnualStatementDelivery(sqliteD1(wedged), {
+      id: legacyFailure.id,
+      claimId: "wedged_claim",
+      emailContentJson: evidence,
+      now: "2026-02-01T12:00:00.000Z"
+    })).rejects.toThrow(/stripe_annual_statement_email_content_immutable/);
+
+    const database = track(openDatabases, migratedDatabase());
+    insertRetrySafeAnnualFailure(database, legacyFailure);
+    const claimed = await claimStripeAnnualStatementDelivery(sqliteD1(database), {
+      id: legacyFailure.id,
+      claimId: "repaired_claim",
+      emailContentJson: evidence,
+      now: "2026-02-01T12:00:00.000Z"
+    });
+    expect(claimed).toMatchObject({
+      status: "PROCESSING",
+      processing_claim_id: "repaired_claim",
+      email_content_json: evidence
+    });
+
+    // Write-once still holds for the row that now carries evidence, and the
+    // status guard still keeps content out of a SENT row.
+    expect(() => database.prepare(
+      "UPDATE stripe_annual_statement_deliveries SET email_content_json = ? WHERE id = ?"
+    ).run(JSON.stringify({ version: 1, subject: "Otro", text: "Otro", html: "Otro" }), legacyFailure.id))
+      .toThrow(/stripe_annual_statement_email_content_immutable/);
+    expect(() => database.prepare(
+      "UPDATE stripe_annual_statement_deliveries SET email_content_json = NULL WHERE id = ?"
+    ).run(legacyFailure.id)).toThrow(/stripe_annual_statement_email_content_immutable/);
+    database.prepare(
+      `INSERT INTO stripe_annual_statement_deliveries (
+         id, year, livemode, donor_key, donor_name, donor_email,
+         snapshot_hash, snapshot_json, revision, status, attempt_count,
+         dispatch_started_at, provider_id_hash, sent_at, created_at, updated_at
+       ) VALUES ('annual_email_sent', 2025, 0, 'dora@example.org', 'Dora', 'dora@example.org',
+         ?, '{"version":2}', 1, 'SENT', 1, ?, 'provider_hash', ?, ?, ?)`
+    ).run(
+      "d".repeat(64),
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-01T00:00:01.000Z",
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-01T00:00:01.000Z"
+    );
+    expect(() => database.prepare(
+      "UPDATE stripe_annual_statement_deliveries SET email_content_json = ? WHERE id = 'annual_email_sent'"
+    ).run(evidence)).toThrow(/stripe_annual_statement_email_content_immutable/);
+  });
+
   it("upgrades the exact 0031 schema without mutating historical migrations", () => {
     expect(existsSync(migrationPath)).toBe(true);
     const database = track(openDatabases, migratedDatabaseThrough("0031"));
@@ -651,6 +713,29 @@ function insertAnnualStatement(
     id.padEnd(64, "0").slice(0, 64),
     options.revision ?? 1,
     options.supersedesDeliveryId ?? null
+  );
+}
+
+function insertRetrySafeAnnualFailure(
+  database: DatabaseSync,
+  row: { id: string; donorKey: string; snapshotHash: string; dispatchStartedAt: string }
+): void {
+  database.prepare(
+    `INSERT INTO stripe_annual_statement_deliveries (
+       id, year, livemode, donor_key, donor_name, donor_email,
+       snapshot_hash, snapshot_json, revision, supersedes_delivery_id,
+       status, attempt_count, dispatch_started_at, failure_code, retry_safe,
+       created_at, updated_at
+     ) VALUES (?, 2025, 0, ?, 'Legacy Donor', ?, ?, '{"version":2}', 1, NULL,
+       'FAILED', 1, ?, 'EMAIL_NOT_SENT', 1, ?, ?)`
+  ).run(
+    row.id,
+    row.donorKey,
+    row.donorKey,
+    row.snapshotHash,
+    row.dispatchStartedAt,
+    row.dispatchStartedAt,
+    row.dispatchStartedAt
   );
 }
 
