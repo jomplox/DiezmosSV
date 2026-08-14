@@ -1,8 +1,9 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, test } from "vitest";
-import type { CredentialStatus } from "../../src/client/types";
+import type { CredentialStatus, EmailTemplateSettings } from "../../src/client/types";
 import { certificateExpiryStatus, credentialSectionState, credentialSettingsSections } from "../../src/client/credentialSettings";
+import { scopedEmailTemplates } from "../../src/client/credentialsPanel";
 
 const credentialsPanelSource = readFileSync(resolve(import.meta.dirname, "../../src/client/credentialsPanel.tsx"), "utf8");
 const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
@@ -306,20 +307,54 @@ describe("Plantillas country-scoped saving (source contract)", () => {
     expect(editor).not.toContain("disabled={busy || !complete}");
   });
 
-  test("keeps the other country's saved values in the full PUT the endpoint requires", () => {
+  test("declares the country on the PUT and sends only that country's templates", () => {
+    // Rellenar el otro grupo con la copia cargada al abrir el panel revertía en silencio
+    // lo que otro propietario hubiera guardado mientras tanto; ahora fusiona el servidor.
     const save = appSource.slice(
       appSource.indexOf("async function updateEmailTemplates("),
       appSource.indexOf("async function updateEmailSender(")
     );
 
-    expect(save).toContain("...(emailTemplates?.templates ?? {}),");
-    expect(save).toContain("...scopedEmailTemplates(emailTemplates, emailTemplateDraft, scope)");
+    expect(save).toContain("body: { scope, templates: scopedEmailTemplates(emailTemplates, emailTemplateDraft, scope) }");
+    expect(save).not.toContain("...(emailTemplates?.templates ?? {}),");
     expect(save).not.toContain("body: { templates: emailTemplateDraft }");
     // El editor y el envío deben particionar igual, o una plantilla visible en un grupo
     // quedaría fuera del guardado de ese grupo.
     expect(credentialsPanelSource).toContain('isEmailTemplateScope("SV_CDE", definition.scope)');
     expect(credentialsPanelSource).toContain('isEmailTemplateScope("US_STRIPE", definition.scope)');
     expect(credentialsPanelSource).toContain("isEmailTemplateScope(scope, definition.scope)");
+  });
+
+  test("each button's payload carries its own group and nothing from the other", () => {
+    const settings: EmailTemplateSettings = {
+      definitions: [
+        { type: "dteReceipt", scope: "SV_CDE", label: "", description: "", defaultSubject: "", defaultBody: "", placeholders: [] },
+        { type: "dteInvalidation", scope: "SV_CDE", label: "", description: "", defaultSubject: "", defaultBody: "", placeholders: [] },
+        { type: "stripeAcknowledgment", scope: "US_STRIPE", label: "", description: "", defaultSubject: "", defaultBody: "", placeholders: [] },
+        { type: "stripeRefund", scope: "US_STRIPE", label: "", description: "", defaultSubject: "", defaultBody: "", placeholders: [] },
+        { type: "stripeAnnualStatement", scope: "US_STRIPE", label: "", description: "", defaultSubject: "", defaultBody: "", placeholders: [] }
+      ],
+      placeholders: [],
+      templates: {}
+    };
+    const draft = Object.fromEntries(
+      ["dteReceipt", "dteInvalidation", "stripeAcknowledgment", "stripeRefund", "stripeAnnualStatement"]
+        .map((type) => [type, { subject: `${type} asunto`, body: `${type} cuerpo` }])
+    );
+
+    expect(Object.keys(scopedEmailTemplates(settings, draft, "SV_CDE"))).toEqual([
+      "dteReceipt",
+      "dteInvalidation"
+    ]);
+    expect(Object.keys(scopedEmailTemplates(settings, draft, "US_STRIPE"))).toEqual([
+      "stripeAcknowledgment",
+      "stripeRefund",
+      "stripeAnnualStatement"
+    ]);
+    expect(scopedEmailTemplates(settings, draft, "US_STRIPE").stripeRefund).toEqual({
+      subject: "stripeRefund asunto",
+      body: "stripeRefund cuerpo"
+    });
   });
 });
 

@@ -2528,15 +2528,13 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
 
   async function updateEmailTemplates(scope: EmailTemplateScope) {
     await runAction("email-templates", async (control) => {
-      // Cada botón anuncia un país y debe escribir solo ese país: el otro grupo viaja
-      // con los valores ya guardados en el servidor, no con el borrador en pantalla.
-      const templates = {
-        ...(emailTemplates?.templates ?? {}),
-        ...scopedEmailTemplates(emailTemplates, emailTemplateDraft, scope)
-      };
+      // Cada botón anuncia un país y debe escribir solo ese país. El servidor fusiona el
+      // grupo enviado sobre lo que tiene guardado en ese instante; completar aquí el otro
+      // grupo con la copia cargada al abrir el panel revertiría lo que otro propietario
+      // guardó mientras tanto.
       const result = await accountApi<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates", {
         method: "PUT",
-        body: { templates }
+        body: { scope, templates: scopedEmailTemplates(emailTemplates, emailTemplateDraft, scope) }
       });
       control.commit(() => {
         setEmailTemplates(result.emailTemplates);

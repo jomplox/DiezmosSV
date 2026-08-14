@@ -920,7 +920,127 @@ describe("email template settings", () => {
       }
     });
   });
+
+  it("writes only the submitted country group and keeps what the other owner just saved", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    // Propietario 2 guarda EE. UU. mientras el panel de propietario 1 sigue abierto con
+    // la copia anterior.
+    const usResponse = await putEmailTemplates(db, {
+      scope: "US_STRIPE",
+      templates: {
+        stripeAcknowledgment: { subject: "Constancia inmediata v2", body: "Gracias, {{donante}}." },
+        stripeRefund: { subject: "Corrección v2", body: "Monto neto {{montoNeto}}." },
+        stripeAnnualStatement: { subject: "Constancia anual v2", body: "Total {{totalNeto}}." }
+      }
+    });
+
+    expect(usResponse.status).toBe(200);
+
+    // Propietario 1 guarda El Salvador sin haber visto la escritura de propietario 2.
+    const svResponse = await putEmailTemplates(db, {
+      scope: "SV_CDE",
+      templates: {
+        dteReceipt: { subject: "CDE {{numeroControl}} emitido", body: "Se emitió {{numeroControl}}." },
+        dteInvalidation: { subject: "CDE {{numeroControl}} invalidado", body: "Quedó {{estado}}." }
+      }
+    });
+
+    expect(svResponse.status).toBe(200);
+    await expect(svResponse.json()).resolves.toMatchObject({
+      emailTemplates: {
+        templates: {
+          dteReceipt: { subject: "CDE {{numeroControl}} emitido" },
+          dteInvalidation: { subject: "CDE {{numeroControl}} invalidado" },
+          stripeAcknowledgment: { subject: "Constancia inmediata v2", body: "Gracias, {{donante}}." },
+          stripeRefund: { subject: "Corrección v2" },
+          stripeAnnualStatement: { subject: "Constancia anual v2" }
+        }
+      }
+    });
+  });
+
+  it("still validates the submitted group when the save is scoped", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const blankBody = await putEmailTemplates(db, {
+      scope: "US_STRIPE",
+      templates: {
+        stripeAcknowledgment: { subject: "Constancia inmediata", body: "   " },
+        stripeRefund: { subject: "Corrección", body: "Monto neto {{montoNeto}}." },
+        stripeAnnualStatement: { subject: "Constancia anual", body: "Total {{totalNeto}}." }
+      }
+    });
+
+    expect(blankBody.status).toBe(400);
+    await expect(blankBody.json()).resolves.toMatchObject({
+      error: "invalid_email_templates",
+      message: "Complete asunto y cuerpo para: Constancia inmediata."
+    });
+
+    const badSubject = await putEmailTemplates(db, {
+      scope: "SV_CDE",
+      templates: {
+        dteReceipt: { subject: "Asunto\r\ninyectado", body: "Se emitió {{numeroControl}}." },
+        dteInvalidation: { subject: "CDE invalidado", body: "Quedó {{estado}}." }
+      }
+    });
+
+    expect(badSubject.status).toBe(400);
+    await expect(badSubject.json()).resolves.toMatchObject({ error: "invalid_email_templates" });
+
+    // Una plantilla del grupo enviado que falta tampoco puede colarse con el valor guardado.
+    const missingTemplate = await putEmailTemplates(db, {
+      scope: "SV_CDE",
+      templates: {
+        dteReceipt: { subject: "CDE emitido", body: "Se emitió {{numeroControl}}." }
+      }
+    });
+
+    expect(missingTemplate.status).toBe(400);
+    await expect(missingTemplate.json()).resolves.toMatchObject({
+      message: "Complete la plantilla: Invalidación de comprobante."
+    });
+
+    expect(db.settings).not.toContainEqual(expect.objectContaining({ key: "email_templates_json" }));
+  });
+
+  it("rejects an unrecognized scope instead of falling back to a full replace", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const response = await putEmailTemplates(db, {
+      scope: "SV",
+      templates: {
+        dteReceipt: { subject: "CDE emitido", body: "Se emitió {{numeroControl}}." },
+        dteInvalidation: { subject: "CDE invalidado", body: "Quedó {{estado}}." }
+      }
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "invalid_email_templates",
+      message: "Grupo de plantillas de correo no reconocido."
+    });
+    expect(db.settings).not.toContainEqual(expect.objectContaining({ key: "email_templates_json" }));
+  });
 });
+
+async function putEmailTemplates(db: InMemoryD1, body: unknown): Promise<Response> {
+  return worker.fetch(
+    new Request("https://example.org/api/settings/email-templates", {
+      method: "PUT",
+      headers: {
+        Authorization: "Bearer test-token",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    }),
+    env(db)
+  );
+}
 
 describe("email sender setting", () => {
   it("lets owners customize and read back the visible sender name and Reply-To address", async () => {

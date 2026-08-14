@@ -43,7 +43,7 @@ import {
   normalizeEmailSenderName,
   resolveEmailReplyToAddress
 } from "./services/emailSender";
-import { DEFAULT_EMAIL_TEMPLATES, EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateValidationError, emailTemplateResponse, normalizeEmailTemplateSettings, parseEmailTemplates } from "./services/emailTemplates";
+import { DEFAULT_EMAIL_TEMPLATES, EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateValidationError, emailTemplateResponse, mergeScopedEmailTemplates, normalizeEmailTemplateSettings, parseEmailTemplateScope, parseEmailTemplates } from "./services/emailTemplates";
 import { resolveDonationIntentBinding } from "./services/donationIntentBinding";
 import { issuanceFailureEvidence } from "./services/issuanceFailure";
 import { createStripeGateway, stripeWebhookSecretGeneration, StripeWebhookSignatureError } from "./services/stripeClient";
@@ -3330,9 +3330,19 @@ async function handleEmailTemplates(ctx: ApiRouteContext): Promise<Response> {
     return methodNotAllowed();
   }
   const actor = ctx.actor!;
-  const body = (await readJsonObject(ctx.request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { templates?: unknown };
+  const body = (await readJsonObject(ctx.request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { templates?: unknown; scope?: unknown };
   try {
-    const templates = normalizeEmailTemplateSettings(body.templates);
+    // Sin `scope` el cuerpo reemplaza las cinco plantillas, como siempre. Con `scope`
+    // solo se escribe ese grupo sobre lo guardado en este instante, para que un guardado
+    // por país no arrastre la copia que el panel del otro propietario cargó al abrirse.
+    const scope = body.scope === undefined ? null : parseEmailTemplateScope(body.scope);
+    const templates = scope === null
+      ? normalizeEmailTemplateSettings(body.templates)
+      : mergeScopedEmailTemplates(
+        parseEmailTemplates(await ctx.repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY)),
+        body.templates,
+        scope
+      );
     await ctx.repo.setSetting(EMAIL_TEMPLATES_SETTING_KEY, JSON.stringify(templates), actor.id);
     await ctx.repo.createAudit({
       actorType: "USER",

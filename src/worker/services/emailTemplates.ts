@@ -228,6 +228,35 @@ export function normalizeEmailTemplateSettings(input: unknown): EmailTemplateSet
   return normalized;
 }
 
+// El editor guarda un país a la vez, pero normalizeEmailTemplateSettings exige las cinco
+// plantillas. Fusionar en el cliente obligaba a completar el otro grupo con la copia que
+// ese panel cargó al abrirse, así que dos propietarios editando países distintos se pisaban
+// el trabajo. La fusión ocurre aquí, contra lo que hay guardado en este instante.
+export function parseEmailTemplateScope(value: unknown): EmailTemplateScope {
+  if (value === "SV_CDE" || value === "US_STRIPE") {
+    return value;
+  }
+  throw new EmailTemplateValidationError("Grupo de plantillas de correo no reconocido.");
+}
+
+export function mergeScopedEmailTemplates(
+  stored: EmailTemplateSettings,
+  submitted: unknown,
+  scope: EmailTemplateScope
+): EmailTemplateSettings {
+  if (!isRecord(submitted)) {
+    throw new EmailTemplateValidationError("Ingrese las plantillas de correo.");
+  }
+  const merged: Record<string, unknown> = { ...stored };
+  for (const definition of EMAIL_TEMPLATE_DEFINITIONS) {
+    if (definition.scope !== scope) continue;
+    merged[definition.type] = submitted[definition.type];
+  }
+  // Las cinco pasan por la validación de siempre: el grupo enviado se valida y el otro
+  // se reconfirma tal como está guardado.
+  return normalizeEmailTemplateSettings(merged);
+}
+
 export function renderEmailTemplate(template: EmailTemplateValue, record: DteDocumentRecord): { subject: string; text: string; formattedText: string } {
   return renderEmailTemplateValue(template, placeholderValues(record));
 }
