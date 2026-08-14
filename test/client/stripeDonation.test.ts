@@ -114,7 +114,7 @@ describe("Stripe donor page source contract", () => {
       donarSource.indexOf("{/* US Stripe step"),
       donarSource.indexOf("{/* Paso 3", donarSource.indexOf("{/* US Stripe step"))
     );
-    expect(usBlock).toContain('title="Formulario de donación Givebutter"');
+    expect(usBlock).toContain('title="Formulario de donación Givebutter (en inglés)"');
     expect(usBlock).not.toContain("payment_method_types");
     expect(stripeFormSource).toContain("<EmbeddedCheckoutProvider");
     expect(stripeFormSource).toContain("<EmbeddedCheckout />");

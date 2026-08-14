@@ -440,7 +440,12 @@ export function DonarPage() {
   const [monthly, setMonthly] = useState(false);
   const [stripeGiftType, setStripeGiftType] = useState<StripeGiftType>("TITHE");
   const [usProvider, setUsProvider] = useState<"stripe" | "givebutter">("stripe");
-  const [givebutterFrameStatus, setGivebutterFrameStatus] = useState<"loading" | "ready" | "delayed">("loading");
+  // Two independent facts about Givebutter's embed, deliberately not one status:
+  // "loaded" only says the frame fired onLoad (it hides the loading placeholder), and
+  // "delayed" says the render budget elapsed (it promotes the escape hatch). Folding
+  // them together let a load event suppress the escape hatch — see the timer effect.
+  const [givebutterFrameLoaded, setGivebutterFrameLoaded] = useState(false);
+  const [givebutterFrameDelayed, setGivebutterFrameDelayed] = useState(false);
   const stripeAttemptRef = useRef<{ fingerprint: string; requestId: string } | null>(null);
   const [stripeSessionAttempt, setStripeSessionAttempt] = useState<{
     fingerprint: string;
@@ -462,6 +467,12 @@ export function DonarPage() {
   // summary's Editar control on an embedded handoff step.
   const heroInputRef = useRef<HTMLInputElement | null>(null);
   const summaryEditRef = useRef<HTMLButtonElement | null>(null);
+  // The two US provider switches unmount the very button that was clicked, so focus
+  // has to be handed to the first control of the surface that replaces it. The flag
+  // keeps the initial mount of Paso 2 alone — only a real switch moves focus.
+  const givebutterChoiceRef = useRef<HTMLButtonElement | null>(null);
+  const stripeReturnRef = useRef<HTMLButtonElement | null>(null);
+  const usProviderSwitchedRef = useRef(false);
 
   // When to render the Stripe wizard instead of the SV fiscal steps: the EE.
   // UU. door, OR the país=US safety net on the SV form (harmless belt-and-braces).
@@ -614,18 +625,22 @@ export function DonarPage() {
     document.head.appendChild(link);
   }, [door, usDonation]);
 
-  // Givebutter's embed is mounted only after the donor explicitly selects it. A
-  // slow frame exposes the same hosted-page escape hatch as the production form;
-  // switching back to Stripe cancels this timer and removes the iframe entirely.
+  // Givebutter's embed is mounted only after the donor explicitly selects it, and this
+  // timer is authoritative: the render budget promotes the hosted-page escape hatch
+  // whether or not the frame reported load. A cross-origin iframe fires load for the
+  // browser's own error documents too (deleted campaign, blocked host, dropped
+  // network), so load is never proof that the embed rendered and must not suppress the
+  // way out. Switching back to Stripe cancels this timer and removes the iframe.
   useEffect(() => {
     if (!usDonation || step !== 2 || usProvider !== "givebutter") {
       return;
     }
     let cancelled = false;
-    setGivebutterFrameStatus("loading");
+    setGivebutterFrameLoaded(false);
+    setGivebutterFrameDelayed(false);
     const timeout = window.setTimeout(() => {
       if (!cancelled) {
-        setGivebutterFrameStatus((status) => status === "ready" ? status : "delayed");
+        setGivebutterFrameDelayed(true);
       }
     }, GIVEBUTTER_RENDER_TIMEOUT_MS);
     return () => {
@@ -633,6 +648,17 @@ export function DonarPage() {
       window.clearTimeout(timeout);
     };
   }, [givebutterFrameUrl, step, usDonation, usProvider]);
+
+  // A provider switch unmounts the button that was just activated; without this,
+  // focus falls to <body> and the donor loses their place mid-donation.
+  useEffect(() => {
+    if (!usProviderSwitchedRef.current) {
+      return;
+    }
+    usProviderSwitchedRef.current = false;
+    const target = usProvider === "givebutter" ? stripeReturnRef.current : givebutterChoiceRef.current;
+    target?.focus();
+  }, [usProvider]);
 
   // Listen for the thank-you page's postMessage (fired when it runs inside the
   // widget iframe modal) so we can swap to the thank-you state directly.
@@ -1325,12 +1351,23 @@ export function DonarPage() {
             {summary}
             <div className="donar-handoff">
               <p className="donar-intro">{stripeIntro(organizationName)}</p>
+              {/* One persistent live region for the whole step: the surface swap is
+                  silent otherwise, since each switch only unmounts and mounts markup. */}
+              <p className="donar-provider-announcement" role="status" aria-live="polite">
+                {usProvider === "givebutter"
+                  ? "Formulario de Givebutter, en inglés."
+                  : "Formulario de Stripe, en español."}
+              </p>
               {usProvider === "stripe" && (
                 <>
                   <button
+                    ref={givebutterChoiceRef}
                     type="button"
                     className="donar-provider-choice donar-provider-choice-givebutter"
-                    onClick={() => setUsProvider("givebutter")}
+                    onClick={() => {
+                      usProviderSwitchedRef.current = true;
+                      setUsProvider("givebutter");
+                    }}
                   >
                     <img
                       src={GIVEBUTTER_ICON_DATA_URI}
@@ -1355,9 +1392,13 @@ export function DonarPage() {
               {usProvider === "givebutter" && (
                 <div className="donar-givebutter-surface">
                   <button
+                    ref={stripeReturnRef}
                     type="button"
                     className="donar-provider-choice donar-provider-choice-stripe"
-                    onClick={() => setUsProvider("stripe")}
+                    onClick={() => {
+                      usProviderSwitchedRef.current = true;
+                      setUsProvider("stripe");
+                    }}
                   >
                     <span className="donar-provider-stripe-mark" aria-hidden="true" />
                     <span className="donar-provider-choice-copy">
@@ -1366,32 +1407,37 @@ export function DonarPage() {
                     </span>
                     <span className="donar-provider-choice-arrow" aria-hidden="true">←</span>
                   </button>
-                  <iframe
-                    className="donar-givebutter-frame"
-                    title="Formulario de donación Givebutter"
-                    src={givebutterFrameUrl}
-                    allow="payment *; clipboard-write"
-                    referrerPolicy="strict-origin-when-cross-origin"
-                    onLoad={() => setGivebutterFrameStatus("ready")}
-                  />
-                  {givebutterFrameStatus === "delayed" && (
-                    <a
-                      className="primary donar-givebutter-fallback"
-                      href={givebutterHostedUrl({ amount: form.amount, monthly })}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      Abrir Givebutter en otra pestaña
-                    </a>
-                  )}
+                  {/* The single escape hatch, above the 760px frame: a donor staring at a
+                      blank embed must not have to scroll past it to find the way out. Quiet
+                      hint by default, promoted in place once the render budget elapses. */}
                   <a
-                    className="donar-givebutter-hint"
+                    className={givebutterFrameDelayed ? "donar-givebutter-hint donar-givebutter-fallback" : "donar-givebutter-hint"}
                     href={givebutterHostedUrl({ amount: form.amount, monthly })}
                     target="_blank"
                     rel="noopener noreferrer"
                   >
-                    ¿Problemas con el formulario? Abrir Givebutter
+                    {givebutterFrameDelayed
+                      ? "Abrir Givebutter en otra pestaña"
+                      : "¿Problemas con el formulario? Abrir Givebutter"}
                   </a>
+                  {/* The placeholder is positioned against the frame's own box, not the
+                      surface: the escape hatch above grows when promoted, so an offset
+                      measured from the surface would drift up onto the controls. */}
+                  <div className="donar-givebutter-frame-area">
+                    {!givebutterFrameLoaded && (
+                      <p className="donar-givebutter-loading" aria-live="polite">
+                        {DONAR_WIDGET_LOADING_MESSAGE}
+                      </p>
+                    )}
+                    <iframe
+                      className="donar-givebutter-frame"
+                      title="Formulario de donación Givebutter (en inglés)"
+                      src={givebutterFrameUrl}
+                      allow="payment *; clipboard-write"
+                      referrerPolicy="strict-origin-when-cross-origin"
+                      onLoad={() => setGivebutterFrameLoaded(true)}
+                    />
+                  </div>
                 </div>
               )}
             </div>

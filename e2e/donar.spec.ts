@@ -640,7 +640,7 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   expect(givebutterRequests).toEqual([]);
   await givebutterChoice.click();
   await expect(page.locator(".donar-stripe-embedded")).toHaveCount(0);
-  const givebutterFrame = page.getByTitle("Formulario de donación Givebutter");
+  const givebutterFrame = page.getByTitle("Formulario de donación Givebutter (en inglés)");
   await expect(givebutterFrame).toBeVisible();
   await expect(givebutterFrame).toHaveAttribute(
     "src",
@@ -649,6 +649,18 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   expect(givebutterRequests).toEqual([
     "https://givebutter.com/embed/c/example-campaign?amount=100&frequency=monthly&goalBar=false"
   ]);
+  // One escape hatch out of a non-rendering embed — never a hint and a button to the
+  // same hosted page — and it sits above the 760px frame, so a donor facing a blank
+  // box never has to scroll past it to find the way out. The anchor keeps
+  // .donar-givebutter-hint in both its quiet and its promoted state.
+  const givebutterHatch = page.locator(".donar-givebutter-hint");
+  await expect(givebutterHatch).toHaveCount(1);
+  await expect(page.locator('.donar-givebutter-surface a[href^="https://givebutter.com/"]')).toHaveCount(1);
+  const hatchBox = await givebutterHatch.boundingBox();
+  const frameBox = await givebutterFrame.boundingBox();
+  expect(hatchBox).not.toBeNull();
+  expect(frameBox).not.toBeNull();
+  expect(hatchBox!.y).toBeLessThan(frameBox!.y);
   await page.getByRole("button", { name: /Volver a Stripe.*Formulario en español/i }).click();
   await expect(givebutterFrame).toHaveCount(0);
   await expect(page.locator(".donar-stripe-embedded")).toBeVisible();

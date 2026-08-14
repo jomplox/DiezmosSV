@@ -27,6 +27,7 @@ import {
   DONAR_VERIFYING_NOTICE_DELAY_MS,
   DONAR_WIDGET_VERIFYING_MESSAGE,
   DONAR_WOMPI_CHECKOUT_ORIGIN,
+  GIVEBUTTER_RENDER_TIMEOUT_MS,
   STRIPE_FREQ_MONTHLY_LABEL,
   STRIPE_FREQ_ONCE_LABEL,
   STRIPE_MONTHLY_LABEL,
@@ -1228,10 +1229,60 @@ describe("Stripe donar page source contract", () => {
       pageSource.indexOf("{/* US Stripe step"),
       pageSource.indexOf("{/* Paso 3", pageSource.indexOf("{/* US Stripe step"))
     );
-    expect(stripeBlock).toContain('title="Formulario de donación Givebutter"');
+    expect(stripeBlock).toContain('title="Formulario de donación Givebutter (en inglés)"');
     expect(stripeBlock).not.toContain("payment_method_types");
     expect(stripeBlock).toContain("<StripeDonationForm");
     expect(stripeBlock).not.toContain("donar-stripe-assurance");
+  });
+
+  it("puts one Givebutter escape hatch above the frame instead of two below it", () => {
+    const surfaceStart = pageSource.indexOf('{usProvider === "givebutter" && (');
+    expect(surfaceStart).toBeGreaterThan(-1);
+    const surface = pageSource.slice(surfaceStart, pageSource.indexOf("{/* Paso 3", surfaceStart));
+    // A donor staring at a blank 760px embed must not scroll past it to find the way
+    // out: the anchor precedes the iframe in DOM order.
+    const hatch = surface.indexOf("donar-givebutter-hint");
+    const frame = surface.indexOf("<iframe");
+    expect(hatch).toBeGreaterThan(-1);
+    expect(frame).toBeGreaterThan(-1);
+    expect(hatch).toBeLessThan(frame);
+    // One anchor, two states — the promoted look is a class + copy swap on that same
+    // element, never a second link to the same href.
+    expect(surface.match(/givebutterHostedUrl\(/g)).toHaveLength(1);
+    expect(surface).toContain("¿Problemas con el formulario? Abrir Givebutter");
+    expect(surface).toContain("Abrir Givebutter en otra pestaña");
+    // The escape hatch never spends the page's strongest CTA style.
+    expect(surface).not.toContain('className="primary');
+    // The 760px void gets the shared loading copy while the frame has not loaded.
+    expect(surface).toContain("{!givebutterFrameLoaded && (");
+    expect(surface).toContain("DONAR_WIDGET_LOADING_MESSAGE");
+  });
+
+  it("lets the render budget promote the escape hatch even after the frame fires load", () => {
+    // A cross-origin iframe fires load for the browser's own error documents, so load
+    // must only clear the placeholder — it can neither set nor suppress "delayed".
+    expect(donarSource).toContain("onLoad={() => setGivebutterFrameLoaded(true)}");
+    expect(donarSource).not.toContain("givebutterFrameStatus");
+    const effectStart = donarSource.indexOf("const timeout = window.setTimeout");
+    const timerCallback = donarSource.slice(effectStart, donarSource.indexOf("GIVEBUTTER_RENDER_TIMEOUT_MS", effectStart));
+    expect(timerCallback).toContain("setGivebutterFrameDelayed(true)");
+    expect(timerCallback).not.toContain("givebutterFrameLoaded");
+    // The delayed flag alone gates the promotion, on the render budget the plan pins.
+    expect(donarSource).toContain("givebutterFrameDelayed ?");
+    expect(GIVEBUTTER_RENDER_TIMEOUT_MS).toBe(4_000);
+  });
+
+  it("keeps focus and screen-reader context across both US provider switches", () => {
+    expect(pageSource).toContain("usProviderSwitchedRef.current = true;");
+    expect(pageSource).toContain(
+      'const target = usProvider === "givebutter" ? stripeReturnRef.current : givebutterChoiceRef.current;'
+    );
+    expect(pageSource).toContain("ref={givebutterChoiceRef}");
+    expect(pageSource).toContain("ref={stripeReturnRef}");
+    // One live region for the swap, not one per surface.
+    expect(pageSource.match(/role="status" aria-live="polite"/g)).toHaveLength(1);
+    expect(pageSource).toContain("Formulario de Givebutter, en inglés.");
+    expect(pageSource).toContain("Formulario de Stripe, en español.");
   });
 
   it("no longer offers the US-path escape hatch back to the SV fiscal form", () => {

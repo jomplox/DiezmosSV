@@ -4060,6 +4060,18 @@ pre {
   margin-top: 10px;
 }
 
+/* Announced, never shown: the visible switch buttons already name each form. */
+.donar-provider-announcement {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
 .donar-provider-choice {
   width: min(100%, 360px);
   min-height: 50px;
@@ -4149,6 +4161,14 @@ pre {
   justify-items: center;
 }
 
+/* Positioning context for the loading placeholder: the frame's own box, so the
+   placeholder cannot ride up over the controls when the escape hatch is promoted. */
+.donar-givebutter-frame-area {
+  position: relative;
+  display: grid;
+  width: min(100%, 440px);
+}
+
 .donar-givebutter-frame {
   width: min(100%, 440px);
   min-height: 760px;
@@ -4156,9 +4176,17 @@ pre {
   background: #ffffff;
 }
 
-.donar-givebutter-fallback {
-  width: min(100%, 440px);
+.donar-givebutter-loading {
+  position: absolute;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 0 16px;
+  color: #5d5d5d;
+  font-size: 14px;
   text-align: center;
+  pointer-events: none;
 }
 
 .donar-givebutter-hint {
@@ -4166,6 +4194,24 @@ pre {
   font-size: 12px;
   text-align: center;
   text-underline-offset: 3px;
+}
+
+/* Promoted state of that same hint, once the render budget elapses. Stronger than the
+   hint but deliberately not .primary — the page's strongest CTA belongs to the
+   donation itself, never to the way out of an embed that did not render. */
+.donar-givebutter-fallback {
+  display: grid;
+  place-items: center;
+  width: min(100%, 440px);
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid #000000;
+  border-radius: 999px;
+  color: #000000;
+  background: #ffffff;
+  font-size: 14px;
+  text-align: center;
+  text-decoration: none;
 }
 
 /* The manual Wompi backup link inherits the admin teal .link-button — repaint it
