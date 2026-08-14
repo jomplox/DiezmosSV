@@ -62,6 +62,10 @@ function createBuildEnvironment(inheritedEnv, config) {
     // from a repository-local dotenv file after private validation succeeds.
     buildEnv[name] = readConfig(config) ?? "";
   }
+  // Vite otherwise reloads repository-local dotenv files after this allowlist
+  // has been constructed. The tracked Vite config turns those files off only
+  // for this validated private-build entrypoint.
+  buildEnv.DIEZMOSSV_PRIVATE_BUILD = "1";
   return buildEnv;
 }
 

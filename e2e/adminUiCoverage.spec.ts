@@ -848,6 +848,16 @@ test("keeps Stripe controls busy while an unrelated settings action finishes", a
   let stripePostStarted = false;
   let releaseStripePost!: () => void;
   const stripePostBarrier = new Promise<void>((resolve) => { releaseStripePost = resolve; });
+  const configuration = {
+    legalName: "Friends of Busy Example, Inc.",
+    ein: "12-3456789",
+    timeZone: "America/New_York",
+    organizationPhone: "+1 555 010 0100",
+    organizationWebsite: "https://example.org",
+    organizationMailingAddress: "100 Test Avenue\nNew York, NY 10001, USA",
+    signerName: "Test Signer",
+    signerTitle: "Treasurer"
+  };
   await installOwnerAdmin(page, async (route, url) => {
     const request = route.request();
     if (url.pathname === "/api/credentials" && request.method() === "GET") {
@@ -857,6 +867,17 @@ test("keeps Stripe controls busy while an unrelated settings action finishes", a
           groups: {},
           certificateExpiresAt: null,
           stripeOperational: { appEnv: "staging", mode: "Pruebas", mockMode: false, localProxyConfigured: false }
+        }
+      });
+      return true;
+    }
+    if (url.pathname === "/api/settings/stripe" && request.method() === "GET") {
+      await fulfillJson(route, {
+        stripe: {
+          credentials: { label: "Stripe EE. UU.", ready: true, items: [] },
+          operational: { appEnv: "staging", mode: "Pruebas", mockMode: false, localProxyConfigured: false },
+          configuration,
+          webhookHealth: { state: "none", label: "Sin eventos recibidos" }
         }
       });
       return true;
@@ -883,6 +904,8 @@ test("keeps Stripe controls busy while an unrelated settings action finishes", a
   try {
     await openView(page, "Configuración");
     await page.getByRole("button", { name: /^Stripe EE\. UU\./ }).click();
+    await expect(page.getByLabel("Nombre legal")).toHaveValue(configuration.legalName);
+    await page.getByLabel("Clave restringida").fill("rk_test_busy_fixture");
     const stripeSave = page.getByRole("button", { name: "Guardar configuración de Stripe" });
     await stripeSave.click();
     await expect.poll(() => stripePostStarted).toBe(true);

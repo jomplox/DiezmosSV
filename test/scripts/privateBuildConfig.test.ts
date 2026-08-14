@@ -237,6 +237,41 @@ describe("private release builds", () => {
     }
   );
 
+  it.each(["staging", "production"] as const)(
+    "keeps repository dotenv canaries out of a disposable %s bundle",
+    async (target) => {
+      const fixture = disposableViteFixture(target);
+      const canaryName = "VITE_PRIVATE_DOTENV_CANARY";
+      const canaryValue = "private-dotenv-canary-value";
+      writeFileSync(
+        join(fixture.repositoryRoot, ".env"),
+        `${canaryName}=${canaryValue}\n`
+      );
+
+      await expect(
+        runPrivateBuild({
+          target,
+          env: {
+            ...process.env,
+            DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath
+          },
+          repositoryRoot: fixture.repositoryRoot
+        })
+      ).resolves.toBe(0);
+
+      const bundle = readTextTree(join(fixture.repositoryRoot, "dist"));
+      expect({
+        approvedCampaignPresent: bundle.includes("campaign-fixture"),
+        canaryNamePresent: bundle.includes(canaryName),
+        canaryValuePresent: bundle.includes(canaryValue)
+      }).toEqual({
+        approvedCampaignPresent: true,
+        canaryNamePresent: false,
+        canaryValuePresent: false
+      });
+    }
+  );
+
   it("keeps ambient and repository dotenv fund mappings out of an unconfigured staging bundle", async () => {
     const fixture = disposableViteFixture("staging");
     const configWithoutFunds = readFileSync(fixture.configPath, "utf8")
@@ -366,6 +401,16 @@ function disposableViteFixture(target: "staging" | "production"): Fixture {
   writeFileSync(
     join(fixture.repositoryRoot, "index.html"),
     '<div id="app"></div><script type="module" src="/src/main.js"></script>\n'
+  );
+  writeFileSync(
+    join(fixture.repositoryRoot, "vite.config.mjs"),
+    [
+      'import { defineConfig } from "vite";',
+      "export default defineConfig({",
+      '  envDir: process.env.DIEZMOSSV_PRIVATE_BUILD === "1" ? false : undefined',
+      "});",
+      ""
+    ].join("\n")
   );
   writeFileSync(
     join(fixture.repositoryRoot, "src", "main.js"),

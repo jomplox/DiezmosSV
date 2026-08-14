@@ -2,6 +2,7 @@ import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
 export default defineConfig({
+  envDir: process.env.DIEZMOSSV_PRIVATE_BUILD === "1" ? false : undefined,
   plugins: [react()],
   build: {
     outDir: "dist/client",
