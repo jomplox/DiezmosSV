@@ -520,14 +520,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     setCredentialInput((current) =>
       current.environment === credentialEnvironment ? current : {
         ...emptyCredentialInput(credentialEnvironment),
-        stripeLegalName: current.stripeLegalName,
-        stripeEin: current.stripeEin,
-        stripeTimeZone: current.stripeTimeZone,
-        stripeOrganizationPhone: current.stripeOrganizationPhone,
-        stripeOrganizationWebsite: current.stripeOrganizationWebsite,
-        stripeOrganizationMailingAddress: current.stripeOrganizationMailingAddress,
-        stripeSignerName: current.stripeSignerName,
-        stripeSignerTitle: current.stripeSignerTitle
+        ...preservedStripeOrganizationInput(current)
       }
     );
   }, [emissionEnvironment]);
@@ -2287,7 +2280,10 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       ]);
       control.commit(() => {
         setToast(`Secretos actualizados: ${result.updated.length}`);
-        setCredentialInput(emptyCredentialInput(credentialInput.environment));
+        setCredentialInput((current) => ({
+          ...emptyCredentialInput(current.environment),
+          ...preservedStripeOrganizationInput(current)
+        }));
         setCredentials(credentialResult.credentials);
         applyEmailSender(emailSenderResult.emailSender);
       });
@@ -4918,6 +4914,25 @@ function emptyStripeWriteOnlyInput(): Pick<
     stripeWebhookSecretNext: "",
     stripePaymentMethodConfigurationId: "",
     stripeBillingPortalConfigurationId: ""
+  };
+}
+
+// Los ocho campos de la organización de Stripe se precargan del servidor y se
+// envían en cada guardado, así que un reinicio del formulario que los vacíe hace
+// que el siguiente guardado los mande en blanco y el worker lo rechace. Todo
+// reinicio que no rehidrate desde /api/settings/stripe debe conservarlos.
+function preservedStripeOrganizationInput(
+  current: CredentialFormInput
+): ReturnType<typeof stripeOrganizationCredentialInput> {
+  return {
+    stripeLegalName: current.stripeLegalName,
+    stripeEin: current.stripeEin,
+    stripeTimeZone: current.stripeTimeZone,
+    stripeOrganizationPhone: current.stripeOrganizationPhone,
+    stripeOrganizationWebsite: current.stripeOrganizationWebsite,
+    stripeOrganizationMailingAddress: current.stripeOrganizationMailingAddress,
+    stripeSignerName: current.stripeSignerName,
+    stripeSignerTitle: current.stripeSignerTitle
   };
 }
 

@@ -290,14 +290,14 @@ export function buildStripeCredentialSecretPatch(
   // siempre su valor actual: solo se escriben los que cambiaron y vaciar uno ya
   // configurado se rechaza (borrarlo dejaría inoperante la donación en EE. UU.).
   for (const field of [
-    { name: "STRIPE_US_LEGAL_NAME", submitted: legalName, blankCode: "blank_us_legal_name" },
-    { name: "STRIPE_US_EIN", submitted: ein, blankCode: "blank_us_ein" },
-    { name: "STRIPE_US_TIME_ZONE", submitted: timeZone, blankCode: "blank_us_time_zone" },
-    { name: "STRIPE_US_PHONE", submitted: organizationPhone, blankCode: "blank_us_phone" },
-    { name: "STRIPE_US_WEBSITE", submitted: organizationWebsite, blankCode: "blank_us_website" },
-    { name: "STRIPE_US_MAILING_ADDRESS", submitted: organizationMailingAddress, blankCode: "blank_us_mailing_address" },
-    { name: "STRIPE_US_SIGNER_NAME", submitted: signerName, blankCode: "blank_us_signer_name" },
-    { name: "STRIPE_US_SIGNER_TITLE", submitted: signerTitle, blankCode: "blank_us_signer_title" }
+    { name: "STRIPE_US_LEGAL_NAME", submitted: input.legalName, blankCode: "blank_us_legal_name" },
+    { name: "STRIPE_US_EIN", submitted: input.ein, blankCode: "blank_us_ein" },
+    { name: "STRIPE_US_TIME_ZONE", submitted: input.timeZone, blankCode: "blank_us_time_zone" },
+    { name: "STRIPE_US_PHONE", submitted: input.organizationPhone, blankCode: "blank_us_phone" },
+    { name: "STRIPE_US_WEBSITE", submitted: input.organizationWebsite, blankCode: "blank_us_website" },
+    { name: "STRIPE_US_MAILING_ADDRESS", submitted: input.organizationMailingAddress, blankCode: "blank_us_mailing_address" },
+    { name: "STRIPE_US_SIGNER_NAME", submitted: input.signerName, blankCode: "blank_us_signer_name" },
+    { name: "STRIPE_US_SIGNER_TITLE", submitted: input.signerTitle, blankCode: "blank_us_signer_title" }
   ] as const) {
     putOrganizationValue(patch, env, field.name, field.submitted, field.blankCode);
   }
@@ -318,11 +318,15 @@ function putOrganizationValue(
   patch: SecretPatch,
   env: Env,
   name: StripeUsOrganizationSecret,
-  submitted: string,
+  submitted: unknown,
   blankCode: string
 ): void {
+  // Un campo ausente no es un campo vaciado: una pestaña con el paquete anterior
+  // a la precarga no envía estos campos y sus rotaciones deben seguir pasando.
+  if (typeof submitted !== "string") return;
+  const value = submitted.trim();
   const current = trim(env[name]);
-  if (!submitted) {
+  if (!value) {
     // Sin valor configurado todavía, un campo vacío sigue siendo un no-op: así
     // un despliegue a medio configurar puede guardar los campos que sí tiene.
     if (current) {
@@ -330,8 +334,8 @@ function putOrganizationValue(
     }
     return;
   }
-  if (submitted === current) return;
-  patch[name] = secret(name, submitted);
+  if (value === current) return;
+  patch[name] = secret(name, value);
 }
 
 function hasControlCharacters(value: string): boolean {

@@ -59,7 +59,11 @@ describe("keyboard accessibility contract", () => {
     expect(toolbar.match(/tabIndex=\{activeFormatIndex === \d \? 0 : -1\}/g)).toHaveLength(4);
     // El foco no se roba al hacer clic: la selección del textarea debe sobrevivir al formateo.
     expect(toolbar.match(/onMouseDown=\{\(event\) => event\.preventDefault\(\)\}/g)).toHaveLength(4);
-    expect(credentialsPanelSource).toContain("(activeFormatIndex + step + buttons.length) % buttons.length");
+    // La flecha debe mover el índice activo y llevarse el foco con él: sin
+    // cualquiera de las dos líneas el rotativo queda a medias.
+    expect(credentialsPanelSource).toContain("const nextIndex = (activeFormatIndex + step + buttons.length) % buttons.length;");
+    expect(credentialsPanelSource).toContain("setActiveFormatIndex(nextIndex);");
+    expect(credentialsPanelSource).toContain("buttons[nextIndex].focus();");
   });
 
   it("labels the quick-DTE Monto input for screen readers", () => {

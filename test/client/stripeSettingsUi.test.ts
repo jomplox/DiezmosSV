@@ -97,4 +97,21 @@ describe("Stripe owner settings UI", () => {
   test("tells the owner that an unedited save has nothing to write", () => {
     expect(userFacingErrorMessage("no_stripe_credentials_supplied")).toBe("No hay cambios que guardar.");
   });
+
+  test("keeps the prefilled organization values across form resets that do not refetch them", () => {
+    // Los dos reinicios que ocurren con el panel abierto — cambio de ambiente de
+    // emisión y guardado de secretos del MH — vaciarían los ocho campos y el
+    // siguiente guardado de Stripe los enviaría en blanco.
+    expect(appSource).toContain("...emptyCredentialInput(credentialEnvironment),");
+    expect(appSource).toContain("...emptyCredentialInput(current.environment),");
+    expect(appSource).not.toContain("setCredentialInput(emptyCredentialInput(credentialInput.environment))");
+    expect(appSource.match(/\.\.\.preservedStripeOrganizationInput\(current\)/g)).toHaveLength(2);
+    for (const field of [
+      "stripeLegalName", "stripeEin", "stripeTimeZone", "stripeOrganizationPhone",
+      "stripeOrganizationWebsite", "stripeOrganizationMailingAddress",
+      "stripeSignerName", "stripeSignerTitle"
+    ]) {
+      expect(appSource).toContain(`${field}: current.${field}`);
+    }
+  });
 });

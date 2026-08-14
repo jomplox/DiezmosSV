@@ -395,6 +395,47 @@ describe("Stripe owner settings", () => {
     }
   });
 
+  it("still rotates a credential for a client that never sends the organization fields", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify({ success: true }), {
+      headers: { "Content-Type": "application/json" }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const response = await worker.fetch(
+        new Request("https://example.org/api/settings/stripe", {
+          method: "POST",
+          headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+          body: JSON.stringify({ restrictedKey: "rk_test_rotated_private" })
+        }),
+        env(db, {
+          APP_ENV: "staging",
+          CLOUDFLARE_ACCOUNT_ID: "account",
+          CLOUDFLARE_API_TOKEN: "writer-token",
+          CLOUDFLARE_SCRIPT_NAME: "worker",
+          STRIPE_US_LEGAL_NAME: "Example Nonprofit",
+          STRIPE_US_EIN: "12-3456789",
+          STRIPE_US_TIME_ZONE: "America/New_York",
+          STRIPE_US_PHONE: "+1 555 010 0100",
+          STRIPE_US_WEBSITE: "https://example.org",
+          STRIPE_US_MAILING_ADDRESS: "100 Test Avenue\nNew York, NY 10001, USA",
+          STRIPE_US_SIGNER_NAME: "Test Signer",
+          STRIPE_US_SIGNER_TITLE: "Treasurer"
+        })
+      );
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        ok: true,
+        updated: ["STRIPE_RESTRICTED_KEY"],
+        deleted: []
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("writes valid replacements through the bulk writer and audits names only", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };

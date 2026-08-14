@@ -361,6 +361,12 @@ describe("credential secret patch", () => {
     )).toEqual({
       STRIPE_US_LEGAL_NAME: expect.objectContaining({ text: "Example Nonprofit" })
     });
+
+    // Un campo ausente no es un campo vaciado: una pestaña con el paquete anterior
+    // a la precarga no envía ninguno de los ocho y su rotación debe seguir pasando.
+    expect(buildStripeCredentialSecretPatch({ restrictedKey: "rk_test_rotated" }, configured)).toEqual({
+      STRIPE_RESTRICTED_KEY: expect.objectContaining({ text: "rk_test_rotated" })
+    });
   });
 
   it("writes only the organization values that actually changed and never the unchanged ones", () => {
