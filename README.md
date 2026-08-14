@@ -201,7 +201,7 @@ DiezmosSV/
 │   ├── client/                 # React + Vite admin panel, /donar, fonts, assets
 │   └── shared/                 # Catalogs · DUI · NIT · legal windows · password policy
 │                               # fiscal corrections · checkout · money · email
-├── migrations/                 # D1 schema (incremental, append-only 0001…0041)
+├── migrations/                 # D1 schema (incremental, append-only 0001…0042)
 ├── DTE/svfe-json-schemas/      # MH-bundled JSON schemas for validation
 ├── docs/                       # Deploy/UAT · operator runbook · retention-restore
 │                               # fiscal-claim cutover/reconciliation · pre-CDE recovery
@@ -993,7 +993,7 @@ The safety model is the fiscal-claim model applied to a repair path:
 ## 🗄 Data model
 
 <details>
-<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0041)</strong></summary>
+<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0042)</strong></summary>
 
 <br/>
 
