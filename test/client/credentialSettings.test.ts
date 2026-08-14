@@ -295,7 +295,7 @@ describe("Plantillas country-scoped saving (source contract)", () => {
   test("each country button gates on its own group and submits only that group's drafts", () => {
     const editor = credentialsPanelSource.slice(
       credentialsPanelSource.indexOf("function EmailTemplateEditor({"),
-      credentialsPanelSource.indexOf("export function scopedEmailTemplates(")
+      credentialsPanelSource.indexOf("export function isEmailTemplateScope(")
     );
 
     expect(editor).toContain("const groupComplete = (group: typeof definitions) => group.every(");
@@ -315,6 +315,11 @@ describe("Plantillas country-scoped saving (source contract)", () => {
     expect(save).toContain("...(emailTemplates?.templates ?? {}),");
     expect(save).toContain("...scopedEmailTemplates(emailTemplates, emailTemplateDraft, scope)");
     expect(save).not.toContain("body: { templates: emailTemplateDraft }");
+    // El editor y el envío deben particionar igual, o una plantilla visible en un grupo
+    // quedaría fuera del guardado de ese grupo.
+    expect(credentialsPanelSource).toContain('isEmailTemplateScope("SV_CDE", definition.scope)');
+    expect(credentialsPanelSource).toContain('isEmailTemplateScope("US_STRIPE", definition.scope)');
+    expect(credentialsPanelSource).toContain("isEmailTemplateScope(scope, definition.scope)");
   });
 });
 

@@ -1467,8 +1467,8 @@ function EmailTemplateEditor({
 }) {
   const definitions = settings?.definitions ?? [];
   const legacyPlaceholders = settings?.placeholders ?? [];
-  const salvadoranDefinitions = definitions.filter((definition) => definition.scope !== "US_STRIPE");
-  const usDefinitions = definitions.filter((definition) => definition.scope === "US_STRIPE");
+  const salvadoranDefinitions = definitions.filter((definition) => isEmailTemplateScope("SV_CDE", definition.scope));
+  const usDefinitions = definitions.filter((definition) => isEmailTemplateScope("US_STRIPE", definition.scope));
   // Cada botón guarda solo las plantillas de su país, así que la exigencia de asunto
   // y cuerpo se evalúa por grupo: un cuerpo vacío en EE. UU. no debe bloquear el
   // guardado de El Salvador ni al revés.
@@ -1586,7 +1586,13 @@ function EmailTemplateEditor({
 
 // PUT /api/settings/email-templates exige las cinco plantillas en cada guardado, así que
 // un guardado por país solo puede acotarse eligiendo qué entradas provienen del borrador.
-// El resto se envía tal como el servidor las tiene guardadas.
+// El resto se envía tal como el servidor las tiene guardadas. La partición es la misma
+// que usa el editor: cualquier scope inesperado cae del lado salvadoreño en ambos sitios,
+// para que ninguna plantilla visible en un grupo quede fuera de su propio guardado.
+export function isEmailTemplateScope(scope: EmailTemplateScope, candidate: EmailTemplateScope): boolean {
+  return scope === "US_STRIPE" ? candidate === "US_STRIPE" : candidate !== "US_STRIPE";
+}
+
 export function scopedEmailTemplates(
   settings: EmailTemplateSettings | null,
   templates: Record<string, EmailTemplateValue>,
@@ -1594,7 +1600,7 @@ export function scopedEmailTemplates(
 ): Record<string, EmailTemplateValue> {
   return Object.fromEntries(
     (settings?.definitions ?? [])
-      .filter((definition) => definition.scope === scope && templates[definition.type])
+      .filter((definition) => isEmailTemplateScope(scope, definition.scope) && templates[definition.type])
       .map((definition) => [definition.type, { ...templates[definition.type] }])
   );
 }
