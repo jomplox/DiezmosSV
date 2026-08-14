@@ -1,8 +1,10 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, test } from "vitest";
+import { resolveStripeOrganizationHydration, trimmedStripeOrganization } from "../../src/client/App";
 import { credentialSettingsSections } from "../../src/client/credentialSettings";
 import { userFacingErrorMessage } from "../../src/client/displayText";
+import type { StripeSettingsState } from "../../src/client/types";
 
 const panelSource = readFileSync(resolve(import.meta.dirname, "../../src/client/credentialsPanel.tsx"), "utf8");
 const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
@@ -127,5 +129,101 @@ describe("Stripe owner settings UI", () => {
     ]) {
       expect(appSource).toContain(`${field}: current.${field}`);
     }
+  });
+});
+
+const savedOrganization: StripeSettingsState["configuration"] = {
+  legalName: "Iglesia Elim USA",
+  ein: "12-3456789",
+  timeZone: "America/Chicago",
+  organizationPhone: "+1 555 0100",
+  organizationWebsite: "https://example.org",
+  organizationMailingAddress: "1 Main St, Dallas TX",
+  signerName: "Pastor",
+  signerTitle: "Tesorero"
+};
+
+describe("Stripe organization propagation window", () => {
+  test("keeps a just-saved value when the refresh still reads the pre-save Worker env", () => {
+    // El GET lo atendió un isolate con el env anterior: devuelve el teléfono viejo.
+    const stale = { ...savedOrganization, organizationPhone: "+1 555 0199" };
+
+    const resolved = resolveStripeOrganizationHydration(stale, savedOrganization);
+
+    expect(resolved.configuration.organizationPhone).toBe("+1 555 0100");
+    expect(resolved.configuration).toEqual(savedOrganization);
+    // La escritura pendiente sigue vigente: la próxima rehidratación debe protegerla igual.
+    expect(resolved.pendingWrite).toEqual(savedOrganization);
+  });
+
+  test("keeps the pending values without discarding the rest of the stale read", () => {
+    const stale = { ...savedOrganization, legalName: "Nombre anterior", signerTitle: "Cargo anterior" };
+
+    const resolved = resolveStripeOrganizationHydration(stale, savedOrganization);
+
+    expect(resolved.configuration.legalName).toBe("Iglesia Elim USA");
+    expect(resolved.configuration.signerTitle).toBe("Tesorero");
+    expect(resolved.configuration.ein).toBe("12-3456789");
+  });
+
+  test("clears the pending write once the server echoes the eight saved values", () => {
+    const propagated = { ...savedOrganization, organizationPhone: "  +1 555 0100  " };
+
+    const resolved = resolveStripeOrganizationHydration(propagated, savedOrganization);
+
+    expect(resolved.pendingWrite).toBeNull();
+    // Confirmada la propagación, el formulario vuelve a sembrarse del servidor.
+    expect(resolved.configuration).toBe(propagated);
+  });
+
+  test("hydrates straight from the server when there is no pending write", () => {
+    const resolved = resolveStripeOrganizationHydration(savedOrganization, null);
+
+    expect(resolved.configuration).toBe(savedOrganization);
+    expect(resolved.pendingWrite).toBeNull();
+  });
+
+  test("records the submitted organization trimmed, matching what the worker stores", () => {
+    expect(trimmedStripeOrganization({
+      legalName: "  Iglesia Elim USA  ",
+      ein: " 12-3456789 ",
+      timeZone: " America/Chicago ",
+      organizationPhone: " +1 555 0100 ",
+      organizationWebsite: " https://example.org ",
+      organizationMailingAddress: " 1 Main St, Dallas TX ",
+      signerName: " Pastor ",
+      signerTitle: " Tesorero "
+    })).toEqual(savedOrganization);
+  });
+
+  test("fixes every hydration path once instead of per caller", () => {
+    // El botón "Actualizar", el refresco automático y la carga inicial de la vista
+    // pasan todos por applyStripeSettings con hydrateConfiguration = true.
+    const hydrate = appSource.slice(
+      appSource.indexOf("function applyStripeSettings("),
+      appSource.indexOf("function applyEmailSender(")
+    );
+
+    expect(hydrate).toContain("resolveStripeOrganizationHydration(settings.configuration, stripeOrganizationPendingWriteRef.current)");
+    expect(hydrate).toContain("stripeOrganizationPendingWriteRef.current = resolved.pendingWrite;");
+    expect(hydrate).toContain("...stripeOrganizationCredentialInput(resolved.configuration)");
+    // stripeSettings conserva la lectura cruda del servidor para su consumidor actual.
+    expect(hydrate).toContain("setStripeSettings(settings);");
+    expect(hydrate).not.toContain("setStripeSettings(resolved");
+
+    const save = appSource.slice(
+      appSource.indexOf("async function updateStripeCredentials("),
+      appSource.indexOf("async function stageStripeWebhookSecret(")
+    );
+    expect(save).toContain("stripeOrganizationPendingWriteRef.current = trimmedStripeOrganization(organization);");
+  });
+
+  test("does not leak one account's pending write into the next session", () => {
+    const reset = appSource.slice(
+      appSource.indexOf("function resetAccountState() {"),
+      appSource.indexOf("async function loadMoreDocuments(")
+    );
+
+    expect(reset).toContain("stripeOrganizationPendingWriteRef.current = null;");
   });
 });

@@ -422,6 +422,11 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   const stripeStatementSearchInputGenerationRef = useRef(0);
   const annualReportOperationClaimsRef = useRef(new Map<string, symbol>());
   const automaticRefreshFlightRef = useRef<AutomaticRefreshFlight | null>(null);
+  // Guardar la organización de Stripe publica una versión nueva del Worker, así que
+  // durante la ventana de propagación un GET /api/settings/stripe puede atenderlo un
+  // isolate con el env anterior. Este registro guarda lo último que este cliente escribió
+  // con éxito para que ninguna rehidratación revierta el campo recién guardado.
+  const stripeOrganizationPendingWriteRef = useRef<StripeOrganizationConfiguration | null>(null);
   // CRM contacts export customization: period preset (with optional custom range), a
   // gift-type filter, and the selected CSV columns (all on by default).
   const [contactsPeriod, setContactsPeriod] = useState<ContactsPeriod>("todo");
@@ -1112,6 +1117,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     stripeStatementSearchInputGenerationRef.current += 1;
     annualReportOperationClaimsRef.current.clear();
     automaticRefreshFlightRef.current = null;
+    stripeOrganizationPendingWriteRef.current = null;
     setSettledCertificateSearchRevision(certificateSearchInputGenerationRef.current);
     setSettledStripeStatementSearchRevision(stripeStatementSearchInputGenerationRef.current);
     const certificateResetYear = String(new Date().getFullYear());
@@ -2315,7 +2321,10 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
         // puede atenderlo un isolate que todavía tiene el env anterior. El formulario se
         // siembra con los valores que el worker acaba de aceptar, nunca con esa lectura:
         // rehidratarla revertiría visiblemente el campo recién guardado y el siguiente
-        // guardado reenviaría el valor viejo sobre el nuevo.
+        // guardado reenviaría el valor viejo sobre el nuevo. El mismo riesgo corren las
+        // demás rehidrataciones (botón "Actualizar", refresco automático, carga inicial),
+        // así que se registra lo escrito hasta que el servidor lo confirme.
+        stripeOrganizationPendingWriteRef.current = trimmedStripeOrganization(organization);
         setCredentialInput((current) => ({
           ...current,
           ...emptyStripeWriteOnlyInput(),
@@ -2483,9 +2492,13 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   function applyStripeSettings(settings: StripeSettingsState, hydrateConfiguration = true) {
     setStripeSettings(settings);
     if (hydrateConfiguration) {
+      // `stripeSettings` conserva siempre la lectura cruda del servidor; solo el
+      // formulario se protege de una lectura previa a la propagación.
+      const resolved = resolveStripeOrganizationHydration(settings.configuration, stripeOrganizationPendingWriteRef.current);
+      stripeOrganizationPendingWriteRef.current = resolved.pendingWrite;
       setCredentialInput((current) => ({
         ...current,
-        ...stripeOrganizationCredentialInput(settings.configuration)
+        ...stripeOrganizationCredentialInput(resolved.configuration)
       }));
     }
   }
@@ -4958,6 +4971,55 @@ function preservedStripeOrganizationInput(
     stripeSignerName: current.stripeSignerName,
     stripeSignerTitle: current.stripeSignerTitle
   };
+}
+
+type StripeOrganizationConfiguration = StripeSettingsState["configuration"];
+
+const STRIPE_ORGANIZATION_FIELDS: Array<keyof StripeOrganizationConfiguration> = [
+  "legalName",
+  "ein",
+  "timeZone",
+  "organizationPhone",
+  "organizationWebsite",
+  "organizationMailingAddress",
+  "signerName",
+  "signerTitle"
+];
+
+export function trimmedStripeOrganization(
+  organization: Record<keyof StripeOrganizationConfiguration, string>
+): StripeOrganizationConfiguration {
+  return {
+    legalName: organization.legalName.trim(),
+    ein: organization.ein.trim(),
+    timeZone: organization.timeZone.trim(),
+    organizationPhone: organization.organizationPhone.trim(),
+    organizationWebsite: organization.organizationWebsite.trim(),
+    organizationMailingAddress: organization.organizationMailingAddress.trim(),
+    signerName: organization.signerName.trim(),
+    signerTitle: organization.signerTitle.trim()
+  };
+}
+
+// Un guardado de la organización de Stripe publica una versión nueva del Worker y
+// GET /api/settings/stripe lee `env`, así que durante la propagación la lectura puede
+// devolver los valores anteriores. Mientras haya una escritura pendiente, esta función
+// la superpone sobre la lectura del servidor; cuando el servidor ya devuelve los ocho
+// campos escritos, la propagación quedó confirmada y la escritura pendiente se descarta.
+export function resolveStripeOrganizationHydration(
+  configuration: StripeOrganizationConfiguration,
+  pendingWrite: StripeOrganizationConfiguration | null
+): { configuration: StripeOrganizationConfiguration; pendingWrite: StripeOrganizationConfiguration | null } {
+  if (!pendingWrite) {
+    return { configuration, pendingWrite: null };
+  }
+  const propagated = STRIPE_ORGANIZATION_FIELDS.every(
+    (field) => (configuration?.[field] ?? "").trim() === pendingWrite[field].trim()
+  );
+  if (propagated) {
+    return { configuration, pendingWrite: null };
+  }
+  return { configuration: { ...configuration, ...pendingWrite }, pendingWrite };
 }
 
 function stripeOrganizationCredentialInput(
