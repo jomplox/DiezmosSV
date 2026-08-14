@@ -5,7 +5,9 @@ import { pathToFileURL } from "node:url";
 import { loadPrivateDeployConfig } from "./private-deploy-config.mjs";
 
 const PUBLIC_VITE_VARIABLES = [
-  ["VITE_GIVEBUTTER_CAMPAIGN", (config) => config.campaign]
+  ["VITE_GIVEBUTTER_CAMPAIGN", (config) => config.campaign],
+  ["VITE_GIVEBUTTER_TITHE_FUND_ID", (config) => config.givebutterFunds?.tithe],
+  ["VITE_GIVEBUTTER_OFFERING_FUND_ID", (config) => config.givebutterFunds?.offering]
 ];
 
 export async function runPrivateBuild({
@@ -16,8 +18,8 @@ export async function runPrivateBuild({
   platform = process.platform
 } = {}) {
   // Validate the owner-only target, campaign, origin, and donor-logo contract
-  // before Vite starts. Only the public Givebutter campaign slug enters the
-  // client build; Stripe credentials remain runtime-only.
+  // before Vite starts. Only validated public Givebutter routing values enter
+  // the client build; Stripe credentials remain runtime-only.
   const config = loadPrivateDeployConfig({ target, env, repositoryRoot });
   const buildEnv = createBuildEnvironment(env, config);
   const invocation = buildInvocation(platform, buildEnv);
@@ -56,7 +58,10 @@ function createBuildEnvironment(inheritedEnv, config) {
     }
   }
   for (const [name, readConfig] of PUBLIC_VITE_VARIABLES) {
-    buildEnv[name] = readConfig(config);
+    const value = readConfig(config);
+    if (value !== undefined) {
+      buildEnv[name] = value;
+    }
   }
   return buildEnv;
 }

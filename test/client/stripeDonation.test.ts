@@ -26,6 +26,14 @@ const stripeFormSource = readFileSync(resolve(import.meta.dirname, "../../src/cl
 const resultSource = readFileSync(resolve(import.meta.dirname, "../../src/client/stripeResultPage.tsx"), "utf8");
 const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
 const mainSource = readFileSync(resolve(import.meta.dirname, "../../src/client/main.tsx"), "utf8");
+const givebutterEmbedUrlUnderTest = givebutterEmbedUrl as unknown as (
+  input: { amount: string; monthly: boolean; giftType: string },
+  fundIds?: { tithe: string; offering: string } | null
+) => string | null;
+const givebutterHostedUrlUnderTest = givebutterHostedUrl as unknown as (
+  input: { amount: string; monthly: boolean; giftType: string },
+  fundIds: { tithe: string; offering: string } | null
+) => string | null;
 
 describe("Stripe donor browser contract", () => {
   it("pins the anonymous endpoints and the US-only route", () => {
@@ -75,26 +83,68 @@ describe("Stripe donor browser contract", () => {
     expect(stripeSessionIdFromSearch("")).toBeNull();
   });
 
-  it("keeps the production US explanatory paragraph while Stripe replaces Givebutter", () => {
+  it("uses the configured church only as beneficiary and never invents a U.S. legal identity", () => {
     expect(STRIPE_MONTHLY_LABEL).toBe("Frecuencia de la entrega");
     expect(STRIPE_FREQ_ONCE_LABEL).toBe("Única");
     expect(STRIPE_FREQ_MONTHLY_LABEL).toBe("Mensual");
     expect(stripeIntro("Iglesia Ejemplo Central")).toBe(
-      "Su diezmo u ofrenda apoya a Iglesia Ejemplo Central en El Salvador. Se procesa en EE. UU. a través de Friends of Iglesia Ejemplo Central (501c3) y recibirá un recibo deducible de impuestos en EE. UU. por correo."
+      "Su diezmo u ofrenda apoya a Iglesia Ejemplo Central en El Salvador. Se procesa en EE. UU. a través de una organización estadounidense 501(c)(3) y recibirá un recibo deducible de impuestos en EE. UU. por correo."
     );
     expect(stripeIntro(null)).toBe(
-      "Su diezmo u ofrenda apoya a esta iglesia en El Salvador. Se procesa en EE. UU. a través de una organización estadounidense 501c3 y recibirá un recibo deducible de impuestos en EE. UU. por correo."
+      "Su diezmo u ofrenda apoya a esta iglesia en El Salvador. Se procesa en EE. UU. a través de una organización estadounidense 501(c)(3) y recibirá un recibo deducible de impuestos en EE. UU. por correo."
     );
   });
 
-  it("builds the production Givebutter alternative from deployment configuration", () => {
+  it("maps each gift type to its configured Givebutter fund with explicit supported prefills", () => {
+    const fundIds = { tithe: "731902", offering: "842013" } as const;
     expect(GIVEBUTTER_CAMPAIGN).toBe("example-campaign");
-    expect(givebutterEmbedUrl({ amount: "100.00", monthly: true })).toBe(
-      "https://givebutter.com/embed/c/example-campaign?amount=100&frequency=monthly&goalBar=false"
+    const titheEmbed = givebutterEmbedUrlUnderTest(
+      { amount: "100.00", monthly: false, giftType: "TITHE" },
+      fundIds
     );
-    expect(givebutterHostedUrl({ amount: "100.00", monthly: true })).toBe(
-      "https://givebutter.com/example-campaign?amount=100&frequency=monthly"
+    const offeringHosted = givebutterHostedUrlUnderTest(
+      { amount: "25.50", monthly: true, giftType: "OFFERING" },
+      fundIds
     );
+
+    expect(titheEmbed).not.toBeNull();
+    expect(Object.fromEntries(new URL(titheEmbed!).searchParams)).toEqual({
+      amount: "100",
+      frequency: "once",
+      fund: fundIds.tithe,
+      goalBar: "false"
+    });
+    expect(offeringHosted).not.toBeNull();
+    expect(Object.fromEntries(new URL(offeringHosted!).searchParams)).toEqual({
+      amount: "25.5",
+      frequency: "monthly",
+      fund: fundIds.offering
+    });
+  });
+
+  it("fails closed when the Givebutter mapping, gift type, or amount is unsupported", () => {
+    expect(
+      givebutterEmbedUrlUnderTest({ amount: "100.00", monthly: false, giftType: "TITHE" })
+    ).toBeNull();
+    expect(
+      givebutterEmbedUrlUnderTest({ amount: "100.00", monthly: false, giftType: "TITHE" }, null)
+    ).toBeNull();
+    expect(
+      givebutterEmbedUrlUnderTest(
+        { amount: "100.00", monthly: false, giftType: "UNSUPPORTED" },
+        { tithe: "731902", offering: "842013" }
+      )
+    ).toBeNull();
+    expect(
+      givebutterHostedUrlUnderTest(
+        { amount: "not-an-amount", monthly: true, giftType: "OFFERING" },
+        { tithe: "731902", offering: "842013" }
+      )
+    ).toBeNull();
+    expect(donarSource).toContain(
+      "const givebutterAvailable = givebutterFrameUrl !== null && givebutterHostedPageUrl !== null;"
+    );
+    expect(donarSource).toContain("{givebutterAvailable && (");
   });
 });
 
@@ -127,10 +177,14 @@ describe("Stripe donor page source contract", () => {
     );
   });
 
-  it("keeps Givebutter as an explicit donor-selected alternative to the default Stripe form", () => {
+  it("shows Givebutter only behind a mapped handoff and asks the donor to confirm every prefill", () => {
     expect(donarSource).toContain("Dar con Givebutter");
     expect(donarSource).toContain("Formulario en inglés");
-    expect(donarSource).toContain("givebutterEmbedUrl({ amount: form.amount, monthly })");
+    expect(donarSource).toContain("giftType: stripeGiftType");
+    expect(donarSource).toContain("givebutterFrameUrl && givebutterHostedPageUrl");
+    expect(donarSource).toContain(
+      "Confirme en Givebutter el tipo de entrega, el monto y la frecuencia"
+    );
     expect(donarSource).toContain('usProvider === "stripe"');
     expect(donarSource).toContain('usProvider === "givebutter"');
   });

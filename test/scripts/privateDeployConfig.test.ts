@@ -41,9 +41,80 @@ describe("private deployment configuration", () => {
     ).toMatchObject({
       target: "staging",
       campaign: "campaign-fixture",
+      givebutterFunds: null,
       origin: "https://staging.example.invalid",
       donorLogo: { contentType: "image/png", bytes: pngBytes }
     });
+  });
+
+  it("loads an optional complete Givebutter fund pair without disclosing it", () => {
+    const fixture = deploymentFixture();
+    writeFileSync(
+      fixture.configPath,
+      fixture.configContents.replace(
+        "VITE_GIVEBUTTER_CAMPAIGN=campaign-fixture\n",
+        [
+          "VITE_GIVEBUTTER_CAMPAIGN=campaign-fixture",
+          "VITE_GIVEBUTTER_TITHE_FUND_ID=731902",
+          "VITE_GIVEBUTTER_OFFERING_FUND_ID=842013",
+          ""
+        ].join("\n")
+      ),
+      { mode: 0o600 }
+    );
+
+    expect(
+      (loadPrivateDeployConfig({
+        target: "staging",
+        env: { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath },
+        repositoryRoot: fixture.repositoryRoot
+      }) as { givebutterFunds?: { tithe: string; offering: string } }).givebutterFunds
+    ).toEqual({ tithe: "731902", offering: "842013" });
+  });
+
+  it.each([
+    ["VITE_GIVEBUTTER_TITHE_FUND_ID=731902\n", /paired Givebutter fund settings/],
+    [
+      "VITE_GIVEBUTTER_TITHE_FUND_ID=\"   \"\nVITE_GIVEBUTTER_OFFERING_FUND_ID=842013\n",
+      /nonblank numeric Givebutter fund identifiers/
+    ],
+    [
+      "VITE_GIVEBUTTER_TITHE_FUND_ID=not-numeric\nVITE_GIVEBUTTER_OFFERING_FUND_ID=842013\n",
+      /nonblank numeric Givebutter fund identifiers/
+    ],
+    [
+      "VITE_GIVEBUTTER_TITHE_FUND_ID=123456\nVITE_GIVEBUTTER_OFFERING_FUND_ID=842013\n",
+      /placeholder-like Givebutter fund identifier/
+    ],
+    [
+      "VITE_GIVEBUTTER_TITHE_FUND_ID=731902\nVITE_GIVEBUTTER_OFFERING_FUND_ID=731902\n",
+      /distinct Givebutter fund identifiers/
+    ]
+  ])("rejects an incomplete or ambiguous optional Givebutter fund mapping", (fundSettings, expected) => {
+    const fixture = deploymentFixture();
+    writeFileSync(
+      fixture.configPath,
+      fixture.configContents.replace(
+        "VITE_GIVEBUTTER_CAMPAIGN=campaign-fixture\n",
+        `VITE_GIVEBUTTER_CAMPAIGN=campaign-fixture\n${fundSettings}`
+      ),
+      { mode: 0o600 }
+    );
+
+    expect(() =>
+      loadPrivateDeployConfig({
+        target: "staging",
+        env: { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath },
+        repositoryRoot: fixture.repositoryRoot
+      })
+    ).toThrow(expected);
+    expectSanitizedFailure(() =>
+      loadPrivateDeployConfig({
+        target: "staging",
+        env: { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath },
+        repositoryRoot: fixture.repositoryRoot
+      }), fixture
+    );
   });
 
   it("accepts JPEG bytes when the private extension agrees", () => {
@@ -450,7 +521,11 @@ function expectSanitizedFailure(action: () => unknown, fixture: Fixture): void {
     "password-fixture",
     fixture.logoPath,
     fixture.configPath,
-    "929e7cf"
+    "929e7cf",
+    "731902",
+    "842013",
+    "not-numeric",
+    "123456"
   ]) {
     expect(message).not.toContain(privateValue);
   }

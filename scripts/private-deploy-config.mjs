@@ -11,6 +11,19 @@ import { parseEnv } from "node:util";
 import { assertDonationLaneConfigured } from "./assert-donation-lane-config.mjs";
 
 const TARGETS = new Set(["staging", "production"]);
+const GIVEBUTTER_TITHE_FUND_KEY = "VITE_GIVEBUTTER_TITHE_FUND_ID";
+const GIVEBUTTER_OFFERING_FUND_KEY = "VITE_GIVEBUTTER_OFFERING_FUND_ID";
+const GIVEBUTTER_FUND_ID_PATTERN = /^[1-9][0-9]{0,19}$/;
+const GIVEBUTTER_PLACEHOLDER_FUND_IDS = new Set([
+  "1",
+  "123",
+  "1234",
+  "12345",
+  "123456",
+  "1234567",
+  "12345678",
+  "123456789"
+]);
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff]);
 
@@ -43,6 +56,7 @@ export function loadPrivateDeployConfig({
   assertDonationLaneConfigured({
     environment: { VITE_GIVEBUTTER_CAMPAIGN: campaign }
   });
+  const givebutterFunds = optionalGivebutterFunds(parsed);
 
   const originValue = requiredValue(parsed, "DIEZMOSSV_APP_ORIGIN", "deploy config");
   const origin = validatedOrigin(originValue);
@@ -70,6 +84,7 @@ export function loadPrivateDeployConfig({
   return {
     target,
     campaign,
+    givebutterFunds,
     origin,
     donorLogo: {
       path: resolvedLogo,
@@ -78,6 +93,38 @@ export function loadPrivateDeployConfig({
       sha256: createHash("sha256").update(bytes).digest("hex")
     }
   };
+}
+
+function optionalGivebutterFunds(parsed) {
+  const hasTithe = Object.hasOwn(parsed, GIVEBUTTER_TITHE_FUND_KEY);
+  const hasOffering = Object.hasOwn(parsed, GIVEBUTTER_OFFERING_FUND_KEY);
+  if (!hasTithe && !hasOffering) {
+    return null;
+  }
+  if (!hasTithe || !hasOffering) {
+    throw sanitizedError(
+      `The private deploy config must set ${GIVEBUTTER_TITHE_FUND_KEY} and ${GIVEBUTTER_OFFERING_FUND_KEY} together as paired Givebutter fund settings`
+    );
+  }
+
+  const tithe = parsed[GIVEBUTTER_TITHE_FUND_KEY]?.trim() ?? "";
+  const offering = parsed[GIVEBUTTER_OFFERING_FUND_KEY]?.trim() ?? "";
+  if (!GIVEBUTTER_FUND_ID_PATTERN.test(tithe) || !GIVEBUTTER_FUND_ID_PATTERN.test(offering)) {
+    throw sanitizedError(
+      `The private deploy config settings ${GIVEBUTTER_TITHE_FUND_KEY} and ${GIVEBUTTER_OFFERING_FUND_KEY} must contain nonblank numeric Givebutter fund identifiers`
+    );
+  }
+  if (GIVEBUTTER_PLACEHOLDER_FUND_IDS.has(tithe) || GIVEBUTTER_PLACEHOLDER_FUND_IDS.has(offering)) {
+    throw sanitizedError(
+      `The private deploy config settings ${GIVEBUTTER_TITHE_FUND_KEY} and ${GIVEBUTTER_OFFERING_FUND_KEY} contain a placeholder-like Givebutter fund identifier`
+    );
+  }
+  if (tithe === offering) {
+    throw sanitizedError(
+      `The private deploy config settings ${GIVEBUTTER_TITHE_FUND_KEY} and ${GIVEBUTTER_OFFERING_FUND_KEY} must contain distinct Givebutter fund identifiers`
+    );
+  }
+  return { tithe, offering };
 }
 
 export function loadOperatorCredentials({

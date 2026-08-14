@@ -488,7 +488,10 @@ export function DonarPage() {
       ? DONAR_GIFT_TYPE_LABEL[form.giftType]
       : "";
   const frequencyLabel = monthly ? STRIPE_FREQ_MONTHLY_LABEL : STRIPE_FREQ_ONCE_LABEL;
-  const givebutterFrameUrl = givebutterEmbedUrl({ amount: form.amount, monthly });
+  const givebutterInput = { amount: form.amount, monthly, giftType: stripeGiftType };
+  const givebutterFrameUrl = givebutterEmbedUrl(givebutterInput);
+  const givebutterHostedPageUrl = givebutterHostedUrl(givebutterInput);
+  const givebutterAvailable = givebutterFrameUrl !== null && givebutterHostedPageUrl !== null;
 
   // Choose a door: record it in ?ruta (composing with — never clobbering — any
   // existing query) so a refresh keeps the door, then swap the view. null returns
@@ -635,7 +638,7 @@ export function DonarPage() {
   // entry (Givebutter → Stripe → Givebutter) paints one frame carrying the previous
   // session's promoted pill and no placeholder before collapsing to the quiet hint.
   useLayoutEffect(() => {
-    if (!usDonation || step !== 2 || usProvider !== "givebutter") {
+    if (!usDonation || step !== 2 || usProvider !== "givebutter" || !givebutterFrameUrl) {
       return;
     }
     let cancelled = false;
@@ -1381,28 +1384,30 @@ export function DonarPage() {
                   {/* The alternative sits BELOW the default form: Stripe carries the
                       Spanish form and the tax receipt, so it owns the "understand → pay"
                       reading flow. Givebutter is the way out of it, not the way in. */}
-                  <button
-                    type="button"
-                    className="donar-provider-choice"
-                    onClick={() => {
-                      usProviderSwitchedRef.current = true;
-                      setUsProvider("givebutter");
-                    }}
-                  >
-                    <img
-                      src={GIVEBUTTER_ICON_DATA_URI}
-                      alt=""
-                      aria-hidden="true"
-                    />
-                    <span className="donar-provider-choice-copy">
-                      <strong>Dar con Givebutter</strong>
-                      <small>Formulario en inglés</small>
-                    </span>
-                    <span className="donar-provider-choice-arrow" aria-hidden="true">→</span>
-                  </button>
+                  {givebutterAvailable && (
+                    <button
+                      type="button"
+                      className="donar-provider-choice"
+                      onClick={() => {
+                        usProviderSwitchedRef.current = true;
+                        setUsProvider("givebutter");
+                      }}
+                    >
+                      <img
+                        src={GIVEBUTTER_ICON_DATA_URI}
+                        alt=""
+                        aria-hidden="true"
+                      />
+                      <span className="donar-provider-choice-copy">
+                        <strong>Dar con Givebutter</strong>
+                        <small>Formulario en inglés</small>
+                      </span>
+                      <span className="donar-provider-choice-arrow" aria-hidden="true">→</span>
+                    </button>
+                  )}
                 </>
               )}
-              {usProvider === "givebutter" && (
+              {usProvider === "givebutter" && givebutterFrameUrl && givebutterHostedPageUrl && (
                 <div className="donar-givebutter-surface">
                   <button
                     ref={stripeReturnRef}
@@ -1419,12 +1424,15 @@ export function DonarPage() {
                     </span>
                     <span className="donar-provider-choice-arrow" aria-hidden="true">←</span>
                   </button>
+                  <p className="donar-givebutter-confirmation">
+                    Confirme en Givebutter el tipo de entrega, el monto y la frecuencia antes de continuar; estos datos se envían solo como valores iniciales.
+                  </p>
                   {/* The single escape hatch, above the 760px frame: a donor staring at a
                       blank embed must not have to scroll past it to find the way out. Quiet
                       hint by default, promoted in place once the render budget elapses. */}
                   <a
                     className={givebutterFrameDelayed ? "donar-givebutter-hint donar-givebutter-fallback" : "donar-givebutter-hint"}
-                    href={givebutterHostedUrl({ amount: form.amount, monthly })}
+                    href={givebutterHostedPageUrl}
                     target="_blank"
                     rel="noopener noreferrer"
                   >

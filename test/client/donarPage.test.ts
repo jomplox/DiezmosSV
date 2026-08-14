@@ -1100,6 +1100,15 @@ describe("donar wizard styles contract", () => {
     expect(stylesSource).toContain(".donar-step");
     expect(stylesSource).toMatch(/prefers-reduced-motion[\s\S]{0,800}\.donar-step/);
   });
+
+  it("removes provider-switch transitions and transforms for reduced-motion donors", () => {
+    expect(stylesSource).toMatch(
+      /prefers-reduced-motion[\s\S]{0,1400}\.donar-provider-choice\s*\{[^}]*transition:\s*none;/
+    );
+    expect(stylesSource).toMatch(
+      /prefers-reduced-motion[\s\S]{0,1800}\.donar-provider-choice:hover,[\s\S]{0,180}\.donar-provider-choice:focus-visible,[\s\S]{0,180}\.donar-provider-choice:active\s*\{[^}]*transform:\s*none;/
+    );
+  });
 });
 
 describe("donar responsive donor layout", () => {
@@ -1210,7 +1219,7 @@ describe("Stripe donar page source contract", () => {
   it("shows the production 501c3 explanation and mounts the Stripe form in place", () => {
     const intro = stripeIntro("Iglesia Ejemplo Central");
     expect(donarSource).toContain("stripeIntro(organizationName)");
-    expect(intro).toContain("501c3");
+    expect(intro).toContain("501(c)(3)");
     // The US door funds the SAME church — the intro says so, never implying a
     // different beneficiary.
     expect(intro).toContain("apoya a Iglesia Ejemplo Central en El Salvador");
@@ -1220,7 +1229,7 @@ describe("Stripe donar page source contract", () => {
 
   it("uses neutral donor copy when public branding has no configured organization", () => {
     expect(stripeIntro(null)).toContain("apoya a esta iglesia en El Salvador");
-    expect(stripeIntro("   ")).toContain("una organización estadounidense 501c3");
+    expect(stripeIntro("   ")).toContain("una organización estadounidense 501(c)(3)");
     expect(stripeIntro(null)).not.toMatch(/ExampleOrganization|ExamplePerson1/);
   });
 
@@ -1298,7 +1307,9 @@ describe("Stripe donar page source contract", () => {
   });
 
   it("puts one Givebutter escape hatch above the frame instead of two below it", () => {
-    const surfaceStart = pageSource.indexOf('{usProvider === "givebutter" && (');
+    const surfaceStart = pageSource.indexOf(
+      '{usProvider === "givebutter" && givebutterFrameUrl && givebutterHostedPageUrl && ('
+    );
     expect(surfaceStart).toBeGreaterThan(-1);
     const surface = pageSource.slice(surfaceStart, pageSource.indexOf("{/* Paso 3", surfaceStart));
     // A donor staring at a blank 760px embed must not scroll past it to find the way
@@ -1310,7 +1321,7 @@ describe("Stripe donar page source contract", () => {
     expect(hatch).toBeLessThan(frame);
     // One anchor, two states — the promoted look is a class + copy swap on that same
     // element, never a second link to the same href.
-    expect(surface.match(/givebutterHostedUrl\(/g)).toHaveLength(1);
+    expect(surface.match(/href=\{givebutterHostedPageUrl\}/g)).toHaveLength(1);
     expect(surface).toContain("¿Problemas con el formulario? Abrir Givebutter");
     expect(surface).toContain("Abrir Givebutter en otra pestaña");
     // The escape hatch never spends the page's strongest CTA style.

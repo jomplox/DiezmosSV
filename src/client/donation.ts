@@ -88,11 +88,22 @@ export const STRIPE_CANCELED_MESSAGE =
 export const STRIPE_RESULT_POLL_INTERVAL_MS = 5_000;
 export const STRIPE_RESULT_POLL_TIMEOUT_MS = 3 * 60 * 1_000;
 
-// Givebutter remains an explicit donor-selected alternative on the U.S. step.
-// Its campaign slug is target-bound build configuration, never a reusable-source
-// literal. Public/local builds keep a neutral placeholder so tests and fresh clones
-// remain runnable; the private release wrapper rejects that placeholder.
+// Givebutter is an explicit donor-selected alternative only when the target build
+// supplies a complete fund pair. Its campaign slug and fund identifiers are public
+// build configuration, never reusable-source deployment literals. Public/local builds
+// keep the neutral campaign placeholder but omit the alternative without the pair.
 const GIVEBUTTER_CAMPAIGN_FALLBACK = "example-campaign";
+const GIVEBUTTER_FUND_ID_PATTERN = /^[1-9][0-9]{0,19}$/;
+const GIVEBUTTER_PLACEHOLDER_FUND_IDS = new Set([
+  "1",
+  "123",
+  "1234",
+  "12345",
+  "123456",
+  "1234567",
+  "12345678",
+  "123456789"
+]);
 const buildEnv: Record<string, string | undefined> =
   typeof import.meta === "object" && import.meta !== null
     ? ((import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {})
@@ -102,44 +113,75 @@ export const GIVEBUTTER_CAMPAIGN =
 export const GIVEBUTTER_EMBED_BASE_URL =
   `https://givebutter.com/embed/c/${GIVEBUTTER_CAMPAIGN}`;
 export const GIVEBUTTER_RENDER_TIMEOUT_MS = 4_000;
+export type GivebutterFundIds = Readonly<{ tithe: string; offering: string }>;
+
+function validGivebutterFundId(value: string): boolean {
+  return GIVEBUTTER_FUND_ID_PATTERN.test(value) && !GIVEBUTTER_PLACEHOLDER_FUND_IDS.has(value);
+}
+
+function validGivebutterFundIds(fundIds: GivebutterFundIds | null): fundIds is GivebutterFundIds {
+  return fundIds !== null
+    && validGivebutterFundId(fundIds.tithe)
+    && validGivebutterFundId(fundIds.offering)
+    && fundIds.tithe !== fundIds.offering;
+}
+
+const configuredGivebutterFundIds = (() => {
+  const tithe = buildEnv.VITE_GIVEBUTTER_TITHE_FUND_ID?.trim() ?? "";
+  const offering = buildEnv.VITE_GIVEBUTTER_OFFERING_FUND_ID?.trim() ?? "";
+  const fundIds = tithe && offering ? { tithe, offering } : null;
+  return validGivebutterFundIds(fundIds) ? fundIds : null;
+})();
 
 function givebutterPrefillParams(input: {
   amount: string;
   monthly: boolean;
-}): URLSearchParams {
+  giftType: StripeGiftType;
+}, fundIds: GivebutterFundIds | null): URLSearchParams | null {
+  if (
+    !validGivebutterFundIds(fundIds)
+    || (input.giftType !== "TITHE" && input.giftType !== "OFFERING")
+  ) {
+    return null;
+  }
   const params = new URLSearchParams();
   const amount = Number.parseFloat(input.amount.trim());
-  if (Number.isFinite(amount) && amount > 0) {
-    params.set("amount", String(amount));
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return null;
   }
-  if (input.monthly) {
-    params.set("frequency", "monthly");
-  }
+  params.set("amount", String(amount));
+  params.set("frequency", input.monthly ? "monthly" : "once");
+  params.set("fund", input.giftType === "TITHE" ? fundIds.tithe : fundIds.offering);
   return params;
 }
 
-export function givebutterEmbedUrl(input: { amount: string; monthly: boolean }): string {
-  const params = givebutterPrefillParams(input);
+export function givebutterEmbedUrl(
+  input: { amount: string; monthly: boolean; giftType: StripeGiftType },
+  fundIds: GivebutterFundIds | null = configuredGivebutterFundIds
+): string | null {
+  const params = givebutterPrefillParams(input, fundIds);
+  if (!params) return null;
   params.set("goalBar", "false");
   return `${GIVEBUTTER_EMBED_BASE_URL}?${params.toString()}`;
 }
 
-export function givebutterHostedUrl(input: { amount: string; monthly: boolean }): string {
-  const params = givebutterPrefillParams(input);
-  const query = params.toString();
-  return `https://givebutter.com/${GIVEBUTTER_CAMPAIGN}${query ? `?${query}` : ""}`;
+export function givebutterHostedUrl(
+  input: { amount: string; monthly: boolean; giftType: StripeGiftType },
+  fundIds: GivebutterFundIds | null = configuredGivebutterFundIds
+): string | null {
+  const params = givebutterPrefillParams(input, fundIds);
+  return params ? `https://givebutter.com/${GIVEBUTTER_CAMPAIGN}?${params.toString()}` : null;
 }
 
-// Keep the production US-door explanation unchanged while Stripe remains the
-// default form and Givebutter remains an explicit alternative. The formal receipt
-// still supplies the configured legal entity name and EIN independently of this
-// familiar donor-facing copy.
+// Public branding names the beneficiary church, not the separate U.S. legal entity.
+// The formal receipt supplies the configured legal name and EIN; this public surface
+// stays neutral unless a genuine public legal-identity seam is introduced.
 export function stripeIntro(organizationName: string | null): string {
   const name = organizationName?.trim();
   if (!name) {
-    return "Su diezmo u ofrenda apoya a esta iglesia en El Salvador. Se procesa en EE. UU. a través de una organización estadounidense 501c3 y recibirá un recibo deducible de impuestos en EE. UU. por correo.";
+    return "Su diezmo u ofrenda apoya a esta iglesia en El Salvador. Se procesa en EE. UU. a través de una organización estadounidense 501(c)(3) y recibirá un recibo deducible de impuestos en EE. UU. por correo.";
   }
-  return `Su diezmo u ofrenda apoya a ${name} en El Salvador. Se procesa en EE. UU. a través de Friends of ${name} (501c3) y recibirá un recibo deducible de impuestos en EE. UU. por correo.`;
+  return `Su diezmo u ofrenda apoya a ${name} en El Salvador. Se procesa en EE. UU. a través de una organización estadounidense 501(c)(3) y recibirá un recibo deducible de impuestos en EE. UU. por correo.`;
 }
 
 export function stripeCheckoutBody(input: {

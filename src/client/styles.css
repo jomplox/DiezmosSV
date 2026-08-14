@@ -4151,6 +4151,14 @@ pre {
   justify-items: center;
 }
 
+.donar-givebutter-confirmation {
+  width: min(100%, 440px);
+  color: #555555;
+  font-size: 13px;
+  line-height: 1.45;
+  text-align: center;
+}
+
 /* Positioning context for the loading placeholder: the frame's own box, so the
    placeholder cannot ride up over the controls when the escape hatch is promoted. */
 .donar-givebutter-frame-area {
@@ -4432,6 +4440,14 @@ pre {
   .donar-segment-option,
   .donar-chip {
     transition: none;
+  }
+  .donar-provider-choice {
+    transition: none;
+  }
+  .donar-provider-choice:hover,
+  .donar-provider-choice:focus-visible,
+  .donar-provider-choice:active {
+    transform: none;
   }
 }
 

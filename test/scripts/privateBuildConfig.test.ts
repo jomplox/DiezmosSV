@@ -16,6 +16,7 @@ import { runPrivateBuild } from "../../scripts/run-private-build.mjs";
 import { pngBytes as generatePngBytes } from "../worker/support/rasterFixtures";
 
 const pngBytes = Buffer.from(generatePngBytes(2, 2, { red: 20, green: 60, blue: 200 }));
+const givebutterFundFixtures = { tithe: "731902", offering: "842013" } as const;
 const roots: string[] = [];
 
 afterEach(() => {
@@ -26,7 +27,7 @@ afterEach(() => {
 
 describe("private release builds", () => {
   it.each(["staging", "production"] as const)(
-    "builds %s while injecting only the public campaign into the client environment",
+    "builds %s while injecting only the validated public Givebutter configuration into the client environment",
     async (target) => {
       const fixture = deploymentFixture(target);
       const { calls, spawnImpl } = recordingSpawn(0);
@@ -43,6 +44,8 @@ describe("private release builds", () => {
         NODE_EXTRA_CA_CERTS: "/fixture/extra-ca.pem",
         SSL_CERT_FILE: "/fixture/ca-bundle.pem",
         VITE_GIVEBUTTER_CAMPAIGN: "ambient-campaign-override",
+        VITE_GIVEBUTTER_TITHE_FUND_ID: "ambient-tithe-override",
+        VITE_GIVEBUTTER_OFFERING_FUND_ID: "ambient-offering-override",
         VITE_PRIVATE_SENTINEL: "uppercase-private-canary",
         ViTe_MIXED_SENTINEL: "mixed-case-private-canary"
       };
@@ -80,6 +83,8 @@ describe("private release builds", () => {
       expect(call.command).toBe("npm");
       expect(call.args).toEqual(["run", "build"]);
       expect(call.options.env.VITE_GIVEBUTTER_CAMPAIGN).toBe("campaign-fixture");
+      expect(call.options.env.VITE_GIVEBUTTER_TITHE_FUND_ID).toBe(givebutterFundFixtures.tithe);
+      expect(call.options.env.VITE_GIVEBUTTER_OFFERING_FUND_ID).toBe(givebutterFundFixtures.offering);
       expect(call.options.env.INHERITED_TEST_VALUE).toBe("available-to-build");
       expect(call.options.env.PATH).toBe("/fixture/bin");
       expect(call.options.env.CI).toBe("true");
@@ -111,6 +116,28 @@ describe("private release builds", () => {
       });
     }
   );
+
+  it("omits both optional fund variables when the validated pair is absent", async () => {
+    const fixture = deploymentFixture("staging");
+    const configWithoutFunds = readFileSync(fixture.configPath, "utf8")
+      .replace(/^VITE_GIVEBUTTER_(?:TITHE|OFFERING)_FUND_ID=.*\n/gm, "");
+    writeFileSync(fixture.configPath, configWithoutFunds, { mode: 0o600 });
+    const { calls, spawnImpl } = recordingSpawn(0);
+
+    await expect(
+      runPrivateBuild({
+        target: "staging",
+        env: { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath },
+        repositoryRoot: fixture.repositoryRoot,
+        spawnImpl,
+        platform: "linux"
+      })
+    ).resolves.toBe(0);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].options.env.VITE_GIVEBUTTER_TITHE_FUND_ID).toBeUndefined();
+    expect(calls[0].options.env.VITE_GIVEBUTTER_OFFERING_FUND_ID).toBeUndefined();
+  });
 
   it("uses an explicit Windows command interpreter with constant npm arguments", async () => {
     const fixture = deploymentFixture("staging");
@@ -184,6 +211,8 @@ describe("private release builds", () => {
             ...process.env,
             DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath,
             VITE_GIVEBUTTER_CAMPAIGN: "ambient-campaign-override",
+            VITE_GIVEBUTTER_TITHE_FUND_ID: "ambient-tithe-override",
+            VITE_GIVEBUTTER_OFFERING_FUND_ID: "ambient-offering-override",
             [canaryName]: canaryValue
           },
           repositoryRoot: fixture.repositoryRoot
@@ -193,10 +222,14 @@ describe("private release builds", () => {
       const bundle = readTextTree(join(fixture.repositoryRoot, "dist"));
       expect({
         approvedCampaignPresent: bundle.includes("campaign-fixture"),
+        approvedTitheFundPresent: bundle.includes(givebutterFundFixtures.tithe),
+        approvedOfferingFundPresent: bundle.includes(givebutterFundFixtures.offering),
         canaryNamePresent: bundle.includes(canaryName),
         canaryValuePresent: bundle.includes(canaryValue)
       }).toEqual({
         approvedCampaignPresent: true,
+        approvedTitheFundPresent: true,
+        approvedOfferingFundPresent: true,
         canaryNamePresent: false,
         canaryValuePresent: false
       });
@@ -258,6 +291,8 @@ function deploymentFixture(target: "staging" | "production"): Fixture {
     [
       `DIEZMOSSV_DEPLOY_TARGET=${target}`,
       "VITE_GIVEBUTTER_CAMPAIGN=campaign-fixture",
+      `VITE_GIVEBUTTER_TITHE_FUND_ID=${givebutterFundFixtures.tithe}`,
+      `VITE_GIVEBUTTER_OFFERING_FUND_ID=${givebutterFundFixtures.offering}`,
       `DIEZMOSSV_APP_ORIGIN=https://${target}.example.invalid`,
       `DIEZMOSSV_DONOR_LOGO_FILE=${logoPath}`,
       ""
@@ -289,6 +324,8 @@ function disposableViteFixture(target: "staging" | "production"): Fixture {
     [
       "globalThis.__PRIVATE_BUILD_ENV__ = {",
       "  campaign: import.meta.env.VITE_GIVEBUTTER_CAMPAIGN,",
+      "  titheFund: import.meta.env.VITE_GIVEBUTTER_TITHE_FUND_ID,",
+      "  offeringFund: import.meta.env.VITE_GIVEBUTTER_OFFERING_FUND_ID,",
       "  snapshot: import.meta.env",
       "};",
       ""

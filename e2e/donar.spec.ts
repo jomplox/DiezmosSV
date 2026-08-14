@@ -583,7 +583,6 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   await expect(page.getByText("Su entrega", { exact: true })).toBeVisible();
   await expect(page.getByText("Ofrenda · Mensual · $100.00")).toBeVisible();
   await expect(page.locator(".donar-intro")).toContainText(`apoya a ${BRANDING_DISPLAY_NAME} en El Salvador`);
-  await expect(page.locator(".donar-intro")).toContainText("Friends of Iglesia Ejemplo Central (501c3)");
   await expect(
     page.getByText("Stripe mostrará en español las opciones disponibles para usted de forma segura.")
   ).toHaveCount(0);
@@ -656,13 +655,17 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   await expect(page.locator(".donar-stripe-embedded")).toHaveCount(0);
   const givebutterFrame = page.getByTitle("Formulario de donación Givebutter (en inglés)");
   await expect(givebutterFrame).toBeVisible();
-  await expect(givebutterFrame).toHaveAttribute(
-    "src",
-    "https://givebutter.com/embed/c/example-campaign?amount=100&frequency=monthly&goalBar=false"
-  );
-  expect(givebutterRequests).toEqual([
-    "https://givebutter.com/embed/c/example-campaign?amount=100&frequency=monthly&goalBar=false"
-  ]);
+  const givebutterEmbedRequest = new URL(givebutterRequests.at(0) ?? "");
+  expect(givebutterEmbedRequest.pathname).toBe("/embed/c/example-campaign");
+  expect(givebutterEmbedRequest.searchParams.get("amount")).toBe("100");
+  expect(givebutterEmbedRequest.searchParams.get("frequency")).toBe("monthly");
+  // Synthetic browser-build fixture: this proves the selected Ofrenda maps to the
+  // offering member of the pair without reading or printing any deployment value.
+  expect(givebutterEmbedRequest.searchParams.get("fund")).toBe("842013");
+  expect(givebutterEmbedRequest.searchParams.get("goalBar")).toBe("false");
+  await expect(page.getByText(
+    "Confirme en Givebutter el tipo de entrega, el monto y la frecuencia antes de continuar; estos datos se envían solo como valores iniciales."
+  )).toBeVisible();
   // One escape hatch out of a non-rendering embed — never a hint and a button to the
   // same hosted page — and it sits above the 760px frame, so a donor facing a blank
   // box never has to scroll past it to find the way out. The anchor keeps
@@ -670,6 +673,12 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   const givebutterHatch = page.locator(".donar-givebutter-hint");
   await expect(givebutterHatch).toHaveCount(1);
   await expect(page.locator('.donar-givebutter-surface a[href^="https://givebutter.com/"]')).toHaveCount(1);
+  const givebutterHostedPage = new URL(await givebutterHatch.getAttribute("href") ?? "");
+  expect(givebutterHostedPage.searchParams.get("amount")).toBe("100");
+  expect(givebutterHostedPage.searchParams.get("frequency")).toBe("monthly");
+  expect(givebutterHostedPage.searchParams.get("fund")).toBe(
+    givebutterEmbedRequest.searchParams.get("fund")
+  );
   const hatchBox = await givebutterHatch.boundingBox();
   const frameBox = await givebutterFrame.boundingBox();
   expect(hatchBox).not.toBeNull();
@@ -678,6 +687,8 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   await page.getByRole("button", { name: /Volver a Stripe.*Formulario en español/i }).click();
   await expect(givebutterFrame).toHaveCount(0);
   await expect(page.locator(".donar-stripe-embedded")).toBeVisible();
+  await expect(page.locator(".donar-intro")).toContainText("una organización estadounidense 501(c)(3)");
+  await expect(page.locator(".donar-intro")).not.toContainText("Friends of");
 
   // Stripe reuses the Wompi handoff shell: the hosted surface is full-bleed on
   // mobile and aligns to the raised card edges on tablet/desktop. Only the
