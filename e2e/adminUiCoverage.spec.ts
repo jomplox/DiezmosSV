@@ -349,10 +349,14 @@ test("edits Salvadoran and U.S. email templates separately while identifying the
     if (url.pathname !== "/api/settings/email-templates") return false;
     if (route.request().method() === "PUT") {
       const payload = route.request().postDataJSON() as {
+        scope?: "SV_CDE" | "US_STRIPE";
         templates: Record<string, { subject: string; body: string }>;
       };
       savedTemplates = payload.templates;
-      templates = payload.templates;
+      // El endpoint real fusiona el grupo enviado sobre lo guardado y solo reemplaza las
+      // cinco cuando el cuerpo no trae `scope`. Reemplazar siempre modelaría un servidor
+      // que descarta el país que no se envió.
+      templates = payload.scope ? { ...templates, ...payload.templates } : payload.templates;
     }
     await fulfillJson(route, {
       emailTemplates: {

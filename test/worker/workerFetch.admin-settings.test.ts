@@ -959,6 +959,12 @@ describe("email template settings", () => {
         }
       }
     });
+    // Con el guardado por país, la fila de auditoría es el único registro de quién cambió
+    // qué grupo de correspondencia fiscal.
+    expect(db.audits.map((audit) => JSON.parse(String(audit.metadata_json)).scope)).toEqual([
+      "US_STRIPE",
+      "SV_CDE"
+    ]);
   });
 
   it("still validates the submitted group when the save is scoped", async () => {

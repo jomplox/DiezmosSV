@@ -1584,11 +1584,13 @@ function EmailTemplateEditor({
   );
 }
 
-// PUT /api/settings/email-templates exige las cinco plantillas en cada guardado, así que
-// un guardado por país solo puede acotarse eligiendo qué entradas provienen del borrador.
-// El resto se envía tal como el servidor las tiene guardadas. La partición es la misma
-// que usa el editor: cualquier scope inesperado cae del lado salvadoreño en ambos sitios,
-// para que ninguna plantilla visible en un grupo quede fuera de su propio guardado.
+// PUT /api/settings/email-templates recibe el país en `scope` y solo las plantillas de ese
+// país: el servidor las fusiona sobre lo que tiene guardado en ese instante y valida las
+// cinco. Completar aquí el otro grupo con la copia que este panel cargó al abrirse
+// revertiría en silencio lo que otra persona propietaria hubiera guardado mientras tanto,
+// así que este helper recorta el envío y nunca lo rellena. La partición es la misma que usa
+// el editor: cualquier scope inesperado cae del lado salvadoreño en ambos sitios, para que
+// ninguna plantilla visible en un grupo quede fuera de su propio guardado.
 export function isEmailTemplateScope(scope: EmailTemplateScope, candidate: EmailTemplateScope): boolean {
   return scope === "US_STRIPE" ? candidate === "US_STRIPE" : candidate !== "US_STRIPE";
 }

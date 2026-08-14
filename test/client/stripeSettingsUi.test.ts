@@ -1,7 +1,11 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, test } from "vitest";
-import { resolveStripeOrganizationHydration, trimmedStripeOrganization } from "../../src/client/App";
+import {
+  STRIPE_ORGANIZATION_PENDING_WRITE_TTL_MS,
+  resolveStripeOrganizationHydration,
+  trimmedStripeOrganization
+} from "../../src/client/App";
 import { credentialSettingsSections } from "../../src/client/credentialSettings";
 import { userFacingErrorMessage } from "../../src/client/displayText";
 import type { StripeSettingsState } from "../../src/client/types";
@@ -143,33 +147,37 @@ const savedOrganization: StripeSettingsState["configuration"] = {
   signerTitle: "Tesorero"
 };
 
+const SAVED_AT = 1_770_000_000_000;
+const pendingWrite = { values: savedOrganization, savedAt: SAVED_AT };
+const withinWindow = SAVED_AT + 1_000;
+
 describe("Stripe organization propagation window", () => {
   test("keeps a just-saved value when the refresh still reads the pre-save Worker env", () => {
     // El GET lo atendió un isolate con el env anterior: devuelve el teléfono viejo.
     const stale = { ...savedOrganization, organizationPhone: "+1 555 0199" };
 
-    const resolved = resolveStripeOrganizationHydration(stale, savedOrganization);
+    const resolved = resolveStripeOrganizationHydration(stale, pendingWrite, withinWindow);
 
     expect(resolved.configuration.organizationPhone).toBe("+1 555 0100");
     expect(resolved.configuration).toEqual(savedOrganization);
     // La escritura pendiente sigue vigente: la próxima rehidratación debe protegerla igual.
-    expect(resolved.pendingWrite).toEqual(savedOrganization);
+    expect(resolved.pendingWrite).toBe(pendingWrite);
   });
 
-  test("keeps the pending values without discarding the rest of the stale read", () => {
+  test("overlays every one of the eight fields, not only the one the owner edited", () => {
     const stale = { ...savedOrganization, legalName: "Nombre anterior", signerTitle: "Cargo anterior" };
 
-    const resolved = resolveStripeOrganizationHydration(stale, savedOrganization);
+    const resolved = resolveStripeOrganizationHydration(stale, pendingWrite, withinWindow);
 
+    expect(resolved.configuration).toEqual(savedOrganization);
     expect(resolved.configuration.legalName).toBe("Iglesia Elim USA");
     expect(resolved.configuration.signerTitle).toBe("Tesorero");
-    expect(resolved.configuration.ein).toBe("12-3456789");
   });
 
   test("clears the pending write once the server echoes the eight saved values", () => {
     const propagated = { ...savedOrganization, organizationPhone: "  +1 555 0100  " };
 
-    const resolved = resolveStripeOrganizationHydration(propagated, savedOrganization);
+    const resolved = resolveStripeOrganizationHydration(propagated, pendingWrite, withinWindow);
 
     expect(resolved.pendingWrite).toBeNull();
     // Confirmada la propagación, el formulario vuelve a sembrarse del servidor.
@@ -177,10 +185,55 @@ describe("Stripe organization propagation window", () => {
   });
 
   test("hydrates straight from the server when there is no pending write", () => {
-    const resolved = resolveStripeOrganizationHydration(savedOrganization, null);
+    const resolved = resolveStripeOrganizationHydration(savedOrganization, null, withinWindow);
 
     expect(resolved.configuration).toBe(savedOrganization);
     expect(resolved.pendingWrite).toBeNull();
+  });
+
+  test("expires the pending write once the propagation window has clearly passed", () => {
+    // Una lectura que sigue discrepando pasado el plazo ya no se explica por la
+    // propagación: lo más probable es que otra persona propietaria cambiara el campo.
+    const otherOwnersValue = { ...savedOrganization, legalName: "Nombre de otro propietario" };
+
+    const lastMoment = resolveStripeOrganizationHydration(
+      otherOwnersValue,
+      pendingWrite,
+      SAVED_AT + STRIPE_ORGANIZATION_PENDING_WRITE_TTL_MS
+    );
+    expect(lastMoment.configuration.legalName).toBe("Iglesia Elim USA");
+    expect(lastMoment.pendingWrite).toBe(pendingWrite);
+
+    const expired = resolveStripeOrganizationHydration(
+      otherOwnersValue,
+      pendingWrite,
+      SAVED_AT + STRIPE_ORGANIZATION_PENDING_WRITE_TTL_MS + 1
+    );
+    expect(expired.configuration).toBe(otherOwnersValue);
+    expect(expired.pendingWrite).toBeNull();
+  });
+
+  test("stops re-injecting a blank a half-configured deployment legitimately wrote", () => {
+    // Un campo en blanco sobre un campo sin configurar es un no-op aceptado por el worker,
+    // así que la escritura pendiente puede contener "". Si otra persona propietaria lo
+    // completa después, superponer ese "" haría que cada guardado siguiente fallara con
+    // blank_us_* hasta recargar; el vencimiento acota esa ventana.
+    const blankPhoneWrite = {
+      values: { ...savedOrganization, organizationPhone: "" },
+      savedAt: SAVED_AT
+    };
+    const populatedByAnotherOwner = { ...savedOrganization, organizationPhone: "+1 555 0177" };
+
+    expect(resolveStripeOrganizationHydration(populatedByAnotherOwner, blankPhoneWrite, withinWindow)
+      .configuration.organizationPhone).toBe("");
+
+    const expired = resolveStripeOrganizationHydration(
+      populatedByAnotherOwner,
+      blankPhoneWrite,
+      SAVED_AT + STRIPE_ORGANIZATION_PENDING_WRITE_TTL_MS + 1
+    );
+    expect(expired.configuration.organizationPhone).toBe("+1 555 0177");
+    expect(expired.pendingWrite).toBeNull();
   });
 
   test("records the submitted organization trimmed, matching what the worker stores", () => {
@@ -204,7 +257,7 @@ describe("Stripe organization propagation window", () => {
       appSource.indexOf("function applyEmailSender(")
     );
 
-    expect(hydrate).toContain("resolveStripeOrganizationHydration(settings.configuration, stripeOrganizationPendingWriteRef.current)");
+    expect(hydrate).toContain("resolveStripeOrganizationHydration(settings.configuration, stripeOrganizationPendingWriteRef.current, Date.now())");
     expect(hydrate).toContain("stripeOrganizationPendingWriteRef.current = resolved.pendingWrite;");
     expect(hydrate).toContain("...stripeOrganizationCredentialInput(resolved.configuration)");
     // stripeSettings conserva la lectura cruda del servidor para su consumidor actual.
@@ -215,7 +268,9 @@ describe("Stripe organization propagation window", () => {
       appSource.indexOf("async function updateStripeCredentials("),
       appSource.indexOf("async function stageStripeWebhookSecret(")
     );
-    expect(save).toContain("stripeOrganizationPendingWriteRef.current = trimmedStripeOrganization(organization);");
+    // El sello de tiempo se toma al guardar, no al resolver: es lo que acota la vigencia.
+    expect(save).toContain("values: trimmedStripeOrganization(organization),");
+    expect(save).toContain("savedAt: Date.now()");
   });
 
   test("does not leak one account's pending write into the next session", () => {

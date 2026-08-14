@@ -3351,7 +3351,10 @@ async function handleEmailTemplates(ctx: ApiRouteContext): Promise<Response> {
       entityType: "app_setting",
       entityId: EMAIL_TEMPLATES_SETTING_KEY,
       summary: "Plantillas de correo actualizadas",
-      metadata: { types: Object.keys(templates) }
+      // Con el guardado por país, esta fila es el único registro de quién cambió qué grupo
+      // de correspondencia fiscal: `types` enumera lo que quedó guardado (siempre las cinco)
+      // y `scope` distingue el grupo escrito, o null cuando el cuerpo reemplazó las cinco.
+      metadata: { types: Object.keys(templates), scope }
     });
     return jsonResponse({ ok: true, emailTemplates: emailTemplateResponse(templates) });
   } catch (error) {
