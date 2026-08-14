@@ -63,13 +63,14 @@ describe("private deployment configuration", () => {
       { mode: 0o600 }
     );
 
-    expect(
-      (loadPrivateDeployConfig({
-        target: "staging",
-        env: { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath },
-        repositoryRoot: fixture.repositoryRoot
-      }) as { givebutterFunds?: { tithe: string; offering: string } }).givebutterFunds
-    ).toEqual({ tithe: "731902", offering: "842013" });
+    const config = loadPrivateDeployConfig({
+      target: "staging",
+      env: { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath },
+      repositoryRoot: fixture.repositoryRoot
+    });
+    const givebutterFunds: { tithe: string; offering: string } | null = config.givebutterFunds;
+
+    expect(givebutterFunds).toEqual({ tithe: "731902", offering: "842013" });
   });
 
   it.each([

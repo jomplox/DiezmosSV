@@ -3,6 +3,7 @@ export type PrivateDeployTarget = "staging" | "production";
 export interface PrivateDeployConfig {
   target: PrivateDeployTarget;
   campaign: string;
+  givebutterFunds: { tithe: string; offering: string } | null;
   origin: string;
   donorLogo: {
     path: string;

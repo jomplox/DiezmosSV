@@ -58,10 +58,9 @@ function createBuildEnvironment(inheritedEnv, config) {
     }
   }
   for (const [name, readConfig] of PUBLIC_VITE_VARIABLES) {
-    const value = readConfig(config);
-    if (value !== undefined) {
-      buildEnv[name] = value;
-    }
+    // Set every approved key so Vite cannot revive an absent optional value
+    // from a repository-local dotenv file after private validation succeeds.
+    buildEnv[name] = readConfig(config) ?? "";
   }
   return buildEnv;
 }

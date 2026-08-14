@@ -17,6 +17,7 @@ import { pngBytes as generatePngBytes } from "../worker/support/rasterFixtures";
 
 const pngBytes = Buffer.from(generatePngBytes(2, 2, { red: 20, green: 60, blue: 200 }));
 const givebutterFundFixtures = { tithe: "731902", offering: "842013" } as const;
+const dotenvFundFixtures = { tithe: "519753", offering: "628401" } as const;
 const roots: string[] = [];
 
 afterEach(() => {
@@ -117,7 +118,7 @@ describe("private release builds", () => {
     }
   );
 
-  it("omits both optional fund variables when the validated pair is absent", async () => {
+  it("shadows both optional fund variables when the validated pair is absent", async () => {
     const fixture = deploymentFixture("staging");
     const configWithoutFunds = readFileSync(fixture.configPath, "utf8")
       .replace(/^VITE_GIVEBUTTER_(?:TITHE|OFFERING)_FUND_ID=.*\n/gm, "");
@@ -135,8 +136,8 @@ describe("private release builds", () => {
     ).resolves.toBe(0);
 
     expect(calls).toHaveLength(1);
-    expect(calls[0].options.env.VITE_GIVEBUTTER_TITHE_FUND_ID).toBeUndefined();
-    expect(calls[0].options.env.VITE_GIVEBUTTER_OFFERING_FUND_ID).toBeUndefined();
+    expect(calls[0].options.env.VITE_GIVEBUTTER_TITHE_FUND_ID).toBe("");
+    expect(calls[0].options.env.VITE_GIVEBUTTER_OFFERING_FUND_ID).toBe("");
   });
 
   it("uses an explicit Windows command interpreter with constant npm arguments", async () => {
@@ -235,6 +236,53 @@ describe("private release builds", () => {
       });
     }
   );
+
+  it("keeps ambient and repository dotenv fund mappings out of an unconfigured staging bundle", async () => {
+    const fixture = disposableViteFixture("staging");
+    const configWithoutFunds = readFileSync(fixture.configPath, "utf8")
+      .replace(/^VITE_GIVEBUTTER_(?:TITHE|OFFERING)_FUND_ID=.*\n/gm, "");
+    writeFileSync(fixture.configPath, configWithoutFunds, { mode: 0o600 });
+    writeFileSync(
+      join(fixture.repositoryRoot, ".env"),
+      [
+        `VITE_GIVEBUTTER_TITHE_FUND_ID=${dotenvFundFixtures.tithe}`,
+        `VITE_GIVEBUTTER_OFFERING_FUND_ID=${dotenvFundFixtures.offering}`,
+        ""
+      ].join("\n")
+    );
+    const ambientFunds = {
+      tithe: "ambient-unvalidated-tithe",
+      offering: "ambient-unvalidated-offering"
+    } as const;
+
+    await expect(
+      runPrivateBuild({
+        target: "staging",
+        env: {
+          ...process.env,
+          DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath,
+          VITE_GIVEBUTTER_TITHE_FUND_ID: ambientFunds.tithe,
+          VITE_GIVEBUTTER_OFFERING_FUND_ID: ambientFunds.offering
+        },
+        repositoryRoot: fixture.repositoryRoot
+      })
+    ).resolves.toBe(0);
+
+    const bundle = readTextTree(join(fixture.repositoryRoot, "dist"));
+    expect({
+      approvedCampaignPresent: bundle.includes("campaign-fixture"),
+      ambientTithePresent: bundle.includes(ambientFunds.tithe),
+      ambientOfferingPresent: bundle.includes(ambientFunds.offering),
+      dotenvTithePresent: bundle.includes(dotenvFundFixtures.tithe),
+      dotenvOfferingPresent: bundle.includes(dotenvFundFixtures.offering)
+    }).toEqual({
+      approvedCampaignPresent: true,
+      ambientTithePresent: false,
+      ambientOfferingPresent: false,
+      dotenvTithePresent: false,
+      dotenvOfferingPresent: false
+    });
+  });
 
   it.each(["linux", "win32"] as const)(
     "returns a non-zero %s build exit status",

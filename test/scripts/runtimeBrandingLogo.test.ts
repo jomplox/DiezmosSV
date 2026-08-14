@@ -594,6 +594,7 @@ function runtimeConfig(origin: string, options: {
   return {
     target: "staging" as const,
     campaign: "campaign-fixture",
+    givebutterFunds: null,
     origin,
     donorLogo: {
       path: "/private-fixture/logo.png",
