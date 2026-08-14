@@ -530,6 +530,65 @@ describe("Plantillas format toolbar roving tabindex (source contract)", () => {
 
 describe("email template line formatting", () => {
   test.each([
+    {
+      label: "select all",
+      value: "Primera\r\nSegunda",
+      selectionStart: 0,
+      selectionEnd: 15,
+      format: "bold",
+      expected: {
+        value: "**Primera**\n**Segunda**",
+        selectionStart: 2,
+        selectionEnd: 21
+      }
+    },
+    {
+      label: "blank line",
+      value: "Primera\r\n\r\nSegunda",
+      selectionStart: 0,
+      selectionEnd: 16,
+      format: "underline",
+      expected: {
+        value: "++Primera++\n\n++Segunda++",
+        selectionStart: 2,
+        selectionEnd: 22
+      }
+    },
+    {
+      label: "partial lines after a CRLF",
+      value: "Antes\r\nPrimera\r\nDespues",
+      selectionStart: 9,
+      selectionEnd: 17,
+      format: "bold",
+      expected: {
+        value: "Antes\nPri**mera**\n**Des**pues",
+        selectionStart: 11,
+        selectionEnd: 23
+      }
+    },
+    {
+      label: "quote lines after a CRLF",
+      value: "Antes\r\nPrimera\r\nDespues",
+      selectionStart: 8,
+      selectionEnd: 17,
+      format: "quote",
+      expected: {
+        value: "Antes\n> Primera\n> Despues",
+        selectionStart: 6,
+        selectionEnd: 25
+      }
+    }
+  ] as const)("uses LF textarea offsets for a CRLF-backed $label selection", ({
+    value,
+    selectionStart,
+    selectionEnd,
+    format,
+    expected
+  }) => {
+    expect(formatEmailTemplateSelection(value, selectionStart, selectionEnd, format)).toEqual(expected);
+  });
+
+  test.each([
     ["bold", "**Primera**\n**Segunda**\n\n**Tercera**", 2, 34],
     ["italic", "*Primera*\n*Segunda*\n\n*Tercera*", 1, 29],
     ["underline", "++Primera++\n++Segunda++\n\n++Tercera++", 2, 34]

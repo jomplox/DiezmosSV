@@ -319,7 +319,7 @@ test("edits Salvadoran and U.S. email templates separately while identifying the
       label: "Constancia inmediata",
       description: "Se envía al confirmarse una donación única o mensual de Stripe.",
       defaultSubject: "Constancia de su donación",
-      defaultBody: "Cuerpo inmediato",
+      defaultBody: "Primera\r\nSegunda",
       placeholders: ["{{donante}}", "{{monto}}", "{{nombreLegal}}"]
     },
     {
@@ -394,6 +394,14 @@ test("edits Salvadoran and U.S. email templates separately while identifying the
 
   const immediate = templatePanel.getByRole("region", { name: "Constancia inmediata", exact: true });
   const body = immediate.getByRole("textbox", { name: "Cuerpo del correo — Constancia inmediata", exact: true });
+  await expect(body).toHaveValue("Primera\nSegunda");
+  await body.evaluate((textarea: HTMLTextAreaElement) => textarea.select());
+  await immediate.getByRole("button", { name: "Negrita — Constancia inmediata", exact: true }).click();
+  await expect(body).toHaveValue("**Primera**\n**Segunda**");
+  await expect(body).toBeFocused();
+  await expect.poll(() => body.evaluate((textarea: HTMLTextAreaElement) => [textarea.selectionStart, textarea.selectionEnd]))
+    .toEqual([2, 21]);
+
   const applyMultilineFormat = async (button: string, expected: string, expectedSelection: [number, number]) => {
     await body.fill("Primera\nSegunda\n\nTercera");
     await body.evaluate((textarea: HTMLTextAreaElement) => textarea.select());

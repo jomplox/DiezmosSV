@@ -1347,11 +1347,15 @@ function BrandingEditor({
 type EmailTemplateBodyFormat = "bold" | "italic" | "underline" | "quote";
 
 export function formatEmailTemplateSelection(
-  value: string,
+  controlledValue: string,
   selectionStart: number,
   selectionEnd: number,
   format: EmailTemplateBodyFormat
 ): { value: string; selectionStart: number; selectionEnd: number } {
+  // HTML textareas expose every CRLF/CR line ending as LF, and their selection
+  // offsets index that normalized value. Apply the same single normalization
+  // before slicing a controlled value loaded from storage.
+  const value = controlledValue.replace(/\r\n?/g, "\n");
   if (format === "quote") {
     const lineStart = value.lastIndexOf("\n", Math.max(0, selectionStart - 1)) + 1;
     const nextLineBreak = value.indexOf("\n", selectionEnd);
