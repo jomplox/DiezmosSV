@@ -42,6 +42,7 @@ export interface EmailTemplateResponse {
 }
 
 export class EmailTemplateValidationError extends Error {}
+export class EmailTemplateStoredStateError extends Error {}
 
 const EMAIL_SUBJECT_CONTROL_PATTERN = /[\u0000-\u001F\u007F-\u009F]/u;
 
@@ -228,10 +229,6 @@ export function normalizeEmailTemplateSettings(input: unknown): EmailTemplateSet
   return normalized;
 }
 
-// El editor guarda un país a la vez, pero normalizeEmailTemplateSettings exige las cinco
-// plantillas. Fusionar en el cliente obligaba a completar el otro grupo con la copia que
-// ese panel cargó al abrirse, así que dos propietarios editando países distintos se pisaban
-// el trabajo. La fusión ocurre aquí, contra lo que hay guardado en este instante.
 export function parseEmailTemplateScope(value: unknown): EmailTemplateScope {
   if (value === "SV_CDE" || value === "US_STRIPE") {
     return value;
@@ -239,22 +236,49 @@ export function parseEmailTemplateScope(value: unknown): EmailTemplateScope {
   throw new EmailTemplateValidationError("Grupo de plantillas de correo no reconocido.");
 }
 
-export function mergeScopedEmailTemplates(
-  stored: EmailTemplateSettings,
+export function prepareScopedEmailTemplateUpdate(
+  storedRaw: string | null,
   submitted: unknown,
   scope: EmailTemplateScope
-): EmailTemplateSettings {
+): { patch: Partial<EmailTemplateSettings>; templates: EmailTemplateSettings } {
   if (!isRecord(submitted)) {
     throw new EmailTemplateValidationError("Ingrese las plantillas de correo.");
   }
-  const merged: Record<string, unknown> = { ...stored };
+  const scopedCandidate: Record<string, unknown> = {};
   for (const definition of EMAIL_TEMPLATE_DEFINITIONS) {
-    if (definition.scope !== scope) continue;
-    merged[definition.type] = submitted[definition.type];
+    scopedCandidate[definition.type] = definition.scope === scope
+      ? submitted[definition.type]
+      : DEFAULT_EMAIL_TEMPLATES[definition.type];
   }
-  // Las cinco pasan por la validación de siempre: el grupo enviado se valida y el otro
-  // se reconfirma tal como está guardado.
-  return normalizeEmailTemplateSettings(merged);
+  const normalizedCandidate = normalizeEmailTemplateSettings(scopedCandidate);
+  const patch = Object.fromEntries(
+    EMAIL_TEMPLATE_DEFINITIONS
+      .filter((definition) => definition.scope === scope)
+      .map((definition) => [definition.type, normalizedCandidate[definition.type]])
+  ) as Partial<EmailTemplateSettings>;
+
+  let stored: unknown = cloneDefaultTemplates();
+  if (storedRaw !== null) {
+    try {
+      stored = JSON.parse(storedRaw) as unknown;
+    } catch {
+      throw new EmailTemplateStoredStateError("Las plantillas guardadas deben volver a cargarse.");
+    }
+  }
+  if (!isRecord(stored)) {
+    throw new EmailTemplateStoredStateError("Las plantillas guardadas deben volver a cargarse.");
+  }
+  try {
+    return {
+      patch,
+      templates: normalizeEmailTemplateSettings({ ...stored, ...patch })
+    };
+  } catch (error) {
+    if (error instanceof EmailTemplateValidationError) {
+      throw new EmailTemplateStoredStateError("Las plantillas guardadas deben volver a cargarse.");
+    }
+    throw error;
+  }
 }
 
 export function renderEmailTemplate(template: EmailTemplateValue, record: DteDocumentRecord): { subject: string; text: string; formattedText: string } {

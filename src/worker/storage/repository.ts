@@ -132,7 +132,11 @@ import {
   type OperationalAlertDeliveryClaim,
   type ReceiptEmailDeliveryState
 } from "./repository/deliveries";
-import { getSetting, setSetting } from "./repository/settings";
+import {
+  getSetting,
+  saveScopedEmailTemplates as saveScopedEmailTemplatesRepository,
+  setSetting
+} from "./repository/settings";
 import {
   earliestDteDocumentCreatedAt as earliestDteDocumentCreatedAtRepository,
   listDonationIntentsForAnalytics as listDonationIntentsForAnalyticsRepository,
@@ -331,6 +335,12 @@ export class Repository {
 
   async setSetting(key: string, value: string, updatedBy?: string | null): Promise<void> {
     return setSetting(this.db, key, value, updatedBy);
+  }
+
+  async saveScopedEmailTemplates(
+    input: Parameters<typeof saveScopedEmailTemplatesRepository>[2]
+  ): Promise<string> {
+    return saveScopedEmailTemplatesRepository(this.db, this.auditContext, input);
   }
 
   async reserveStripeCheckout(

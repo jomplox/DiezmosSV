@@ -6,6 +6,7 @@ import {
   certificateExpiryStatus,
   credentialSectionState,
   credentialSettingsSections,
+  reconcileEmailTemplateDraft,
   reconcileStripeOrganizationDraft,
   resolveStripeOrganizationHydration,
   stripeOrganizationDirtyPatch,
@@ -397,7 +398,12 @@ describe("Plantillas country-scoped saving (source contract)", () => {
       appSource.indexOf("async function updateEmailSender(")
     );
 
-    expect(save).toContain("body: { scope, templates: scopedEmailTemplates(emailTemplates, emailTemplateDraft, scope) }");
+    expect(save).toContain("const baseline = cloneEmailTemplates(emailTemplates?.templates ?? {});");
+    expect(save).toContain("const requestDraft = cloneEmailTemplates(emailTemplateDraft);");
+    expect(save).toContain("const submittedTemplates = scopedEmailTemplates(emailTemplates, requestDraft, scope);");
+    expect(save).toContain("body: { scope, templates: submittedTemplates }");
+    expect(save).toContain("setEmailTemplateDraft((current) => reconcileEmailTemplateDraft(");
+    expect(save).toContain("result.emailTemplates.templates");
     expect(save).not.toContain("...(emailTemplates?.templates ?? {}),");
     expect(save).not.toContain("body: { templates: emailTemplateDraft }");
     // El editor y el envío deben particionar igual, o una plantilla visible en un grupo
@@ -436,6 +442,77 @@ describe("Plantillas country-scoped saving (source contract)", () => {
     expect(scopedEmailTemplates(settings, draft, "US_STRIPE").stripeRefund).toEqual({
       subject: "stripeRefund asunto",
       body: "stripeRefund cuerpo"
+    });
+  });
+
+  test("adopts server normalization and refreshes untouched opposite-scope fields", () => {
+    const requestDraft = {
+      dteReceipt: { subject: "  CDE actualizado  ", body: "  Cuerpo enviado  " },
+      stripeRefund: { subject: "Corrección anterior", body: "Cuerpo anterior" }
+    };
+    const server = {
+      dteReceipt: { subject: "CDE actualizado", body: "Cuerpo enviado" },
+      stripeRefund: { subject: "Corrección remota", body: "Cuerpo remoto" }
+    };
+
+    expect(reconcileEmailTemplateDraft(
+      structuredClone(requestDraft),
+      requestDraft,
+      server,
+      requestDraft,
+      ["dteReceipt"]
+    )).toEqual(server);
+  });
+
+  test("preserves field edits made while a scoped save is in flight", () => {
+    const requestDraft = {
+      dteReceipt: { subject: "  CDE actualizado  ", body: "Cuerpo enviado" },
+      stripeRefund: { subject: "Corrección anterior", body: "Cuerpo anterior" }
+    };
+    const current = {
+      dteReceipt: { subject: "  CDE actualizado  ", body: "Edición salvadoreña en vuelo" },
+      stripeRefund: { subject: "Edición de EE. UU. en vuelo", body: "Cuerpo anterior" }
+    };
+    const server = {
+      dteReceipt: { subject: "CDE actualizado", body: "Cuerpo enviado" },
+      stripeRefund: { subject: "Corrección remota", body: "Cuerpo remoto" }
+    };
+
+    expect(reconcileEmailTemplateDraft(
+      current,
+      requestDraft,
+      server,
+      requestDraft,
+      ["dteReceipt"]
+    )).toEqual({
+      dteReceipt: { subject: "CDE actualizado", body: "Edición salvadoreña en vuelo" },
+      stripeRefund: { subject: "Edición de EE. UU. en vuelo", body: "Cuerpo remoto" }
+    });
+  });
+
+  test("preserves opposite-scope fields that were already dirty when the save started", () => {
+    const baseline = {
+      dteReceipt: { subject: "CDE anterior", body: "Cuerpo anterior" },
+      stripeRefund: { subject: "Corrección anterior", body: "Cuerpo anterior" }
+    };
+    const requestDraft = {
+      dteReceipt: { subject: "  CDE actualizado  ", body: "Cuerpo enviado" },
+      stripeRefund: { subject: "Edición local pendiente", body: "Cuerpo anterior" }
+    };
+    const server = {
+      dteReceipt: { subject: "CDE actualizado", body: "Cuerpo enviado" },
+      stripeRefund: { subject: "Corrección remota", body: "Cuerpo remoto" }
+    };
+
+    expect(reconcileEmailTemplateDraft(
+      structuredClone(requestDraft),
+      requestDraft,
+      server,
+      baseline,
+      ["dteReceipt"]
+    )).toEqual({
+      dteReceipt: server.dteReceipt,
+      stripeRefund: { subject: "Edición local pendiente", body: "Cuerpo remoto" }
     });
   });
 });

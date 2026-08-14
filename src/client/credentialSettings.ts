@@ -1,6 +1,6 @@
 import { formatElSalvadorDate } from "../shared/legalWindows";
 import { createLatestRequestGate } from "./preCdeFailures";
-import type { CredentialStatus, StripeSettingsState } from "./types";
+import type { CredentialStatus, EmailTemplateValue, StripeSettingsState } from "./types";
 
 type CertificateExpiryTone = "ok" | "warning" | "expired" | "pending";
 
@@ -129,6 +129,37 @@ export function reconcileStripeOrganizationDraft(
     if (current[field].trim() !== baseline[field].trim()) {
       reconciled[field] = current[field];
     }
+  }
+  return reconciled;
+}
+
+export function reconcileEmailTemplateDraft(
+  current: Record<string, EmailTemplateValue>,
+  requestDraft: Record<string, EmailTemplateValue>,
+  server: Record<string, EmailTemplateValue>,
+  baseline: Record<string, EmailTemplateValue>,
+  submittedTypes: readonly string[]
+): Record<string, EmailTemplateValue> {
+  const reconciled = Object.fromEntries(
+    Object.entries(current).map(([type, template]) => [type, { ...template }])
+  );
+  const submitted = new Set(submittedTypes);
+  for (const [type, nextTemplate] of Object.entries(server)) {
+    const currentTemplate = current[type];
+    const requestedTemplate = requestDraft[type];
+    const baselineTemplate = baseline[type];
+    const preserveSubject = currentTemplate?.subject !== requestedTemplate?.subject
+      || (!submitted.has(type) && requestedTemplate?.subject !== baselineTemplate?.subject);
+    const preserveBody = currentTemplate?.body !== requestedTemplate?.body
+      || (!submitted.has(type) && requestedTemplate?.body !== baselineTemplate?.body);
+    reconciled[type] = {
+      subject: preserveSubject
+        ? currentTemplate?.subject ?? nextTemplate.subject
+        : nextTemplate.subject,
+      body: preserveBody
+        ? currentTemplate?.body ?? nextTemplate.body
+        : nextTemplate.body
+    };
   }
   return reconciled;
 }

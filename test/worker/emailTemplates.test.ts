@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { Repository } from "../../src/worker/storage/repository";
 import { makeDocument } from "./fixtures";
 import {
   DEFAULT_EMAIL_TEMPLATES,
@@ -13,6 +14,8 @@ import {
 import { classifyEmailDispatchError, EmailService } from "../../src/worker/services/email";
 import { certificateEmailHtml, dteEmailHtml, passwordResetEmailHtml } from "../../src/worker/services/emailHtml";
 import type { DteDocumentRecord, Env } from "../../src/worker/types";
+import { migratedDatabase } from "./support/migratedDatabase";
+import { SqliteD1 } from "./support/sqliteD1";
 
 function fakeRecord(): DteDocumentRecord {
   return makeDocument({
@@ -176,6 +179,52 @@ describe("email template defaults", () => {
 
     expect(invalidation?.defaultBody).toContain("comprobante corregido, lo recibirá en un correo aparte");
     expect(invalidation?.defaultBody).toContain("Si no esperaba esta invalidación");
+  });
+});
+
+describe("scoped email template persistence", () => {
+  it("rolls back the SQLite settings mutation when the audit insert fails", async () => {
+    const database = migratedDatabase();
+    try {
+      const original = {
+        ...DEFAULT_EMAIL_TEMPLATES,
+        stripeRefund: { subject: "Corrección personalizada", body: "Monto neto {{montoNeto}}." }
+      };
+      database.prepare(
+        `INSERT INTO app_settings (key, value, updated_by)
+         VALUES ('email_templates_json', ?, 'previous_owner')`
+      ).run(JSON.stringify(original));
+      database.exec(
+        `CREATE TRIGGER fail_email_template_audit
+         BEFORE INSERT ON audit_logs
+         WHEN NEW.action = 'EMAIL_TEMPLATES_UPDATED'
+         BEGIN
+           SELECT RAISE(ABORT, 'injected email template audit failure');
+         END`
+      );
+      const repository = new Repository(new SqliteD1(database).database);
+      const patch = {
+        dteReceipt: { subject: "CDE {{numeroControl}} actualizado", body: "Entrega {{monto}}." },
+        dteInvalidation: { subject: "CDE {{numeroControl}} invalidado", body: "Estado {{estado}}." }
+      };
+
+      await expect(repository.saveScopedEmailTemplates({
+        key: "email_templates_json",
+        scope: "SV_CDE",
+        patch,
+        initialTemplates: { ...original, ...patch },
+        actorId: "user_operator"
+      })).rejects.toThrow(/injected email template audit failure/);
+
+      expect(database.prepare(
+        "SELECT value, updated_by FROM app_settings WHERE key = 'email_templates_json'"
+      ).get()).toEqual({ value: JSON.stringify(original), updated_by: "previous_owner" });
+      expect(database.prepare(
+        "SELECT COUNT(*) AS count FROM audit_logs WHERE action = 'EMAIL_TEMPLATES_UPDATED'"
+      ).get()).toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
   });
 });
 

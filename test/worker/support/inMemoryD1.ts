@@ -224,6 +224,7 @@ export class InMemoryD1 {
   beforePostAcceptEmailDispatchMark: (() => void | Promise<void>) | null = null;
   beforeAuditCount: ((action: string, entityId: string) => Promise<void>) | null = null;
   beforeSentEmailLookup: ((documentId: string, emailType: string) => Promise<void>) | null = null;
+  beforeSettingRead: (() => Promise<void>) | null = null;
   failPasswordResetBatchAfterStatement: number | null = null;
   failBindingQuarantineBatchAfterStatement: number | null = null;
   failInvalidationCompletionBatchAfterStatement: number | null = null;
@@ -317,11 +318,13 @@ export class InMemoryD1 {
     const wompiEventsBefore = structuredClone(this.wompiEvents);
     const documentsBefore = structuredClone(this.documents);
     const dteEventsBefore = structuredClone(this.dteEvents);
+    const settingsBefore = structuredClone(this.settings);
+    let transaction: InMemoryD1 | null = null;
     try {
       if (passwordReset) {
         this.passwordResetBatchCount += 1;
       }
-      const transaction = new InMemoryD1();
+      transaction = new InMemoryD1();
       transaction.users.push(...structuredClone(this.users));
       transaction.sessions.push(...structuredClone(this.sessions));
       transaction.resetTokens.push(...structuredClone(this.resetTokens));
@@ -329,6 +332,8 @@ export class InMemoryD1 {
       transaction.wompiEvents.push(...structuredClone(this.wompiEvents));
       transaction.documents.push(...structuredClone(this.documents));
       transaction.dteEvents.push(...structuredClone(this.dteEvents));
+      transaction.settings.push(...structuredClone(this.settings));
+      transaction.failNextAuditAction = this.failNextAuditAction;
       const results: StatementRunResult[] = [];
       for (const [index, statement] of statements.entries()) {
         results.push(await statement.withDatabase(transaction).run());
@@ -348,6 +353,7 @@ export class InMemoryD1 {
           throw new Error("injected invalidation-completion batch failure");
         }
       }
+      this.failNextAuditAction = transaction.failNextAuditAction;
       this.users.splice(0, this.users.length, ...transaction.users);
       this.sessions.splice(0, this.sessions.length, ...transaction.sessions);
       this.resetTokens.splice(0, this.resetTokens.length, ...transaction.resetTokens);
@@ -355,11 +361,15 @@ export class InMemoryD1 {
       this.wompiEvents.splice(0, this.wompiEvents.length, ...transaction.wompiEvents);
       this.documents.splice(0, this.documents.length, ...transaction.documents);
       this.dteEvents.splice(0, this.dteEvents.length, ...transaction.dteEvents);
+      this.settings.splice(0, this.settings.length, ...transaction.settings);
       if (credentialGuarded) {
         this.maxCommittedSessionRows = Math.max(this.maxCommittedSessionRows, this.sessions.length);
       }
       return results;
     } catch (error) {
+      if (transaction) {
+        this.failNextAuditAction = transaction.failNextAuditAction;
+      }
       this.users.splice(0, this.users.length, ...usersBefore);
       this.sessions.splice(0, this.sessions.length, ...sessionsBefore);
       this.resetTokens.splice(0, this.resetTokens.length, ...tokensBefore);
@@ -367,6 +377,7 @@ export class InMemoryD1 {
       this.wompiEvents.splice(0, this.wompiEvents.length, ...wompiEventsBefore);
       this.documents.splice(0, this.documents.length, ...documentsBefore);
       this.dteEvents.splice(0, this.dteEvents.length, ...dteEventsBefore);
+      this.settings.splice(0, this.settings.length, ...settingsBefore);
       throw error;
     } finally {
       if (passwordReset) {
@@ -1828,7 +1839,11 @@ export class Statement {
       ) ?? null) as T | null;
     }
     if (this.sql.includes("SELECT value FROM app_settings WHERE key = ?")) {
-      return (this.db.settings.find((setting) => setting.key === this.args[0]) ?? null) as T | null;
+      const row = this.db.settings.find((setting) => setting.key === this.args[0]) ?? null;
+      if (this.db.beforeSettingRead) {
+        await this.db.beforeSettingRead();
+      }
+      return row as T | null;
     }
     if (this.sql.includes("FROM email_deliveries") && this.sql.includes("email_type = ?")) {
       // Receipt dedupe lookup: either SENT only or any terminal handling evidence.
@@ -3289,8 +3304,11 @@ export class Statement {
       });
     }
     if (this.sql.includes("INSERT INTO app_settings")) {
-      const [key, value, updatedBy, updatedAt] = this.args;
+      const [key, insertValue, updatedBy, updatedAt, patchValue] = this.args;
       const setting = this.db.settings.find((row) => row.key === key);
+      const value = setting && this.sql.includes("json_patch(app_settings.value, ?)")
+        ? JSON.stringify(jsonMergePatch(JSON.parse(String(setting.value)), JSON.parse(String(patchValue))))
+        : insertValue;
       if (setting) {
         setting.value = value;
         setting.updated_by = updatedBy;
@@ -4308,6 +4326,23 @@ export class Statement {
     }
     return { success: true, meta: { changes }, results: [] };
   }
+}
+
+function jsonMergePatch(target: unknown, patch: unknown): unknown {
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
+    return patch;
+  }
+  const merged: Record<string, unknown> = target && typeof target === "object" && !Array.isArray(target)
+    ? { ...(target as Record<string, unknown>) }
+    : {};
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) {
+      delete merged[key];
+    } else {
+      merged[key] = jsonMergePatch(merged[key], value);
+    }
+  }
+  return merged;
 }
 
 function auditMetadata(audit: Record<string, unknown>): Record<string, unknown> {

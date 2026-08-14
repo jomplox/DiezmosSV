@@ -43,7 +43,7 @@ import {
   normalizeEmailSenderName,
   resolveEmailReplyToAddress
 } from "./services/emailSender";
-import { DEFAULT_EMAIL_TEMPLATES, EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateValidationError, emailTemplateResponse, mergeScopedEmailTemplates, normalizeEmailTemplateSettings, parseEmailTemplateScope, parseEmailTemplates } from "./services/emailTemplates";
+import { DEFAULT_EMAIL_TEMPLATES, EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateStoredStateError, EmailTemplateValidationError, emailTemplateResponse, normalizeEmailTemplateSettings, parseEmailTemplateScope, parseEmailTemplates, prepareScopedEmailTemplateUpdate } from "./services/emailTemplates";
 import { resolveDonationIntentBinding } from "./services/donationIntentBinding";
 import { issuanceFailureEvidence } from "./services/issuanceFailure";
 import { createStripeGateway, stripeWebhookSecretGeneration, StripeWebhookSignatureError } from "./services/stripeClient";
@@ -3331,33 +3331,35 @@ async function handleEmailTemplates(ctx: ApiRouteContext): Promise<Response> {
   }
   const actor = ctx.actor!;
   const body = (await readJsonObject(ctx.request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { templates?: unknown; scope?: unknown };
+  if (body.scope === undefined) {
+    return jsonResponse({
+      error: "email_templates_reload_required",
+      message: "Vuelva a cargar las plantillas antes de guardar."
+    }, { status: 409 });
+  }
   try {
-    // Sin `scope` el cuerpo reemplaza las cinco plantillas, como siempre. Con `scope`
-    // solo se escribe ese grupo sobre lo guardado en este instante, para que un guardado
-    // por país no arrastre la copia que el panel del otro propietario cargó al abrirse.
-    const scope = body.scope === undefined ? null : parseEmailTemplateScope(body.scope);
-    const templates = scope === null
-      ? normalizeEmailTemplateSettings(body.templates)
-      : mergeScopedEmailTemplates(
-        parseEmailTemplates(await ctx.repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY)),
-        body.templates,
-        scope
-      );
-    await ctx.repo.setSetting(EMAIL_TEMPLATES_SETTING_KEY, JSON.stringify(templates), actor.id);
-    await ctx.repo.createAudit({
-      actorType: "USER",
-      actorId: actor.id,
-      action: "EMAIL_TEMPLATES_UPDATED",
-      entityType: "app_setting",
-      entityId: EMAIL_TEMPLATES_SETTING_KEY,
-      summary: "Plantillas de correo actualizadas",
-      // Con el guardado por país, esta fila es el único registro de quién cambió qué grupo
-      // de correspondencia fiscal: `types` enumera lo que quedó guardado (siempre las cinco)
-      // y `scope` distingue el grupo escrito, o null cuando el cuerpo reemplazó las cinco.
-      metadata: { types: Object.keys(templates), scope }
+    const scope = parseEmailTemplateScope(body.scope);
+    const update = prepareScopedEmailTemplateUpdate(
+      await ctx.repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY),
+      body.templates,
+      scope
+    );
+    const stored = await ctx.repo.saveScopedEmailTemplates({
+      key: EMAIL_TEMPLATES_SETTING_KEY,
+      scope,
+      patch: update.patch,
+      initialTemplates: update.templates,
+      actorId: actor.id
     });
+    const templates = normalizeEmailTemplateSettings(JSON.parse(stored) as unknown);
     return jsonResponse({ ok: true, emailTemplates: emailTemplateResponse(templates) });
   } catch (error) {
+    if (error instanceof EmailTemplateStoredStateError) {
+      return jsonResponse({
+        error: "email_templates_reload_required",
+        message: error.message
+      }, { status: 409 });
+    }
     if (error instanceof EmailTemplateValidationError) {
       return jsonResponse({ error: "invalid_email_templates", message: error.message }, { status: 400 });
     }

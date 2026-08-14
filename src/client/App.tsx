@@ -48,6 +48,7 @@ import { StripeResultPage } from "./stripeResultPage";
 import {
   STRIPE_ORGANIZATION_PENDING_WRITE_TTL_MS,
   createStripeSettingsRequestGate,
+  reconcileEmailTemplateDraft,
   reconcileStripeOrganizationDraft,
   resolveStripeOrganizationHydration,
   stripeOrganizationDirtyPatch,
@@ -2640,16 +2641,22 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       // grupo enviado sobre lo que tiene guardado en ese instante; completar aquí el otro
       // grupo con la copia cargada al abrir el panel revertiría lo que otro propietario
       // guardó mientras tanto.
+      const baseline = cloneEmailTemplates(emailTemplates?.templates ?? {});
+      const requestDraft = cloneEmailTemplates(emailTemplateDraft);
+      const submittedTemplates = scopedEmailTemplates(emailTemplates, requestDraft, scope);
       const result = await accountApi<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates", {
         method: "PUT",
-        body: { scope, templates: scopedEmailTemplates(emailTemplates, emailTemplateDraft, scope) }
+        body: { scope, templates: submittedTemplates }
       });
       control.commit(() => {
         setEmailTemplates(result.emailTemplates);
-        setEmailTemplateDraft((current) => ({
-          ...current,
-          ...scopedEmailTemplates(result.emailTemplates, result.emailTemplates.templates, scope)
-        }));
+        setEmailTemplateDraft((current) => reconcileEmailTemplateDraft(
+          current,
+          requestDraft,
+          result.emailTemplates.templates,
+          baseline,
+          Object.keys(submittedTemplates)
+        ));
         setToast(scope === "US_STRIPE"
           ? "Plantillas de EE. UU. actualizadas"
           : "Plantillas de El Salvador actualizadas");
