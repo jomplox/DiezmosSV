@@ -1255,7 +1255,11 @@ describe("Stripe donar page source contract", () => {
   });
 
   it("keeps both US provider controls inside the page's monochrome vocabulary", () => {
-    const choiceRule = stylesSource.match(/\.donar-provider-choice\s*\{[^}]*\}/)?.[0] ?? "";
+    // Anchored to the line start and counted: a later rule whose selector merely ends
+    // in .donar-provider-choice must not silently become what these assertions read.
+    const choiceRules = [...stylesSource.matchAll(/^\.donar-provider-choice\s*\{[^}]*\}/gm)];
+    expect(choiceRules).toHaveLength(1);
+    const choiceRule = choiceRules[0][0];
     // One column for the switch controls, the frame and the promoted escape hatch.
     expect(choiceRule).toContain("width: min(100%, 440px);");
     expect(choiceRule).toContain("min-height: 50px;");
@@ -1319,11 +1323,16 @@ describe("Stripe donar page source contract", () => {
 
   it("keeps focus and screen-reader context across both US provider switches", () => {
     expect(pageSource).toContain("usProviderSwitchedRef.current = true;");
+    // Each switch lands on the TOP of the surface it opened. Givebutter's own return
+    // control is that top; Stripe's is the step intro above its form — never the
+    // Givebutter choice, which now sits BELOW the form the donor just came back to.
     expect(pageSource).toContain(
-      'const target = usProvider === "givebutter" ? stripeReturnRef.current : givebutterChoiceRef.current;'
+      'const target = usProvider === "givebutter" ? stripeReturnRef.current : stripeIntroRef.current;'
     );
-    expect(pageSource).toContain("ref={givebutterChoiceRef}");
+    expect(pageSource).toContain('<p className="donar-intro" ref={stripeIntroRef} tabIndex={-1}>');
     expect(pageSource).toContain("ref={stripeReturnRef}");
+    // The retired ref leaves no dead wiring behind.
+    expect(donarSource).not.toContain("givebutterChoiceRef");
     // Exactly one active-form announcement in the whole US step, in whatever markup it
     // takes — role="status" text OR a bare aria-live on the surface container. The only
     // other live region here is the Givebutter loading placeholder, so remove it and

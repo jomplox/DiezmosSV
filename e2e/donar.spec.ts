@@ -641,12 +641,13 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   // the alternative sits below it instead of interrupting the reading flow.
   const defaultStripeBox = await page.locator(".donar-stripe-embedded").boundingBox();
   expect(defaultStripeBox).not.toBeNull();
-  expect(givebutterChoiceBox!.y).toBeGreaterThan(defaultStripeBox!.y);
+  expect(givebutterChoiceBox!.y).toBeGreaterThanOrEqual(defaultStripeBox!.y + defaultStripeBox!.height);
   // …and it is painted in the page's monochrome vocabulary, not as the loudest thing
   // on screen: the Givebutter favicon is the only brand color the control spends.
-  // The pointer is parked off the control first — :hover repaints its border.
+  // The pointer is parked off the control first, and the read polls: :hover repaints
+  // the border over a 140ms transition, so a single read can catch it mid-flight.
   await page.mouse.move(0, 0);
-  expect(await givebutterChoice.evaluate((element) => {
+  await expect.poll(async () => await givebutterChoice.evaluate((element) => {
     const style = getComputedStyle(element);
     return { borderColor: style.borderTopColor, backgroundImage: style.backgroundImage };
   })).toEqual({ borderColor: "rgb(216, 216, 216)", backgroundImage: "none" });

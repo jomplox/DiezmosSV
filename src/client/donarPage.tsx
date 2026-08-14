@@ -468,9 +468,9 @@ export function DonarPage() {
   const heroInputRef = useRef<HTMLInputElement | null>(null);
   const summaryEditRef = useRef<HTMLButtonElement | null>(null);
   // The two US provider switches unmount the very button that was clicked, so focus
-  // has to be handed to the first control of the surface that replaces it. The flag
-  // keeps the initial mount of Paso 2 alone — only a real switch moves focus.
-  const givebutterChoiceRef = useRef<HTMLButtonElement | null>(null);
+  // has to be handed to the TOP of the surface that replaces it. The flag keeps the
+  // initial mount of Paso 2 alone — only a real switch moves focus.
+  const stripeIntroRef = useRef<HTMLParagraphElement | null>(null);
   const stripeReturnRef = useRef<HTMLButtonElement | null>(null);
   const usProviderSwitchedRef = useRef(false);
 
@@ -659,7 +659,11 @@ export function DonarPage() {
       return;
     }
     usProviderSwitchedRef.current = false;
-    const target = usProvider === "givebutter" ? stripeReturnRef.current : givebutterChoiceRef.current;
+    // Givebutter's surface opens on its own return control; Stripe's opens on the step
+    // intro that sits above its form. The Givebutter choice is NOT the Stripe landing:
+    // it lives below the form, so focusing it would scroll the donor past the very
+    // thing they asked for and hand a screen reader "Dar con Givebutter" first.
+    const target = usProvider === "givebutter" ? stripeReturnRef.current : stripeIntroRef.current;
     target?.focus();
   }, [usProvider]);
 
@@ -1353,7 +1357,11 @@ export function DonarPage() {
           <div className="donar-stripe donar-step">
             {summary}
             <div className="donar-handoff">
-              <p className="donar-intro">{stripeIntro(organizationName)}</p>
+              {/* tabIndex={-1} makes this programmatically focusable without adding a
+                  tab stop: it is the landing point when the donor returns to Stripe. */}
+              <p className="donar-intro" ref={stripeIntroRef} tabIndex={-1}>
+                {stripeIntro(organizationName)}
+              </p>
               {/* One persistent live region for the whole step: the surface swap is
                   silent otherwise, since each switch only unmounts and mounts markup. */}
               <p className="donar-provider-announcement" role="status" aria-live="polite">
@@ -1374,7 +1382,6 @@ export function DonarPage() {
                       Spanish form and the tax receipt, so it owns the "understand → pay"
                       reading flow. Givebutter is the way out of it, not the way in. */}
                   <button
-                    ref={givebutterChoiceRef}
                     type="button"
                     className="donar-provider-choice"
                     onClick={() => {
