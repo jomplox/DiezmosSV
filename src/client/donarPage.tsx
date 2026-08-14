@@ -1363,10 +1363,20 @@ export function DonarPage() {
               </p>
               {usProvider === "stripe" && (
                 <>
+                  {stripeSessionAttempt && (
+                    <StripeDonationForm
+                      key={stripeSessionAttempt.sequence}
+                      session={stripeSessionAttempt.session}
+                      onRetry={retryStripeSession}
+                    />
+                  )}
+                  {/* The alternative sits BELOW the default form: Stripe carries the
+                      Spanish form and the tax receipt, so it owns the "understand → pay"
+                      reading flow. Givebutter is the way out of it, not the way in. */}
                   <button
                     ref={givebutterChoiceRef}
                     type="button"
-                    className="donar-provider-choice donar-provider-choice-givebutter"
+                    className="donar-provider-choice"
                     onClick={() => {
                       usProviderSwitchedRef.current = true;
                       setUsProvider("givebutter");
@@ -1383,13 +1393,6 @@ export function DonarPage() {
                     </span>
                     <span className="donar-provider-choice-arrow" aria-hidden="true">→</span>
                   </button>
-                  {stripeSessionAttempt && (
-                    <StripeDonationForm
-                      key={stripeSessionAttempt.sequence}
-                      session={stripeSessionAttempt.session}
-                      onRetry={retryStripeSession}
-                    />
-                  )}
                 </>
               )}
               {usProvider === "givebutter" && (
@@ -1403,7 +1406,6 @@ export function DonarPage() {
                       setUsProvider("stripe");
                     }}
                   >
-                    <span className="donar-provider-stripe-mark" aria-hidden="true" />
                     <span className="donar-provider-choice-copy">
                       <strong>Volver a Stripe</strong>
                       <small>Formulario en español</small>

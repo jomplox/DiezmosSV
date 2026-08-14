@@ -4072,8 +4072,10 @@ pre {
   white-space: nowrap;
 }
 
+/* One column for the whole US surface: this control, the Givebutter frame and the
+   promoted escape hatch all measure min(100%, 440px). */
 .donar-provider-choice {
-  width: min(100%, 360px);
+  width: min(100%, 440px);
   min-height: 50px;
   justify-self: center;
   display: grid;
@@ -4102,36 +4104,24 @@ pre {
   outline-offset: 3px;
 }
 
-.donar-provider-choice-givebutter {
-  border-color: #e5ad0f;
-  background: linear-gradient(135deg, #fffdf4 0%, #fff7d6 100%);
+/* The return control carries no vendor mark — Stripe's identity is not ours to draw —
+   so its first column stays reserved and empty and both buttons' text shares one left
+   edge. The ← arrow already says "back". */
+.donar-provider-choice-stripe .donar-provider-choice-copy {
+  grid-column: 2;
 }
 
-.donar-provider-choice img,
-.donar-provider-stripe-mark {
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
+.donar-provider-choice-stripe .donar-provider-choice-arrow {
+  grid-column: 3;
 }
 
 .donar-provider-choice img {
   display: block;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
   object-fit: contain;
   background: #febf10;
-}
-
-.donar-provider-stripe-mark {
-  display: grid;
-  place-items: center;
-  background: #635bff;
-}
-
-.donar-provider-stripe-mark::after {
-  content: "S";
-  color: #ffffff;
-  font-family: Arial, sans-serif;
-  font-size: 19px;
-  font-weight: 700;
 }
 
 .donar-provider-choice-copy {

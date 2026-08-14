@@ -1235,6 +1235,49 @@ describe("Stripe donar page source contract", () => {
     expect(stripeBlock).not.toContain("donar-stripe-assurance");
   });
 
+  it("renders the Givebutter alternative below the default Stripe form", () => {
+    const branchStart = pageSource.indexOf('{usProvider === "stripe" && (');
+    expect(branchStart).toBeGreaterThan(-1);
+    const branch = pageSource.slice(
+      branchStart,
+      pageSource.indexOf('{usProvider === "givebutter" && (', branchStart)
+    );
+    // Stripe carries the Spanish form and the tax receipt, so it owns the
+    // "understand → pay" flow; the alternative follows it in DOM order.
+    const stripeForm = branch.indexOf("<StripeDonationForm");
+    const givebutterChoice = branch.indexOf("Dar con Givebutter");
+    expect(stripeForm).toBeGreaterThan(-1);
+    expect(givebutterChoice).toBeGreaterThan(stripeForm);
+    // The move changes nothing about the form's guard or its per-attempt key.
+    expect(branch).toContain("{stripeSessionAttempt && (");
+    expect(branch).toContain("key={stripeSessionAttempt.sequence}");
+    expect(branch).toContain("Formulario en inglés");
+  });
+
+  it("keeps both US provider controls inside the page's monochrome vocabulary", () => {
+    const choiceRule = stylesSource.match(/\.donar-provider-choice\s*\{[^}]*\}/)?.[0] ?? "";
+    // One column for the switch controls, the frame and the promoted escape hatch.
+    expect(choiceRule).toContain("width: min(100%, 440px);");
+    expect(choiceRule).toContain("min-height: 50px;");
+    expect(choiceRule).toContain("border: 1px solid #d8d8d8;");
+    expect(choiceRule).toContain("background: #ffffff;");
+    // The saturated card is gone: no amber border, no gradient, no modifier class.
+    expect(`${donarSource}\n${stylesSource}`).not.toContain("donar-provider-choice-givebutter");
+    expect(stylesSource).not.toContain("#e5ad0f");
+    // The bundled favicon keeps its brand swatch — that mark IS the recognition.
+    expect(stylesSource).toMatch(/\.donar-provider-choice img\s*\{[^}]*background:\s*#febf10;/);
+    expect(donarSource).toContain("GIVEBUTTER_ICON_DATA_URI");
+    // Stripe's identity is not ours to draw: the hand-made mark is gone, and the return
+    // button reserves the empty first column so both labels share one left edge.
+    expect(`${donarSource}\n${stylesSource}`).not.toContain("donar-provider-stripe-mark");
+    expect(stylesSource).toMatch(
+      /\.donar-provider-choice-stripe \.donar-provider-choice-copy\s*\{[^}]*grid-column:\s*2;/
+    );
+    expect(stylesSource).toMatch(
+      /\.donar-provider-choice-stripe \.donar-provider-choice-arrow\s*\{[^}]*grid-column:\s*3;/
+    );
+  });
+
   it("puts one Givebutter escape hatch above the frame instead of two below it", () => {
     const surfaceStart = pageSource.indexOf('{usProvider === "givebutter" && (');
     expect(surfaceStart).toBeGreaterThan(-1);

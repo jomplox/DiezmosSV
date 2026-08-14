@@ -634,9 +634,22 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   await expect(givebutterChoice.locator("img")).toBeVisible();
   const givebutterChoiceBox = await givebutterChoice.boundingBox();
   expect(givebutterChoiceBox).not.toBeNull();
-  expect(givebutterChoiceBox!.width).toBeLessThanOrEqual(360);
+  expect(givebutterChoiceBox!.width).toBeLessThanOrEqual(440);
   expect(givebutterChoiceBox!.height).toBeGreaterThanOrEqual(44);
   expect(givebutterChoiceBox!.height).toBeLessThanOrEqual(54);
+  // Stripe is the default path — it carries the Spanish form and the tax receipt — so
+  // the alternative sits below it instead of interrupting the reading flow.
+  const defaultStripeBox = await page.locator(".donar-stripe-embedded").boundingBox();
+  expect(defaultStripeBox).not.toBeNull();
+  expect(givebutterChoiceBox!.y).toBeGreaterThan(defaultStripeBox!.y);
+  // …and it is painted in the page's monochrome vocabulary, not as the loudest thing
+  // on screen: the Givebutter favicon is the only brand color the control spends.
+  // The pointer is parked off the control first — :hover repaints its border.
+  await page.mouse.move(0, 0);
+  expect(await givebutterChoice.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { borderColor: style.borderTopColor, backgroundImage: style.backgroundImage };
+  })).toEqual({ borderColor: "rgb(216, 216, 216)", backgroundImage: "none" });
   expect(givebutterRequests).toEqual([]);
   await givebutterChoice.click();
   await expect(page.locator(".donar-stripe-embedded")).toHaveCount(0);
