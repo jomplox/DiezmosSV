@@ -706,17 +706,24 @@ test("preloads and edits owner-visible U.S. organization settings while Stripe c
     new URL(response.url()).pathname === "/api/settings/stripe" && response.request().method() === "GET");
   await page.getByRole("button", { name: "Guardar configuración de Stripe" }).click();
 
-  await expect.poll(() => submitted).toMatchObject({
-    legalName: configuration.legalName,
-    ein: configuration.ein,
+  await expect.poll(() => submitted).toEqual({
+    restrictedKey: "",
+    publishableKey: "",
+    paymentMethodConfigurationId: "",
+    billingPortalConfigurationId: "",
     timeZone: "America/Chicago",
-    organizationPhone: "+1 (312) 555-0100",
-    organizationWebsite: configuration.organizationWebsite,
-    organizationMailingAddress: configuration.organizationMailingAddress,
-    signerName: configuration.signerName,
-    signerTitle: configuration.signerTitle,
-    restrictedKey: ""
+    organizationPhone: "+1 (312) 555-0100"
   });
+  for (const untouchedField of [
+    "legalName",
+    "ein",
+    "organizationWebsite",
+    "organizationMailingAddress",
+    "signerName",
+    "signerTitle"
+  ]) {
+    expect(submitted!).not.toHaveProperty(untouchedField);
+  }
 
   // El GET de refresco ya respondió con la `configuration` original. El formulario debe
   // conservar los valores aceptados; si se rehidratara de esa lectura, el teléfono
@@ -728,6 +735,7 @@ test("preloads and edits owner-visible U.S. organization settings while Stripe c
 
 test("clears Stripe write-only replacements after POST success even when status refresh fails", async ({ page }) => {
   let postSucceeded = false;
+  let submitted: Record<string, unknown> | null = null;
   const legalName = "Friends of Durable Example, Inc.";
   await installOwnerAdmin(page, async (route, url) => {
     const request = route.request();
@@ -747,6 +755,7 @@ test("clears Stripe write-only replacements after POST success even when status 
       return true;
     }
     if (url.pathname === "/api/settings/stripe" && request.method() === "POST") {
+      submitted = request.postDataJSON() as Record<string, unknown>;
       postSucceeded = true;
       await fulfillJson(route, { updated: ["STRIPE_RESTRICTED_KEY"] });
       return true;
@@ -787,6 +796,24 @@ test("clears Stripe write-only replacements after POST success even when status 
   await page.getByRole("button", { name: "Guardar configuración de Stripe" }).click();
 
   await expect.poll(() => postSucceeded).toBe(true);
+  expect(submitted).toEqual({
+    restrictedKey: "rk_test_write_only_fixture",
+    publishableKey: "",
+    paymentMethodConfigurationId: "",
+    billingPortalConfigurationId: ""
+  });
+  for (const organizationField of [
+    "legalName",
+    "ein",
+    "timeZone",
+    "organizationPhone",
+    "organizationWebsite",
+    "organizationMailingAddress",
+    "signerName",
+    "signerTitle"
+  ]) {
+    expect(submitted!).not.toHaveProperty(organizationField);
+  }
   await expect(replacement).toHaveValue("");
   await expect(visibleLegalName).toHaveValue(legalName);
   await expect(page.getByRole("status")).toContainText(

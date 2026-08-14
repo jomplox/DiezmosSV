@@ -535,6 +535,11 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     stripeStatementSearchInputGenerationRef.current += 1;
     annualReportOperationClaimsRef.current.clear();
     automaticRefreshFlightRef.current = null;
+    stripeSettingsRequestsRef.current.invalidate();
+    if (stripeOrganizationPendingExpiryTimerRef.current !== null) {
+      window.clearTimeout(stripeOrganizationPendingExpiryTimerRef.current);
+      stripeOrganizationPendingExpiryTimerRef.current = null;
+    }
     runActionOwnersRef.current.clear();
     runActionBusyNamesRef.current.clear();
   }, []);

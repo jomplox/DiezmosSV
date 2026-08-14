@@ -338,4 +338,13 @@ describe("Stripe organization propagation window", () => {
     expect(reset).toContain("stripeSettingsRequestsRef.current.invalidate();");
     expect(reset).toContain("stripeOrganizationBaselineRef.current = null;");
   });
+
+  test("invalidates Stripe refreshes and clears the pending expiry timer on unmount", () => {
+    const start = appSource.indexOf("useEffect(() => () => {");
+    const cleanup = appSource.slice(start, appSource.indexOf("}, []);", start));
+
+    expect(cleanup).toContain("stripeSettingsRequestsRef.current.invalidate();");
+    expect(cleanup).toContain("window.clearTimeout(stripeOrganizationPendingExpiryTimerRef.current);");
+    expect(cleanup).toContain("stripeOrganizationPendingExpiryTimerRef.current = null;");
+  });
 });
