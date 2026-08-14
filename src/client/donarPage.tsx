@@ -1444,12 +1444,15 @@ export function DonarPage() {
                         {DONAR_WIDGET_LOADING_MESSAGE}
                       </p>
                     )}
+                    {/* `payment` sin origen equivale a `payment 'src'`: solo el embed de
+                        Givebutter recibe la Payment Request API, no cada origen del árbol
+                        de marcos. Sin referrerPolicy propio el marco hereda el
+                        Referrer-Policy: no-referrer del documento. */}
                     <iframe
                       className="donar-givebutter-frame"
                       title="Formulario de donación Givebutter (en inglés)"
                       src={givebutterFrameUrl}
-                      allow="payment *; clipboard-write"
-                      referrerPolicy="strict-origin-when-cross-origin"
+                      allow="payment; clipboard-write"
                       onLoad={() => setGivebutterFrameLoaded(true)}
                     />
                   </div>

@@ -1235,6 +1235,21 @@ describe("Stripe donar page source contract", () => {
     expect(stripeBlock).not.toContain("donar-stripe-assurance");
   });
 
+  it("delegates payment only to the Givebutter embed and leaks no referrer to it", () => {
+    const frame = pageSource.slice(
+      pageSource.indexOf('className="donar-givebutter-frame"'),
+      pageSource.indexOf("/>", pageSource.indexOf('className="donar-givebutter-frame"'))
+    );
+
+    // `payment` sin origen equivale a `payment 'src'`; `payment *` delegaría la Payment
+    // Request API a todos los orígenes del árbol de marcos.
+    expect(frame).toContain('allow="payment; clipboard-write"');
+    expect(frame).not.toContain("payment *");
+    // Sin referrerPolicy propio el marco hereda el Referrer-Policy: no-referrer del
+    // documento, así que el origen de la página de donación no viaja a Givebutter.
+    expect(frame).not.toContain("referrerPolicy");
+  });
+
   it("renders the Givebutter alternative below the default Stripe form", () => {
     const branchStart = pageSource.indexOf('{usProvider === "stripe" && (');
     expect(branchStart).toBeGreaterThan(-1);
