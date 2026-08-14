@@ -342,6 +342,59 @@ describe("Stripe owner settings", () => {
     }
   });
 
+  it("rejects blanking a configured organization value and reports a save with no edits", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const configured = {
+      APP_ENV: "staging",
+      CLOUDFLARE_ACCOUNT_ID: "account",
+      CLOUDFLARE_API_TOKEN: "writer-token",
+      CLOUDFLARE_SCRIPT_NAME: "worker",
+      STRIPE_US_LEGAL_NAME: "Example Nonprofit",
+      STRIPE_US_EIN: "12-3456789",
+      STRIPE_US_TIME_ZONE: "America/New_York",
+      STRIPE_US_PHONE: "+1 555 010 0100",
+      STRIPE_US_WEBSITE: "https://example.org",
+      STRIPE_US_MAILING_ADDRESS: "100 Test Avenue\nNew York, NY 10001, USA",
+      STRIPE_US_SIGNER_NAME: "Test Signer",
+      STRIPE_US_SIGNER_TITLE: "Treasurer"
+    };
+    const submitted = {
+      legalName: "Example Nonprofit",
+      ein: "12-3456789",
+      timeZone: "America/New_York",
+      organizationPhone: "+1 555 010 0100",
+      organizationWebsite: "https://example.org",
+      organizationMailingAddress: "100 Test Avenue\nNew York, NY 10001, USA",
+      signerName: "Test Signer",
+      signerTitle: "Treasurer"
+    };
+    const save = async (body: Record<string, string>) => worker.fetch(
+      new Request("https://example.org/api/settings/stripe", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      }),
+      env(db, configured)
+    );
+    try {
+      const blanked = await save({ ...submitted, organizationWebsite: "" });
+      expect(blanked.status).toBe(400);
+      await expect(blanked.json()).resolves.toMatchObject({ error: "blank_us_website" });
+
+      const unchanged = await save(submitted);
+      expect(unchanged.status).toBe(400);
+      await expect(unchanged.json()).resolves.toMatchObject({ error: "no_stripe_credentials_supplied" });
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(db.audits.find((row) => row.action === "STRIPE_CREDENTIALS_UPDATED")).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("writes valid replacements through the bulk writer and audits names only", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };

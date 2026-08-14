@@ -2,9 +2,14 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, test } from "vitest";
 import { credentialSettingsSections } from "../../src/client/credentialSettings";
+import { userFacingErrorMessage } from "../../src/client/displayText";
 
 const panelSource = readFileSync(resolve(import.meta.dirname, "../../src/client/credentialsPanel.tsx"), "utf8");
 const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
+const credentialsServiceSource = readFileSync(
+  resolve(import.meta.dirname, "../../src/worker/services/credentials.ts"),
+  "utf8"
+);
 
 describe("Stripe owner settings UI", () => {
   test("registers Stripe EE. UU. in the existing configuration navigation", () => {
@@ -64,5 +69,32 @@ describe("Stripe owner settings UI", () => {
     expect(appSource).toContain("organizationMailingAddress: credentialInput.stripeOrganizationMailingAddress");
     expect(appSource).toContain("signerName: credentialInput.stripeSignerName");
     expect(appSource).toContain("signerTitle: credentialInput.stripeSignerTitle");
+  });
+
+  test("names the emptied field in Spanish instead of showing the raw rejection code", () => {
+    const codes = Array.from(
+      credentialsServiceSource.matchAll(/blankCode: "([a-z_]+)"/g),
+      (match) => match[1]
+    );
+
+    expect(codes).toEqual([
+      "blank_us_legal_name",
+      "blank_us_ein",
+      "blank_us_time_zone",
+      "blank_us_phone",
+      "blank_us_website",
+      "blank_us_mailing_address",
+      "blank_us_signer_name",
+      "blank_us_signer_title"
+    ]);
+    for (const code of codes) {
+      expect(userFacingErrorMessage(code)).toMatch(/no puede quedar vací[oa]\.$/u);
+    }
+    expect(userFacingErrorMessage("blank_us_legal_name")).toBe("El nombre legal no puede quedar vacío.");
+    expect(userFacingErrorMessage("blank_us_signer_title")).toBe("El cargo del firmante autorizado no puede quedar vacío.");
+  });
+
+  test("tells the owner that an unedited save has nothing to write", () => {
+    expect(userFacingErrorMessage("no_stripe_credentials_supplied")).toBe("No hay cambios que guardar.");
   });
 });

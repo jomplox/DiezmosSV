@@ -317,6 +317,94 @@ describe("credential secret patch", () => {
     ]) expect(() => buildStripeCredentialSecretPatch(input, staging)).toThrow(StripeCredentialValidationError);
   });
 
+  it("refuses to blank a configured organization value and ignores blanks for unconfigured ones", () => {
+    const configured = env({
+      APP_ENV: "staging",
+      STRIPE_US_LEGAL_NAME: "Example Nonprofit",
+      STRIPE_US_EIN: "12-3456789",
+      STRIPE_US_TIME_ZONE: "America/Chicago",
+      STRIPE_US_PHONE: "+1 555 010 0100",
+      STRIPE_US_WEBSITE: "https://example.org",
+      STRIPE_US_MAILING_ADDRESS: "100 Test Avenue\nNew York, NY 10001, USA",
+      STRIPE_US_SIGNER_NAME: "Test Signer",
+      STRIPE_US_SIGNER_TITLE: "Treasurer"
+    });
+    const submitted = {
+      legalName: "Example Nonprofit",
+      ein: "12-3456789",
+      timeZone: "America/Chicago",
+      organizationPhone: "+1 555 010 0100",
+      organizationWebsite: "https://example.org",
+      organizationMailingAddress: "100 Test Avenue\nNew York, NY 10001, USA",
+      signerName: "Test Signer",
+      signerTitle: "Treasurer"
+    };
+
+    for (const [field, code] of [
+      ["legalName", "blank_us_legal_name"],
+      ["ein", "blank_us_ein"],
+      ["timeZone", "blank_us_time_zone"],
+      ["organizationPhone", "blank_us_phone"],
+      ["organizationWebsite", "blank_us_website"],
+      ["organizationMailingAddress", "blank_us_mailing_address"],
+      ["signerName", "blank_us_signer_name"],
+      ["signerTitle", "blank_us_signer_title"]
+    ] as const) {
+      expect(() => buildStripeCredentialSecretPatch({ ...submitted, [field]: "   " }, configured))
+        .toThrow(expect.objectContaining({ name: "StripeCredentialValidationError", code }));
+    }
+
+    // Un despliegue a medio configurar guarda lo que sí tiene sin que los campos vacíos estorben.
+    expect(buildStripeCredentialSecretPatch(
+      { legalName: "Example Nonprofit" },
+      env({ APP_ENV: "staging" })
+    )).toEqual({
+      STRIPE_US_LEGAL_NAME: expect.objectContaining({ text: "Example Nonprofit" })
+    });
+  });
+
+  it("writes only the organization values that actually changed and never the unchanged ones", () => {
+    const configured = env({
+      APP_ENV: "staging",
+      STRIPE_RESTRICTED_KEY: "rk_test_existing",
+      STRIPE_PUBLISHABLE_KEY: "pk_test_existing",
+      STRIPE_US_LEGAL_NAME: "Example Nonprofit",
+      STRIPE_US_EIN: "12-3456789",
+      STRIPE_US_TIME_ZONE: "America/Chicago",
+      STRIPE_US_PHONE: "+1 555 010 0100",
+      STRIPE_US_WEBSITE: "https://example.org",
+      STRIPE_US_MAILING_ADDRESS: "100 Test Avenue\nNew York, NY 10001, USA",
+      STRIPE_US_SIGNER_NAME: "Test Signer",
+      STRIPE_US_SIGNER_TITLE: "Treasurer"
+    });
+    const unchanged = {
+      legalName: " Example Nonprofit ",
+      ein: "12-3456789",
+      timeZone: "America/Chicago",
+      organizationPhone: "+1 555 010 0100",
+      organizationWebsite: "https://example.org",
+      organizationMailingAddress: "100 Test Avenue\nNew York, NY 10001, USA",
+      signerName: "Test Signer",
+      signerTitle: "Treasurer"
+    };
+
+    expect(buildStripeCredentialSecretPatch(unchanged, configured)).toEqual({});
+    expect(buildStripeCredentialSecretPatch(
+      { ...unchanged, organizationWebsite: "https://example.com" },
+      configured
+    )).toEqual({
+      STRIPE_US_WEBSITE: expect.objectContaining({ text: "https://example.com" })
+    });
+    // Las credenciales de escritura no se precargan: en blanco no tocan nada y
+    // cualquier valor enviado se escribe aunque coincida con el secreto vigente.
+    expect(buildStripeCredentialSecretPatch(
+      { ...unchanged, restrictedKey: "rk_test_existing", publishableKey: "  " },
+      configured
+    )).toEqual({
+      STRIPE_RESTRICTED_KEY: expect.objectContaining({ text: "rk_test_existing" })
+    });
+  });
+
   it("stages only a syntactically valid next webhook secret", () => {
     expect(buildStripeWebhookStagePatch(" whsec_next ")).toEqual({
       STRIPE_WEBHOOK_SECRET_NEXT: {

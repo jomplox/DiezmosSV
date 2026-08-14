@@ -280,19 +280,58 @@ export function buildStripeCredentialSecretPatch(
     throw new StripeCredentialValidationError("invalid_us_signer_title");
   }
 
+  // Las credenciales de escritura nunca se precargan en el panel: en blanco
+  // significa "no tocar" y cualquier valor enviado es una rotación real.
   putIfPresent(patch, "STRIPE_RESTRICTED_KEY", restrictedKey);
   putIfPresent(patch, "STRIPE_PUBLISHABLE_KEY", publishableKey);
   putIfPresent(patch, "STRIPE_PAYMENT_METHOD_CONFIGURATION_ID", paymentMethodConfigurationId);
   putIfPresent(patch, "STRIPE_BILLING_PORTAL_CONFIGURATION_ID", billingPortalConfigurationId);
-  putIfPresent(patch, "STRIPE_US_LEGAL_NAME", legalName);
-  putIfPresent(patch, "STRIPE_US_EIN", ein);
-  putIfPresent(patch, "STRIPE_US_TIME_ZONE", timeZone);
-  putIfPresent(patch, "STRIPE_US_PHONE", organizationPhone);
-  putIfPresent(patch, "STRIPE_US_WEBSITE", organizationWebsite);
-  putIfPresent(patch, "STRIPE_US_MAILING_ADDRESS", organizationMailingAddress);
-  putIfPresent(patch, "STRIPE_US_SIGNER_NAME", signerName);
-  putIfPresent(patch, "STRIPE_US_SIGNER_TITLE", signerTitle);
+  // Los ocho campos de la organización sí se precargan, así que el panel envía
+  // siempre su valor actual: solo se escriben los que cambiaron y vaciar uno ya
+  // configurado se rechaza (borrarlo dejaría inoperante la donación en EE. UU.).
+  for (const field of [
+    { name: "STRIPE_US_LEGAL_NAME", submitted: legalName, blankCode: "blank_us_legal_name" },
+    { name: "STRIPE_US_EIN", submitted: ein, blankCode: "blank_us_ein" },
+    { name: "STRIPE_US_TIME_ZONE", submitted: timeZone, blankCode: "blank_us_time_zone" },
+    { name: "STRIPE_US_PHONE", submitted: organizationPhone, blankCode: "blank_us_phone" },
+    { name: "STRIPE_US_WEBSITE", submitted: organizationWebsite, blankCode: "blank_us_website" },
+    { name: "STRIPE_US_MAILING_ADDRESS", submitted: organizationMailingAddress, blankCode: "blank_us_mailing_address" },
+    { name: "STRIPE_US_SIGNER_NAME", submitted: signerName, blankCode: "blank_us_signer_name" },
+    { name: "STRIPE_US_SIGNER_TITLE", submitted: signerTitle, blankCode: "blank_us_signer_title" }
+  ] as const) {
+    putOrganizationValue(patch, env, field.name, field.submitted, field.blankCode);
+  }
   return patch;
+}
+
+type StripeUsOrganizationSecret =
+  | "STRIPE_US_LEGAL_NAME"
+  | "STRIPE_US_EIN"
+  | "STRIPE_US_TIME_ZONE"
+  | "STRIPE_US_PHONE"
+  | "STRIPE_US_WEBSITE"
+  | "STRIPE_US_MAILING_ADDRESS"
+  | "STRIPE_US_SIGNER_NAME"
+  | "STRIPE_US_SIGNER_TITLE";
+
+function putOrganizationValue(
+  patch: SecretPatch,
+  env: Env,
+  name: StripeUsOrganizationSecret,
+  submitted: string,
+  blankCode: string
+): void {
+  const current = trim(env[name]);
+  if (!submitted) {
+    // Sin valor configurado todavía, un campo vacío sigue siendo un no-op: así
+    // un despliegue a medio configurar puede guardar los campos que sí tiene.
+    if (current) {
+      throw new StripeCredentialValidationError(blankCode);
+    }
+    return;
+  }
+  if (submitted === current) return;
+  patch[name] = secret(name, submitted);
 }
 
 function hasControlCharacters(value: string): boolean {

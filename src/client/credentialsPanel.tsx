@@ -1358,6 +1358,10 @@ function EmailTemplateBodyEditor({
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pendingSelectionRef = useRef<{ start: number; end: number } | null>(null);
+  const toolbarRef = useRef<HTMLDivElement>(null);
+  // role="toolbar" es un solo punto de tabulación: las flechas mueven el foco
+  // entre los botones y solo el activo queda alcanzable con Tab.
+  const [activeFormatIndex, setActiveFormatIndex] = useState(0);
   useLayoutEffect(() => {
     const pending = pendingSelectionRef.current;
     if (!pending) return;
@@ -1405,15 +1409,33 @@ function EmailTemplateBodyEditor({
     onChange(nextValue);
   };
 
+  const moveFormatFocus = (step: number) => {
+    const buttons = Array.from(toolbarRef.current?.querySelectorAll("button") ?? []);
+    if (buttons.length === 0) return;
+    const nextIndex = (activeFormatIndex + step + buttons.length) % buttons.length;
+    setActiveFormatIndex(nextIndex);
+    buttons[nextIndex].focus();
+  };
+
   return (
     <div className="email-template-body-field">
       <div className="email-template-body-head">
         <label htmlFor={id}><span>Cuerpo del correo</span></label>
-        <div className="email-template-format-toolbar" role="toolbar" aria-label="Formato del cuerpo">
-          <button type="button" aria-label="Negrita" title="Negrita: **texto**" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("bold")}><strong>B</strong></button>
-          <button type="button" aria-label="Cursiva" title="Cursiva: *texto*" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("italic")}><em>I</em></button>
-          <button type="button" aria-label="Subrayado" title="Subrayado: ++texto++" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("underline")}><u>U</u></button>
-          <button type="button" aria-label="Cita" title="Cita: > texto" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("quote")}>❝</button>
+        <div
+          ref={toolbarRef}
+          className="email-template-format-toolbar"
+          role="toolbar"
+          aria-label="Formato del cuerpo"
+          onKeyDown={(event) => {
+            if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+            event.preventDefault();
+            moveFormatFocus(event.key === "ArrowRight" ? 1 : -1);
+          }}
+        >
+          <button type="button" tabIndex={activeFormatIndex === 0 ? 0 : -1} aria-label="Negrita" title="Negrita: **texto**" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("bold")}><strong>B</strong></button>
+          <button type="button" tabIndex={activeFormatIndex === 1 ? 0 : -1} aria-label="Cursiva" title="Cursiva: *texto*" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("italic")}><em>I</em></button>
+          <button type="button" tabIndex={activeFormatIndex === 2 ? 0 : -1} aria-label="Subrayado" title="Subrayado: ++texto++" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("underline")}><u>U</u></button>
+          <button type="button" tabIndex={activeFormatIndex === 3 ? 0 : -1} aria-label="Cita" title="Cita: > texto" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("quote")}>❝</button>
         </div>
       </div>
       <textarea
