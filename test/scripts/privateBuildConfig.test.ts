@@ -47,12 +47,18 @@ describe("private release builds", () => {
         ViTe_MIXED_SENTINEL: "mixed-case-private-canary"
       };
       const originalEnv = { ...inheritedEnv };
-      let capturedOutput = "";
-      const write = process.stdout.write;
+      let capturedStdout = "";
+      let capturedStderr = "";
+      const stdoutWrite = process.stdout.write;
+      const stderrWrite = process.stderr.write;
       process.stdout.write = ((chunk: string | Uint8Array) => {
-        capturedOutput += String(chunk);
+        capturedStdout += String(chunk);
         return true;
       }) as typeof process.stdout.write;
+      process.stderr.write = ((chunk: string | Uint8Array) => {
+        capturedStderr += String(chunk);
+        return true;
+      }) as typeof process.stderr.write;
 
       try {
         await expect(
@@ -60,16 +66,18 @@ describe("private release builds", () => {
             target,
             env: inheritedEnv,
             repositoryRoot: fixture.repositoryRoot,
-            spawnImpl
+            spawnImpl,
+            platform: "linux"
           })
         ).resolves.toBe(0);
       } finally {
-        process.stdout.write = write;
+        process.stdout.write = stdoutWrite;
+        process.stderr.write = stderrWrite;
       }
 
       expect(calls).toHaveLength(1);
       const [call] = calls;
-      expect(call.command).toBe(process.platform === "win32" ? "npm.cmd" : "npm");
+      expect(call.command).toBe("npm");
       expect(call.args).toEqual(["run", "build"]);
       expect(call.options.env.VITE_GIVEBUTTER_CAMPAIGN).toBe("campaign-fixture");
       expect(call.options.env.INHERITED_TEST_VALUE).toBe("available-to-build");
@@ -90,10 +98,77 @@ describe("private release builds", () => {
       expect(call.options.env.DIEZMOSSV_DONOR_LOGO_FILE).toBeUndefined();
       expect(call.options.env.DIEZMOSSV_OPERATOR_EMAIL).toBeUndefined();
       expect(inheritedEnv).toEqual(originalEnv);
-      expect(capturedOutput).not.toContain("campaign-fixture");
-      expect(capturedOutput).toBe("");
+      expect({
+        stdoutContainsCampaign: capturedStdout.includes("campaign-fixture"),
+        stderrContainsCampaign: capturedStderr.includes("campaign-fixture"),
+        stdoutEmpty: capturedStdout.length === 0,
+        stderrEmpty: capturedStderr.length === 0
+      }).toEqual({
+        stdoutContainsCampaign: false,
+        stderrContainsCampaign: false,
+        stdoutEmpty: true,
+        stderrEmpty: true
+      });
     }
   );
+
+  it("uses an explicit Windows command interpreter with constant npm arguments", async () => {
+    const fixture = deploymentFixture("staging");
+    const { calls, spawnImpl } = recordingSpawn(0);
+    const commandInterpreter = "C:\\Windows Tools\\System32\\cmd.exe";
+
+    await expect(
+      runPrivateBuild({
+        target: "staging",
+        env: {
+          DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath,
+          ComSpec: commandInterpreter,
+          VITE_GIVEBUTTER_CAMPAIGN: "ambient-campaign-override",
+          ViTe_WINDOWS_PRIVATE_SENTINEL: "windows-private-canary"
+        },
+        repositoryRoot: fixture.repositoryRoot,
+        spawnImpl,
+        platform: "win32"
+      })
+    ).resolves.toBe(0);
+
+    expect(calls).toHaveLength(1);
+    const [call] = calls;
+    expect(call.command).toBe(commandInterpreter);
+    expect(call.args).toEqual(["/d", "/c", "npm.cmd", "run", "build"]);
+    expect(call.options.shell).not.toBe(true);
+    expect(call.options.env.ComSpec).toBe(commandInterpreter);
+    expect(call.options.env.VITE_GIVEBUTTER_CAMPAIGN).toBe("campaign-fixture");
+    expect(call.options.env.ViTe_WINDOWS_PRIVATE_SENTINEL).toBeUndefined();
+    expect({
+      argumentsContainCampaign: call.args.some((argument) => argument.includes("campaign-fixture")),
+      argumentsContainConfigPath: call.args.some((argument) =>
+        argument.includes(fixture.configPath)
+      )
+    }).toEqual({ argumentsContainCampaign: false, argumentsContainConfigPath: false });
+  });
+
+  it("falls back to cmd.exe when Windows ComSpec is unavailable", async () => {
+    const fixture = deploymentFixture("production");
+    const { calls, spawnImpl } = recordingSpawn(0);
+
+    await expect(
+      runPrivateBuild({
+        target: "production",
+        env: { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath },
+        repositoryRoot: fixture.repositoryRoot,
+        spawnImpl,
+        platform: "win32"
+      })
+    ).resolves.toBe(0);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      command: "cmd.exe",
+      args: ["/d", "/c", "npm.cmd", "run", "build"]
+    });
+    expect(calls[0].options.shell).not.toBe(true);
+  });
 
   it.each(["staging", "production"] as const)(
     "keeps inherited Vite canaries out of a disposable %s bundle",
@@ -128,33 +203,41 @@ describe("private release builds", () => {
     }
   );
 
-  it("returns a non-zero build exit status", async () => {
-    const fixture = deploymentFixture("staging");
-    const { spawnImpl } = recordingSpawn(17);
+  it.each(["linux", "win32"] as const)(
+    "returns a non-zero %s build exit status",
+    async (platform) => {
+      const fixture = deploymentFixture("staging");
+      const { spawnImpl } = recordingSpawn(17);
 
-    await expect(
-      runPrivateBuild({
-        target: "staging",
-        env: { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath },
-        repositoryRoot: fixture.repositoryRoot,
-        spawnImpl
-      })
-    ).resolves.toBe(17);
-  });
+      await expect(
+        runPrivateBuild({
+          target: "staging",
+          env: { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath },
+          repositoryRoot: fixture.repositoryRoot,
+          spawnImpl,
+          platform
+        })
+      ).resolves.toBe(17);
+    }
+  );
 
-  it("returns the conventional exit status when the build is terminated by a signal", async () => {
-    const fixture = deploymentFixture("staging");
-    const { spawnImpl } = recordingSpawn(null, "SIGTERM");
+  it.each(["linux", "win32"] as const)(
+    "returns the conventional exit status when the %s build is terminated by a signal",
+    async (platform) => {
+      const fixture = deploymentFixture("staging");
+      const { spawnImpl } = recordingSpawn(null, "SIGTERM");
 
-    await expect(
-      runPrivateBuild({
-        target: "staging",
-        env: { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath },
-        repositoryRoot: fixture.repositoryRoot,
-        spawnImpl
-      })
-    ).resolves.toBe(143);
-  });
+      await expect(
+        runPrivateBuild({
+          target: "staging",
+          env: { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath },
+          repositoryRoot: fixture.repositoryRoot,
+          spawnImpl,
+          platform
+        })
+      ).resolves.toBe(143);
+    }
+  );
 });
 
 interface Fixture {
@@ -227,10 +310,14 @@ function recordingSpawn(exitCode: number | null, signal: NodeJS.Signals | null =
   const calls: Array<{
     command: string;
     args: string[];
-    options: { env: Record<string, string | undefined> };
+    options: {
+      env: Record<string, string | undefined>;
+      shell?: boolean;
+    };
   }> = [];
   const spawnImpl = ((command: string, args: string[], options: {
     env: Record<string, string | undefined>;
+    shell?: boolean;
   }) => {
     calls.push({ command, args, options });
     const child = new EventEmitter();

@@ -5,4 +5,5 @@ export function runPrivateBuild(options: {
   env?: Record<string, string | undefined>;
   repositoryRoot?: string;
   spawnImpl?: typeof import("node:child_process").spawn;
+  platform?: NodeJS.Platform;
 }): Promise<number>;

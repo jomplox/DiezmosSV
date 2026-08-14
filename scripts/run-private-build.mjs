@@ -12,16 +12,18 @@ export async function runPrivateBuild({
   target,
   env = process.env,
   repositoryRoot = process.cwd(),
-  spawnImpl = spawn
+  spawnImpl = spawn,
+  platform = process.platform
 } = {}) {
   // Validate the owner-only target, campaign, origin, and donor-logo contract
   // before Vite starts. Only the public Givebutter campaign slug enters the
   // client build; Stripe credentials remain runtime-only.
   const config = loadPrivateDeployConfig({ target, env, repositoryRoot });
   const buildEnv = createBuildEnvironment(env, config);
+  const invocation = buildInvocation(platform, buildEnv);
 
   return new Promise((resolve, reject) => {
-    const child = spawnImpl(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "build"], {
+    const child = spawnImpl(invocation.command, invocation.args, {
       cwd: repositoryRoot,
       env: buildEnv,
       stdio: "inherit"
@@ -31,6 +33,19 @@ export async function runPrivateBuild({
       resolve(signal ? 128 + (constants.signals[signal] ?? 1) : (status ?? 1));
     });
   });
+}
+
+function buildInvocation(platform, env) {
+  if (platform !== "win32") {
+    return { command: "npm", args: ["run", "build"] };
+  }
+  const commandInterpreter = Object.entries(env).find(
+    ([name, value]) => name.toLowerCase() === "comspec" && value?.trim()
+  )?.[1];
+  return {
+    command: commandInterpreter || "cmd.exe",
+    args: ["/d", "/c", "npm.cmd", "run", "build"]
+  };
 }
 
 function createBuildEnvironment(inheritedEnv, config) {
