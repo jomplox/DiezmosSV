@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { certificateEmailHtml, dteEmailHtml, editableDonorEmailHtml, operationalAlertHtml, passwordResetEmailHtml, stripeAnnualStatementEmailHtml } from "../../src/worker/services/emailHtml";
+import { certificateEmailHtml, dteEmailHtml, editableDonorEmailHtml, operationalAlertHtml, passwordResetEmailHtml } from "../../src/worker/services/emailHtml";
 import type { DteDocumentRecord } from "../../src/worker/types";
 
 const LOGO_URL = "https://iglesia.example.org/api/branding/logo?v=v9";
@@ -29,13 +29,10 @@ describe("HTML email rendering", () => {
         totalLabel: "$100.00",
         isTestEnvironment: false
       }),
-      stripeAnnualStatementEmailHtml({
+      editableDonorEmailHtml({
         organizationName: "Misión ExampleOrganization",
-        donorName: "María",
-        year: 2025,
-        count: 2,
-        netTotalLabel: "$75.00",
-        corrected: false
+        title: "Constancia anual de donaciones — EE. UU.",
+        bodyText: "Estimada María:\n\nAdjuntamos su constancia anual de 2025 por $75.00."
       })
     ];
 
@@ -58,13 +55,13 @@ describe("HTML email rendering", () => {
   });
 
   it("keeps the U.S. annual email materially separate from the SV fiscal dossier", () => {
-    const html = stripeAnnualStatementEmailHtml({
+    const html = editableDonorEmailHtml({
       organizationName: "Misión ExampleOrganization",
-      donorName: "María",
-      year: 2025,
-      count: 2,
-      netTotalLabel: "$75.00",
-      corrected: true
+      title: "Constancia anual corregida de donaciones — EE. UU.",
+      bodyText:
+        "Estimada María:\n\nAdjuntamos su constancia anual corregida de 2025 por $75.00.\n\n"
+        + "No se proporcionaron bienes ni servicios a cambio de estas donaciones.\n\n"
+        + "Conserve este documento con sus registros."
     });
 
     expect(html).toContain("Constancia anual corregida de donaciones — EE. UU.");

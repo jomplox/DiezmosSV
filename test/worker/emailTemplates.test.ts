@@ -3,9 +3,11 @@ import { makeDocument } from "./fixtures";
 import {
   DEFAULT_EMAIL_TEMPLATES,
   EMAIL_TEMPLATE_DEFINITIONS,
+  escapeEmailTemplateFormattingValue,
   normalizeEmailTemplateSettings,
   parseEmailTemplates,
   renderEmailTemplate,
+  renderEmailTemplateValue,
   TRANSITORIO_RECEIPT_TEMPLATE
 } from "../../src/worker/services/emailTemplates";
 import { classifyEmailDispatchError, EmailService } from "../../src/worker/services/email";
@@ -844,5 +846,30 @@ describe("branding-aware email chrome", () => {
     expect(html).toContain("Iglesia Central");
     expect(html).toContain("#123abc");
     expect(html).not.toContain("ExamplePerson1");
+  });
+});
+
+describe("donor value escaping for the operator formatter", () => {
+  // Este escape es el único control que impide que el texto que aporta la persona
+  // donante se interprete como formato del operador en correos con valor fiscal.
+  it.each([
+    ["backslash", "C:\\ruta", "C:\\\\ruta"],
+    ["asterisco de cursiva y negrita", "Ana *Beatriz* **Carmen**", "Ana \\*Beatriz\\* \\*\\*Carmen\\*\\*"],
+    ["mas de subrayado", "Ana ++Beatriz++", "Ana \\+\\+Beatriz\\+\\+"],
+    ["cita al inicio de linea", "> Donacion falsa", "\\> Donacion falsa"],
+    ["cita sangrada", "  > Donacion falsa", "  \\> Donacion falsa"],
+    ["cita tras un salto CRLF", "Ana\r\n> Donacion falsa", "Ana\r\n\\> Donacion falsa"],
+    ["texto sin marcadores", "Ana Sofia", "Ana Sofia"]
+  ])("escapa %s", (_label, value, expected) => {
+    expect(escapeEmailTemplateFormattingValue(value)).toBe(expected);
+  });
+
+  it("escapa el valor del donante antes de interpolarlo en el cuerpo editable", () => {
+    const rendered = renderEmailTemplateValue(
+      { subject: "Constancia", body: "Estimado(a) {{donante}}:" },
+      { "{{donante}}": "*Ana*" }
+    );
+
+    expect(rendered.formattedText).toBe("Estimado(a) \\*Ana\\*:");
   });
 });

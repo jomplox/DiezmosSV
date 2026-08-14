@@ -296,7 +296,10 @@ function replacePlaceholders(value: string, placeholders: Record<string, string>
   return Object.entries(placeholders).reduce((text, [token, replacement]) => text.split(token).join(replacement), value);
 }
 
-function escapeEmailTemplateFormattingValue(value: string): string {
+// Neutraliza los marcadores del formateador del operador dentro de texto suministrado
+// por la persona donante, para que un nombre con `*` o una línea que empiece con `>` no
+// se interprete como formato en un correo con valor fiscal.
+export function escapeEmailTemplateFormattingValue(value: string): string {
   return value
     .replaceAll("\\", "\\\\")
     .replaceAll("*", "\\*")
