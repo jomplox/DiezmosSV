@@ -273,6 +273,7 @@ export type {
 export { legacyIssuanceAttemptId } from "./repository/wompiIssuance";
 export { INTENT_EXPIRY_SWEEP_LIMIT } from "./repository/donationIntents";
 export { INTENT_RECONCILIATION_SWEEP_LIMIT } from "./repository/donationIntents";
+export { EmailTemplateSnapshotConflictError } from "./repository/settings";
 export {
   OwnerTargetProtectedError,
   UserMutationConflictError

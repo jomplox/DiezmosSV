@@ -10,6 +10,12 @@ import type {
   EmailTemplateSettings
 } from "../../services/emailTemplates";
 
+export class EmailTemplateSnapshotConflictError extends Error {
+  constructor(readonly currentRaw: string | null) {
+    super("email template settings snapshot changed");
+  }
+}
+
 export async function getSetting(db: D1Database, key: string): Promise<string | null> {
   const row = await db.prepare("SELECT value FROM app_settings WHERE key = ?").bind(key).first<{ value: string }>();
   return row?.value ?? null;
@@ -35,6 +41,7 @@ export async function saveScopedEmailTemplates(
     patch: Partial<EmailTemplateSettings>;
     initialTemplates: EmailTemplateSettings;
     actorId: string;
+    expectedRaw: string | null;
   }
 ): Promise<string> {
   const updatedAt = nowIso();
@@ -45,7 +52,10 @@ export async function saveScopedEmailTemplates(
       `INSERT INTO app_settings (key, value, updated_by, updated_at)
        VALUES (?, ?, ?, ?)
        ON CONFLICT(key) DO UPDATE SET
-         value = json_patch(app_settings.value, ?),
+         value = CASE
+           WHEN app_settings.value = ? THEN json_patch(app_settings.value, ?)
+           ELSE NULL
+         END,
          updated_by = excluded.updated_by,
          updated_at = excluded.updated_at`
     )
@@ -54,6 +64,7 @@ export async function saveScopedEmailTemplates(
       JSON.stringify(input.initialTemplates),
       input.actorId,
       updatedAt,
+      input.expectedRaw,
       patchJson
     );
   const auditInsert = db
@@ -77,7 +88,15 @@ export async function saveScopedEmailTemplates(
       null
     );
 
-  await db.batch([settingsMutation, auditInsert]);
+  try {
+    await db.batch([settingsMutation, auditInsert]);
+  } catch (error) {
+    const currentRaw = await getSetting(db, input.key);
+    if (currentRaw !== input.expectedRaw) {
+      throw new EmailTemplateSnapshotConflictError(currentRaw);
+    }
+    throw error;
+  }
   const stored = await getSetting(db, input.key);
   if (stored === null) {
     throw new Error("scoped email template setting missing after save");

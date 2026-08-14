@@ -7,6 +7,7 @@ import {
   escapeEmailTemplateFormattingValue,
   normalizeEmailTemplateSettings,
   parseEmailTemplates,
+  prepareScopedEmailTemplateUpdate,
   renderEmailTemplate,
   renderEmailTemplateValue,
   TRANSITORIO_RECEIPT_TEMPLATE
@@ -183,6 +184,95 @@ describe("email template defaults", () => {
 });
 
 describe("scoped email template persistence", () => {
+  it("rejects a stale validated snapshot when a legacy writer replaces it with a structurally invalid row", async () => {
+    const database = migratedDatabase();
+    try {
+      const original = {
+        ...DEFAULT_EMAIL_TEMPLATES,
+        stripeRefund: { subject: "Corrección personalizada", body: "Monto neto {{montoNeto}}." }
+      };
+      const originalRaw = JSON.stringify(original);
+      database.prepare(
+        `INSERT INTO app_settings (key, value, updated_by)
+         VALUES ('email_templates_json', ?, 'current_owner')`
+      ).run(originalRaw);
+      const patch = {
+        dteReceipt: { subject: "CDE {{numeroControl}} actualizado", body: "Entrega {{monto}}." },
+        dteInvalidation: { subject: "CDE {{numeroControl}} invalidado", body: "Estado {{estado}}." }
+      };
+      const update = prepareScopedEmailTemplateUpdate(originalRaw, patch, "SV_CDE");
+
+      const legacyRaw = JSON.stringify({
+        dteReceipt: DEFAULT_EMAIL_TEMPLATES.dteReceipt,
+        dteInvalidation: DEFAULT_EMAIL_TEMPLATES.dteInvalidation
+      });
+      database.prepare(
+        `UPDATE app_settings
+         SET value = ?, updated_by = 'legacy_worker'
+         WHERE key = 'email_templates_json'`
+      ).run(legacyRaw);
+      const repository = new Repository(new SqliteD1(database).database);
+      const saveInput = {
+        key: "email_templates_json",
+        scope: "SV_CDE" as const,
+        patch: update.patch,
+        initialTemplates: update.templates,
+        actorId: "user_operator",
+        expectedRaw: originalRaw
+      };
+
+      await expect(repository.saveScopedEmailTemplates(saveInput)).rejects.toThrow(/snapshot|changed/i);
+
+      expect(database.prepare(
+        "SELECT value, updated_by FROM app_settings WHERE key = 'email_templates_json'"
+      ).get()).toEqual({ value: legacyRaw, updated_by: "legacy_worker" });
+      expect(database.prepare(
+        "SELECT COUNT(*) AS count FROM audit_logs WHERE action = 'EMAIL_TEMPLATES_UPDATED'"
+      ).get()).toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("rejects a concurrent insert after a missing-row preflight without changing or auditing it", async () => {
+    const database = migratedDatabase();
+    try {
+      const patch = {
+        dteReceipt: { subject: "CDE {{numeroControl}} actualizado", body: "Entrega {{monto}}." },
+        dteInvalidation: { subject: "CDE {{numeroControl}} invalidado", body: "Estado {{estado}}." }
+      };
+      const update = prepareScopedEmailTemplateUpdate(null, patch, "SV_CDE");
+      const concurrent = {
+        ...DEFAULT_EMAIL_TEMPLATES,
+        stripeRefund: { subject: "Corrección concurrente", body: "Monto neto {{montoNeto}}." }
+      };
+      const concurrentRaw = JSON.stringify(concurrent);
+      database.prepare(
+        `INSERT INTO app_settings (key, value, updated_by)
+         VALUES ('email_templates_json', ?, 'concurrent_owner')`
+      ).run(concurrentRaw);
+      const repository = new Repository(new SqliteD1(database).database);
+
+      await expect(repository.saveScopedEmailTemplates({
+        key: "email_templates_json",
+        scope: "SV_CDE",
+        patch: update.patch,
+        initialTemplates: update.templates,
+        actorId: "user_operator",
+        expectedRaw: null
+      })).rejects.toThrow(/snapshot|changed/i);
+
+      expect(database.prepare(
+        "SELECT value, updated_by FROM app_settings WHERE key = 'email_templates_json'"
+      ).get()).toEqual({ value: concurrentRaw, updated_by: "concurrent_owner" });
+      expect(database.prepare(
+        "SELECT COUNT(*) AS count FROM audit_logs WHERE action = 'EMAIL_TEMPLATES_UPDATED'"
+      ).get()).toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
   it("rolls back the SQLite settings mutation when the audit insert fails", async () => {
     const database = migratedDatabase();
     try {
@@ -190,10 +280,11 @@ describe("scoped email template persistence", () => {
         ...DEFAULT_EMAIL_TEMPLATES,
         stripeRefund: { subject: "Corrección personalizada", body: "Monto neto {{montoNeto}}." }
       };
+      const originalRaw = JSON.stringify(original);
       database.prepare(
         `INSERT INTO app_settings (key, value, updated_by)
          VALUES ('email_templates_json', ?, 'previous_owner')`
-      ).run(JSON.stringify(original));
+      ).run(originalRaw);
       database.exec(
         `CREATE TRIGGER fail_email_template_audit
          BEFORE INSERT ON audit_logs
@@ -213,12 +304,13 @@ describe("scoped email template persistence", () => {
         scope: "SV_CDE",
         patch,
         initialTemplates: { ...original, ...patch },
-        actorId: "user_operator"
+        actorId: "user_operator",
+        expectedRaw: originalRaw
       })).rejects.toThrow(/injected email template audit failure/);
 
       expect(database.prepare(
         "SELECT value, updated_by FROM app_settings WHERE key = 'email_templates_json'"
-      ).get()).toEqual({ value: JSON.stringify(original), updated_by: "previous_owner" });
+      ).get()).toEqual({ value: originalRaw, updated_by: "previous_owner" });
       expect(database.prepare(
         "SELECT COUNT(*) AS count FROM audit_logs WHERE action = 'EMAIL_TEMPLATES_UPDATED'"
       ).get()).toEqual({ count: 0 });

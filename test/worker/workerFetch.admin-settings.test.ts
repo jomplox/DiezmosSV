@@ -897,6 +897,128 @@ describe("email template settings", () => {
     expect(db.audits).toHaveLength(0);
   });
 
+  it("returns a reload conflict when a legacy writer installs a structurally invalid row after preflight", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    db.settings.push({
+      key: "email_templates_json",
+      value: JSON.stringify(DEFAULT_EMAIL_TEMPLATES),
+      updated_by: "previous_owner"
+    });
+    const legacyRaw = JSON.stringify({
+      dteReceipt: DEFAULT_EMAIL_TEMPLATES.dteReceipt,
+      dteInvalidation: DEFAULT_EMAIL_TEMPLATES.dteInvalidation
+    });
+    let signalBatchReached!: () => void;
+    let releaseBatch!: () => void;
+    const batchReached = new Promise<void>((resolve) => {
+      signalBatchReached = resolve;
+    });
+    const batchReleased = new Promise<void>((resolve) => {
+      releaseBatch = resolve;
+    });
+    db.beforeEmailTemplateBatch = async () => {
+      db.beforeEmailTemplateBatch = null;
+      signalBatchReached();
+      await batchReleased;
+    };
+
+    const responsePromise = putEmailTemplates(db, {
+      scope: "SV_CDE",
+      templates: salvadoranTemplates
+    });
+    await batchReached;
+    const setting = db.settings.find((row) => row.key === "email_templates_json")!;
+    setting.value = legacyRaw;
+    setting.updated_by = "legacy_worker";
+    releaseBatch();
+    const response = await responsePromise;
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "email_templates_reload_required"
+    });
+    expect(db.settings).toContainEqual(expect.objectContaining({
+      key: "email_templates_json",
+      value: legacyRaw,
+      updated_by: "legacy_worker"
+    }));
+    expect(db.audits).toHaveLength(0);
+  });
+
+  it("retries a changed valid snapshot and preserves the intervening opposite-scope update", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    db.settings.push({
+      key: "email_templates_json",
+      value: JSON.stringify(DEFAULT_EMAIL_TEMPLATES),
+      updated_by: "previous_owner"
+    });
+    const concurrentRefund = { subject: "Corrección concurrente", body: "Monto neto {{montoNeto}}." };
+    db.beforeEmailTemplateBatch = () => {
+      db.beforeEmailTemplateBatch = null;
+      const setting = db.settings.find((row) => row.key === "email_templates_json")!;
+      setting.value = JSON.stringify({
+        ...DEFAULT_EMAIL_TEMPLATES,
+        stripeRefund: concurrentRefund
+      });
+      setting.updated_by = "concurrent_owner";
+    };
+
+    const response = await putEmailTemplates(db, {
+      scope: "SV_CDE",
+      templates: salvadoranTemplates
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      emailTemplates: {
+        templates: {
+          dteReceipt: { subject: "CDE {{numeroControl}} actualizado" },
+          stripeRefund: concurrentRefund
+        }
+      }
+    });
+    expect(db.emailTemplateBatchCount).toBe(2);
+    expect(db.audits).toHaveLength(1);
+  });
+
+  it("bounds repeated valid snapshot contention and returns a reload conflict", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    db.settings.push({
+      key: "email_templates_json",
+      value: JSON.stringify(DEFAULT_EMAIL_TEMPLATES),
+      updated_by: "previous_owner"
+    });
+    db.beforeEmailTemplateBatch = () => {
+      const setting = db.settings.find((row) => row.key === "email_templates_json")!;
+      const current = JSON.parse(String(setting.value)) as typeof DEFAULT_EMAIL_TEMPLATES;
+      setting.value = JSON.stringify({
+        ...current,
+        stripeRefund: {
+          subject: `Corrección concurrente ${db.emailTemplateBatchCount}`,
+          body: "Monto neto {{montoNeto}}."
+        }
+      });
+      setting.updated_by = "concurrent_owner";
+    };
+
+    const response = await putEmailTemplates(db, {
+      scope: "SV_CDE",
+      templates: salvadoranTemplates
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "email_templates_reload_required"
+    });
+    expect(db.emailTemplateBatchCount).toBe(3);
+    const stored = JSON.parse(String(db.settings[0]?.value)) as typeof DEFAULT_EMAIL_TEMPLATES;
+    expect(stored.dteReceipt).toEqual(DEFAULT_EMAIL_TEMPLATES.dteReceipt);
+    expect(db.audits).toHaveLength(0);
+  });
+
   it("repairs invalid values inside the submitted scope and preserves valid opposite-scope values", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };

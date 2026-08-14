@@ -225,11 +225,13 @@ export class InMemoryD1 {
   beforeAuditCount: ((action: string, entityId: string) => Promise<void>) | null = null;
   beforeSentEmailLookup: ((documentId: string, emailType: string) => Promise<void>) | null = null;
   beforeSettingRead: (() => Promise<void>) | null = null;
+  beforeEmailTemplateBatch: (() => void | Promise<void>) | null = null;
   failPasswordResetBatchAfterStatement: number | null = null;
   failBindingQuarantineBatchAfterStatement: number | null = null;
   failInvalidationCompletionBatchAfterStatement: number | null = null;
   failNextAuditAction: string | null = null;
   passwordResetBatchCount = 0;
+  emailTemplateBatchCount = 0;
   maxCommittedSessionRows = 0;
   private batchTail: Promise<void> = Promise.resolve();
 
@@ -278,6 +280,13 @@ export class InMemoryD1 {
         statement.sql.includes("issuance_status = 'RETRY_QUEUED'") &&
         statement.sql.includes("issuance_status IN ('FAILED', 'DEAD_LETTERED')")
     );
+    const emailTemplateSave = statements.some(
+      (statement) =>
+        statement.sql.includes("INSERT INTO app_settings") &&
+        statement.sql.includes("json_patch(app_settings.value, ?)")
+    ) && statements.some(
+      (statement) => statement.sql.includes("INSERT INTO audit_logs")
+    );
     if (credentialGuarded && this.beforeCredentialGuardedSessionBatch) {
       const beforeBatch = this.beforeCredentialGuardedSessionBatch;
       this.beforeCredentialGuardedSessionBatch = null;
@@ -302,6 +311,10 @@ export class InMemoryD1 {
       const beforeClaim = this.beforeWompiIssuanceRetryClaim;
       this.beforeWompiIssuanceRetryClaim = null;
       await beforeClaim();
+    }
+    if (emailTemplateSave) {
+      this.emailTemplateBatchCount += 1;
+      await this.beforeEmailTemplateBatch?.();
     }
 
     const previous = this.batchTail;
@@ -3304,9 +3317,13 @@ export class Statement {
       });
     }
     if (this.sql.includes("INSERT INTO app_settings")) {
-      const [key, insertValue, updatedBy, updatedAt, patchValue] = this.args;
+      const [key, insertValue, updatedBy, updatedAt, expectedRaw, patchValue] = this.args;
       const setting = this.db.settings.find((row) => row.key === key);
-      const value = setting && this.sql.includes("json_patch(app_settings.value, ?)")
+      const scopedPatch = this.sql.includes("json_patch(app_settings.value, ?)");
+      if (setting && scopedPatch && setting.value !== expectedRaw) {
+        throw new Error("NOT NULL constraint failed: app_settings.value");
+      }
+      const value = setting && scopedPatch
         ? JSON.stringify(jsonMergePatch(JSON.parse(String(setting.value)), JSON.parse(String(patchValue))))
         : insertValue;
       if (setting) {

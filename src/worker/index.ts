@@ -143,6 +143,7 @@ import {
   requiresFiscalReceptorCorrection
 } from "./services/fiscalCorrection";
 import {
+  EmailTemplateSnapshotConflictError,
   legacyIssuanceAttemptId,
   OwnerTargetProtectedError,
   Repository,
@@ -192,6 +193,7 @@ const STRIPE_RECOVERY_IP_LIMIT = 20;
 // oversized request is rejected before it can consume application resources.
 const PUBLIC_JSON_BODY_LIMIT_BYTES = 16 * 1024;
 const AUTHENTICATED_JSON_BODY_LIMIT_BYTES = 256 * 1024;
+const EMAIL_TEMPLATE_SAVE_MAX_ATTEMPTS = 3;
 const WOMPI_WEBHOOK_BODY_LIMIT_BYTES = 64 * 1024;
 const STRIPE_WEBHOOK_BODY_LIMIT_BYTES = 256 * 1024;
 const INVALIDATION_REQUEST_KEYS = new Set(["tipoAnulacion", "motivoAnulacion", "codigoGeneracionR"]);
@@ -3339,20 +3341,31 @@ async function handleEmailTemplates(ctx: ApiRouteContext): Promise<Response> {
   }
   try {
     const scope = parseEmailTemplateScope(body.scope);
-    const update = prepareScopedEmailTemplateUpdate(
-      await ctx.repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY),
-      body.templates,
-      scope
-    );
-    const stored = await ctx.repo.saveScopedEmailTemplates({
-      key: EMAIL_TEMPLATES_SETTING_KEY,
-      scope,
-      patch: update.patch,
-      initialTemplates: update.templates,
-      actorId: actor.id
-    });
-    const templates = normalizeEmailTemplateSettings(JSON.parse(stored) as unknown);
-    return jsonResponse({ ok: true, emailTemplates: emailTemplateResponse(templates) });
+    let expectedRaw = await ctx.repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY);
+    for (let attempt = 0; attempt < EMAIL_TEMPLATE_SAVE_MAX_ATTEMPTS; attempt += 1) {
+      const update = prepareScopedEmailTemplateUpdate(expectedRaw, body.templates, scope);
+      try {
+        const stored = await ctx.repo.saveScopedEmailTemplates({
+          key: EMAIL_TEMPLATES_SETTING_KEY,
+          scope,
+          patch: update.patch,
+          initialTemplates: update.templates,
+          actorId: actor.id,
+          expectedRaw
+        });
+        const templates = normalizeEmailTemplateSettings(JSON.parse(stored) as unknown);
+        return jsonResponse({ ok: true, emailTemplates: emailTemplateResponse(templates) });
+      } catch (error) {
+        if (!(error instanceof EmailTemplateSnapshotConflictError)) {
+          throw error;
+        }
+        expectedRaw = error.currentRaw;
+        if (attempt === EMAIL_TEMPLATE_SAVE_MAX_ATTEMPTS - 1) {
+          throw new EmailTemplateStoredStateError("Vuelva a cargar las plantillas antes de guardar.");
+        }
+      }
+    }
+    throw new EmailTemplateStoredStateError("Vuelva a cargar las plantillas antes de guardar.");
   } catch (error) {
     if (error instanceof EmailTemplateStoredStateError) {
       return jsonResponse({
