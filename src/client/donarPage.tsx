@@ -631,7 +631,10 @@ export function DonarPage() {
   // browser's own error documents too (deleted campaign, blocked host, dropped
   // network), so load is never proof that the embed rendered and must not suppress the
   // way out. Switching back to Stripe cancels this timer and removes the iframe.
-  useEffect(() => {
+  // Layout effect, not a passive one: the reset has to commit before paint, or a second
+  // entry (Givebutter → Stripe → Givebutter) paints one frame carrying the previous
+  // session's promoted pill and no placeholder before collapsing to the quiet hint.
+  useLayoutEffect(() => {
     if (!usDonation || step !== 2 || usProvider !== "givebutter") {
       return;
     }
@@ -1422,9 +1425,12 @@ export function DonarPage() {
                   </a>
                   {/* The placeholder is positioned against the frame's own box, not the
                       surface: the escape hatch above grows when promoted, so an offset
-                      measured from the surface would drift up onto the controls. */}
+                      measured from the surface would drift up onto the controls. It also
+                      clears once the budget elapses — a frame whose host never answers
+                      would otherwise keep saying "preparando" beside the promoted pill
+                      that says the embed failed. The promoted pill is the only signal. */}
                   <div className="donar-givebutter-frame-area">
-                    {!givebutterFrameLoaded && (
+                    {!givebutterFrameLoaded && !givebutterFrameDelayed && (
                       <p className="donar-givebutter-loading" aria-live="polite">
                         {DONAR_WIDGET_LOADING_MESSAGE}
                       </p>

@@ -1253,8 +1253,10 @@ describe("Stripe donar page source contract", () => {
     expect(surface).toContain("Abrir Givebutter en otra pestaña");
     // The escape hatch never spends the page's strongest CTA style.
     expect(surface).not.toContain('className="primary');
-    // The 760px void gets the shared loading copy while the frame has not loaded.
-    expect(surface).toContain("{!givebutterFrameLoaded && (");
+    // The 760px void gets the shared loading copy until the frame loads — or until the
+    // budget elapses, after which the promoted pill is the only signal. A host that
+    // never answers must not show "preparando" and "the embed failed" at once.
+    expect(surface).toContain("{!givebutterFrameLoaded && !givebutterFrameDelayed && (");
     expect(surface).toContain("DONAR_WIDGET_LOADING_MESSAGE");
   });
 
@@ -1279,10 +1281,17 @@ describe("Stripe donar page source contract", () => {
     );
     expect(pageSource).toContain("ref={givebutterChoiceRef}");
     expect(pageSource).toContain("ref={stripeReturnRef}");
-    // One live region for the swap, not one per surface.
-    expect(pageSource.match(/role="status" aria-live="polite"/g)).toHaveLength(1);
-    expect(pageSource).toContain("Formulario de Givebutter, en inglés.");
-    expect(pageSource).toContain("Formulario de Stripe, en español.");
+    // Exactly one active-form announcement in the whole US step, in whatever markup it
+    // takes — role="status" text OR a bare aria-live on the surface container. The only
+    // other live region here is the Givebutter loading placeholder, so remove it and
+    // count what is left: two announcements would double-speak every provider switch.
+    const usBlockStart = pageSource.indexOf("{/* US Stripe step");
+    const usBlock = pageSource.slice(usBlockStart, pageSource.indexOf("{/* Paso 3", usBlockStart));
+    const placeholder = '<p className="donar-givebutter-loading" aria-live="polite">';
+    expect(usBlock).toContain(placeholder);
+    expect(usBlock.replace(placeholder, "").match(/aria-live=/g)).toHaveLength(1);
+    expect(usBlock).toContain("Formulario de Givebutter, en inglés.");
+    expect(usBlock).toContain("Formulario de Stripe, en español.");
   });
 
   it("no longer offers the US-path escape hatch back to the SV fiscal form", () => {
