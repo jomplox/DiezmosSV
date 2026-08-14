@@ -4,6 +4,10 @@ import { constants } from "node:os";
 import { pathToFileURL } from "node:url";
 import { loadPrivateDeployConfig } from "./private-deploy-config.mjs";
 
+const PUBLIC_VITE_VARIABLES = [
+  ["VITE_GIVEBUTTER_CAMPAIGN", (config) => config.campaign]
+];
+
 export async function runPrivateBuild({
   target,
   env = process.env,
@@ -14,11 +18,12 @@ export async function runPrivateBuild({
   // before Vite starts. Only the public Givebutter campaign slug enters the
   // client build; Stripe credentials remain runtime-only.
   const config = loadPrivateDeployConfig({ target, env, repositoryRoot });
+  const buildEnv = createBuildEnvironment(env, config);
 
   return new Promise((resolve, reject) => {
     const child = spawnImpl(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "build"], {
       cwd: repositoryRoot,
-      env: { ...env, VITE_GIVEBUTTER_CAMPAIGN: config.campaign },
+      env: buildEnv,
       stdio: "inherit"
     });
     child.once("error", reject);
@@ -26,6 +31,19 @@ export async function runPrivateBuild({
       resolve(signal ? 128 + (constants.signals[signal] ?? 1) : (status ?? 1));
     });
   });
+}
+
+function createBuildEnvironment(inheritedEnv, config) {
+  const buildEnv = {};
+  for (const [name, value] of Object.entries(inheritedEnv)) {
+    if (!name.toLowerCase().startsWith("vite_")) {
+      buildEnv[name] = value;
+    }
+  }
+  for (const [name, readConfig] of PUBLIC_VITE_VARIABLES) {
+    buildEnv[name] = readConfig(config);
+  }
+  return buildEnv;
 }
 
 async function runCli() {
