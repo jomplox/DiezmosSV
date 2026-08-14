@@ -98,6 +98,20 @@ describe("Stripe owner settings UI", () => {
     expect(userFacingErrorMessage("no_stripe_credentials_supplied")).toBe("No hay cambios que guardar.");
   });
 
+  test("keeps the accepted organization values instead of rehydrating from the post-save read", () => {
+    // patchCloudflareWorkerSecrets publica una versión nueva del Worker, así que el GET
+    // inmediato puede atenderlo un isolate con el env anterior. Rehidratar de esa lectura
+    // revierte el campo recién guardado y el siguiente guardado reescribe el valor viejo.
+    const save = appSource.slice(
+      appSource.indexOf("async function updateStripeCredentials("),
+      appSource.indexOf("async function stageStripeWebhookSecret(")
+    );
+
+    expect(save).toContain("...stripeOrganizationCredentialInput(organization)");
+    expect(save).toContain("applyStripeSettings(stripeResult.stripe, false);");
+    expect(save).not.toContain("applyStripeSettings(stripeResult.stripe);");
+  });
+
   test("keeps the prefilled organization values across form resets that do not refetch them", () => {
     // Los dos reinicios que ocurren con el panel abierto — cambio de ambiente de
     // emisión y guardado de secretos del MH — vaciarían los ocho campos y el

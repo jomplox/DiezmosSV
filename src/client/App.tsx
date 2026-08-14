@@ -30,7 +30,7 @@ import {
   Users
 } from "lucide-react";
 import { Fragment, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
-import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, DocumentListPage, DonationIntentListItem, DteDocument, EmailSenderState, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, FiscalCorrectionData, FiscalCorrectionProtectedContext, FiscalReconciliationState, ReceiptEmailDeliveryState, StripeAcknowledgmentReconciliationItem, StripeAnnualStatementPreview, StripeAnnualStatementPreviewDonor, StripeAnnualStatementSendResult, StripeSettingsState, User, WompiIssuanceFailureItem, WompiNotificationSettings } from "./types";
+import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, DocumentListPage, DonationIntentListItem, DteDocument, EmailSenderState, EmailTemplateScope, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, FiscalCorrectionData, FiscalCorrectionProtectedContext, FiscalReconciliationState, ReceiptEmailDeliveryState, StripeAcknowledgmentReconciliationItem, StripeAnnualStatementPreview, StripeAnnualStatementPreviewDonor, StripeAnnualStatementSendResult, StripeSettingsState, User, WompiIssuanceFailureItem, WompiNotificationSettings } from "./types";
 import {
   resolveAuthBootstrapStatus,
   shouldShowBootstrapMode,
@@ -95,7 +95,7 @@ import {
 } from "../shared/catalogs";
 import { cleanDui, isDuiDocumentType, isValidDui } from "../shared/dui";
 import { formatElSalvadorDateTime } from "../shared/legalWindows";
-import { cloneEmailTemplates, CredentialsPanel } from "./credentialsPanel";
+import { cloneEmailTemplates, CredentialsPanel, scopedEmailTemplates } from "./credentialsPanel";
 import {
   AnnualCertificatePanel,
   BackupsPanel,
@@ -2292,11 +2292,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
 
   async function updateStripeCredentials() {
     await runAction("stripe-credentials", async (control) => {
-      const body = {
-        restrictedKey: credentialInput.stripeRestrictedKey,
-        publishableKey: credentialInput.stripePublishableKey,
-        paymentMethodConfigurationId: credentialInput.stripePaymentMethodConfigurationId,
-        billingPortalConfigurationId: credentialInput.stripeBillingPortalConfigurationId,
+      const organization = {
         legalName: credentialInput.stripeLegalName,
         ein: credentialInput.stripeEin,
         timeZone: credentialInput.stripeTimeZone,
@@ -2306,9 +2302,25 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
         signerName: credentialInput.stripeSignerName,
         signerTitle: credentialInput.stripeSignerTitle
       };
+      const body = {
+        restrictedKey: credentialInput.stripeRestrictedKey,
+        publishableKey: credentialInput.stripePublishableKey,
+        paymentMethodConfigurationId: credentialInput.stripePaymentMethodConfigurationId,
+        billingPortalConfigurationId: credentialInput.stripeBillingPortalConfigurationId,
+        ...organization
+      };
       const result = await accountApi<{ updated: string[] }>("/api/settings/stripe", { method: "POST", body });
       if (!control.commit(() => {
-        setCredentialInput((current) => ({ ...current, ...emptyStripeWriteOnlyInput() }));
+        // El guardado publica una versión nueva del Worker, así que el GET de refresco
+        // puede atenderlo un isolate que todavía tiene el env anterior. El formulario se
+        // siembra con los valores que el worker acaba de aceptar, nunca con esa lectura:
+        // rehidratarla revertiría visiblemente el campo recién guardado y el siguiente
+        // guardado reenviaría el valor viejo sobre el nuevo.
+        setCredentialInput((current) => ({
+          ...current,
+          ...emptyStripeWriteOnlyInput(),
+          ...stripeOrganizationCredentialInput(organization)
+        }));
         setToast(`Configuración de Stripe actualizada: ${result.updated.length}`);
       })) {
         return;
@@ -2331,7 +2343,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       }
       control.commit(() => {
         setCredentials(credentialResult.credentials);
-        applyStripeSettings(stripeResult.stripe);
+        applyStripeSettings(stripeResult.stripe, false);
         setStripeRotationStatusStale(false);
       });
     });
@@ -2501,15 +2513,27 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     });
   }
 
-  async function updateEmailTemplates() {
+  async function updateEmailTemplates(scope: EmailTemplateScope) {
     await runAction("email-templates", async (control) => {
+      // Cada botón anuncia un país y debe escribir solo ese país: el otro grupo viaja
+      // con los valores ya guardados en el servidor, no con el borrador en pantalla.
+      const templates = {
+        ...(emailTemplates?.templates ?? {}),
+        ...scopedEmailTemplates(emailTemplates, emailTemplateDraft, scope)
+      };
       const result = await accountApi<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates", {
         method: "PUT",
-        body: { templates: emailTemplateDraft }
+        body: { templates }
       });
       control.commit(() => {
-        applyEmailTemplates(result.emailTemplates);
-        setToast("Plantillas de correo actualizadas");
+        setEmailTemplates(result.emailTemplates);
+        setEmailTemplateDraft((current) => ({
+          ...current,
+          ...scopedEmailTemplates(result.emailTemplates, result.emailTemplates.templates, scope)
+        }));
+        setToast(scope === "US_STRIPE"
+          ? "Plantillas de EE. UU. actualizadas"
+          : "Plantillas de El Salvador actualizadas");
       });
     });
   }

@@ -292,9 +292,11 @@ export interface EmailTemplateValue {
   body: string;
 }
 
+export type EmailTemplateScope = "SV_CDE" | "US_STRIPE";
+
 interface EmailTemplateDefinition {
   type: string;
-  scope: "SV_CDE" | "US_STRIPE";
+  scope: EmailTemplateScope;
   label: string;
   description: string;
   defaultSubject: string;

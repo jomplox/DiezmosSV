@@ -26,6 +26,7 @@ import type {
   CredentialStatus,
   CredentialStatusItem,
   EmailSenderState,
+  EmailTemplateScope,
   EmailTemplateSettings,
   EmailTemplateValue,
   EmissionEnvironmentState,
@@ -153,7 +154,7 @@ export function CredentialsPanel({
     resolution: "CONFIRMED_SENT" | "CONFIRMED_NOT_SENT"
   ) => Promise<void>;
   onEmailTemplateChange: (type: string, patch: Partial<EmailTemplateValue>) => void;
-  onEmailTemplateSubmit: () => Promise<void>;
+  onEmailTemplateSubmit: (scope: EmailTemplateScope) => Promise<void>;
   onEmailSenderChange: (value: string) => void;
   onEmailReplyToChange: (value: string) => void;
   onEmailSenderSubmit: () => Promise<void>;
@@ -1432,10 +1433,10 @@ function EmailTemplateBodyEditor({
             moveFormatFocus(event.key === "ArrowRight" ? 1 : -1);
           }}
         >
-          <button type="button" tabIndex={activeFormatIndex === 0 ? 0 : -1} aria-label="Negrita" title="Negrita: **texto**" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("bold")}><strong>B</strong></button>
-          <button type="button" tabIndex={activeFormatIndex === 1 ? 0 : -1} aria-label="Cursiva" title="Cursiva: *texto*" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("italic")}><em>I</em></button>
-          <button type="button" tabIndex={activeFormatIndex === 2 ? 0 : -1} aria-label="Subrayado" title="Subrayado: ++texto++" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("underline")}><u>U</u></button>
-          <button type="button" tabIndex={activeFormatIndex === 3 ? 0 : -1} aria-label="Cita" title="Cita: > texto" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("quote")}>❝</button>
+          <button type="button" tabIndex={activeFormatIndex === 0 ? 0 : -1} onFocus={() => setActiveFormatIndex(0)} aria-label="Negrita" title="Negrita: **texto**" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("bold")}><strong>B</strong></button>
+          <button type="button" tabIndex={activeFormatIndex === 1 ? 0 : -1} onFocus={() => setActiveFormatIndex(1)} aria-label="Cursiva" title="Cursiva: *texto*" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("italic")}><em>I</em></button>
+          <button type="button" tabIndex={activeFormatIndex === 2 ? 0 : -1} onFocus={() => setActiveFormatIndex(2)} aria-label="Subrayado" title="Subrayado: ++texto++" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("underline")}><u>U</u></button>
+          <button type="button" tabIndex={activeFormatIndex === 3 ? 0 : -1} onFocus={() => setActiveFormatIndex(3)} aria-label="Cita" title="Cita: > texto" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("quote")}>❝</button>
         </div>
       </div>
       <textarea
@@ -1462,13 +1463,20 @@ function EmailTemplateEditor({
   draft: Record<string, EmailTemplateValue>;
   busy: boolean;
   onChange: (type: string, patch: Partial<EmailTemplateValue>) => void;
-  onSubmit: () => Promise<void>;
+  onSubmit: (scope: EmailTemplateScope) => Promise<void>;
 }) {
   const definitions = settings?.definitions ?? [];
   const legacyPlaceholders = settings?.placeholders ?? [];
   const salvadoranDefinitions = definitions.filter((definition) => definition.scope !== "US_STRIPE");
   const usDefinitions = definitions.filter((definition) => definition.scope === "US_STRIPE");
-  const complete = definitions.every((definition) => draft[definition.type]?.subject.trim() && draft[definition.type]?.body.trim());
+  // Cada botón guarda solo las plantillas de su país, así que la exigencia de asunto
+  // y cuerpo se evalúa por grupo: un cuerpo vacío en EE. UU. no debe bloquear el
+  // guardado de El Salvador ni al revés.
+  const groupComplete = (group: typeof definitions) => group.every(
+    (definition) => draft[definition.type]?.subject.trim() && draft[definition.type]?.body.trim()
+  );
+  const salvadoranComplete = groupComplete(salvadoranDefinitions);
+  const usComplete = groupComplete(usDefinitions);
   const groupPlaceholders = (group: typeof definitions): string[] => Array.from(new Set(
     group.flatMap((definition) => definition.placeholders ?? legacyPlaceholders)
   ));
@@ -1534,7 +1542,7 @@ function EmailTemplateEditor({
                 <Mail size={16} />
                 <span>Estos textos se aplican al próximo envío o reenvío de CDE.</span>
               </div>
-              <button className="primary" type="button" disabled={busy || !complete} onClick={() => void onSubmit()}>
+              <button className="primary" type="button" disabled={busy || !salvadoranComplete} onClick={() => void onSubmit("SV_CDE")}>
                 <Mail size={16} />
                 {busy ? "Guardando" : "Guardar plantillas de El Salvador"}
               </button>
@@ -1564,7 +1572,7 @@ function EmailTemplateEditor({
                 <Mail size={16} />
                 <span>Estos textos se aplican al próximo correo de Stripe que se prepare.</span>
               </div>
-              <button className="primary" type="button" disabled={busy || !complete} onClick={() => void onSubmit()}>
+              <button className="primary" type="button" disabled={busy || !usComplete} onClick={() => void onSubmit("US_STRIPE")}>
                 <Mail size={16} />
                 {busy ? "Guardando" : "Guardar plantillas de EE. UU."}
               </button>
@@ -1573,6 +1581,21 @@ function EmailTemplateEditor({
         </>
       )}
     </section>
+  );
+}
+
+// PUT /api/settings/email-templates exige las cinco plantillas en cada guardado, así que
+// un guardado por país solo puede acotarse eligiendo qué entradas provienen del borrador.
+// El resto se envía tal como el servidor las tiene guardadas.
+export function scopedEmailTemplates(
+  settings: EmailTemplateSettings | null,
+  templates: Record<string, EmailTemplateValue>,
+  scope: EmailTemplateScope
+): Record<string, EmailTemplateValue> {
+  return Object.fromEntries(
+    (settings?.definitions ?? [])
+      .filter((definition) => definition.scope === scope && templates[definition.type])
+      .map((definition) => [definition.type, { ...templates[definition.type] }])
   );
 }
 

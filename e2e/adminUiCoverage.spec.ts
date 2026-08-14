@@ -661,6 +661,8 @@ test("preloads and edits owner-visible U.S. organization settings while Stripe c
       return true;
     }
     if (url.pathname === "/api/settings/stripe" && request.method() === "GET") {
+      // Después del POST este GET sigue sirviendo la `configuration` previa: es el
+      // isolate que aún tiene el env anterior a la nueva versión del Worker.
       await fulfillJson(route, {
         stripe: {
           credentials: { label: "Stripe EE. UU.", ready: true, items: [] },
@@ -696,6 +698,8 @@ test("preloads and edits owner-visible U.S. organization settings while Stripe c
 
   await page.getByLabel("Zona horaria").selectOption("America/Chicago");
   await page.getByLabel("Teléfono de la organización").fill("+1 (312) 555-0100");
+  const staleRefresh = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === "/api/settings/stripe" && response.request().method() === "GET");
   await page.getByRole("button", { name: "Guardar configuración de Stripe" }).click();
 
   await expect.poll(() => submitted).toMatchObject({
@@ -709,6 +713,13 @@ test("preloads and edits owner-visible U.S. organization settings while Stripe c
     signerTitle: configuration.signerTitle,
     restrictedKey: ""
   });
+
+  // El GET de refresco ya respondió con la `configuration` original. El formulario debe
+  // conservar los valores aceptados; si se rehidratara de esa lectura, el teléfono
+  // volvería al anterior y el siguiente guardado lo reescribiría encima del nuevo.
+  await staleRefresh;
+  await expect(page.getByLabel("Teléfono de la organización")).toHaveValue("+1 (312) 555-0100");
+  await expect(page.getByLabel("Zona horaria")).toHaveValue("America/Chicago");
 });
 
 test("clears Stripe write-only replacements after POST success even when status refresh fails", async ({ page }) => {

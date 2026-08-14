@@ -290,3 +290,41 @@ describe("Ambiente emission-environment save guard (source contract)", () => {
     expect(credentialsPanelSource).not.toContain("if (emissionBusy || runtimeEnvironment.environment === environment) return;");
   });
 });
+
+describe("Plantillas country-scoped saving (source contract)", () => {
+  test("each country button gates on its own group and submits only that group's drafts", () => {
+    const editor = credentialsPanelSource.slice(
+      credentialsPanelSource.indexOf("function EmailTemplateEditor({"),
+      credentialsPanelSource.indexOf("export function scopedEmailTemplates(")
+    );
+
+    expect(editor).toContain("const groupComplete = (group: typeof definitions) => group.every(");
+    expect(editor).toContain('disabled={busy || !salvadoranComplete} onClick={() => void onSubmit("SV_CDE")}');
+    expect(editor).toContain('disabled={busy || !usComplete} onClick={() => void onSubmit("US_STRIPE")}');
+    // Una sola compuerta global dejaría que un cuerpo vacío de EE. UU. bloqueara el
+    // guardado salvadoreño sin explicar por qué.
+    expect(editor).not.toContain("disabled={busy || !complete}");
+  });
+
+  test("keeps the other country's saved values in the full PUT the endpoint requires", () => {
+    const save = appSource.slice(
+      appSource.indexOf("async function updateEmailTemplates("),
+      appSource.indexOf("async function updateEmailSender(")
+    );
+
+    expect(save).toContain("...(emailTemplates?.templates ?? {}),");
+    expect(save).toContain("...scopedEmailTemplates(emailTemplates, emailTemplateDraft, scope)");
+    expect(save).not.toContain("body: { templates: emailTemplateDraft }");
+  });
+});
+
+describe("Plantillas format toolbar roving tabindex (source contract)", () => {
+  test("resyncs the active index to whichever button actually holds focus", () => {
+    for (const index of [0, 1, 2, 3]) {
+      expect(credentialsPanelSource).toContain(
+        `tabIndex={activeFormatIndex === ${index} ? 0 : -1} onFocus={() => setActiveFormatIndex(${index})}`
+      );
+    }
+    expect(credentialsPanelSource).toContain('onMouseDown={(event) => event.preventDefault()}');
+  });
+});
