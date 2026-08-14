@@ -139,8 +139,9 @@ Wompi o al donante queda registrado en D1 y en la bitácora de auditoría.
 
 La página pública `/donar` abre con una portada de dos puertas: **El Salvador y el mundo** dirige al
 formulario fiscal SV (Wompi + CDE), y **EE. UU.** usa por defecto Stripe Embedded Checkout en español y dentro de la misma página sobre la
-cuenta 501(c)(3) estadounidense para entregas únicas o mensuales. En ese paso el donante puede desmontar Stripe
-explícitamente y usar el formulario existente de Givebutter en inglés (`?ruta=sv` / `?ruta=eeuu` enlaza directo a una puerta). Toda la
+cuenta 501(c)(3) estadounidense para entregas únicas o mensuales. Cuando el build del ambiente tiene un
+mapeo explícito de fondos para Diezmo/Ofrenda, el donante puede desmontar Stripe y usar el formulario
+existente de Givebutter en inglés (`?ruta=sv` / `?ruta=eeuu` enlaza directo a una puerta). Toda la
 interfaz web (páginas del donante y panel de administración) usa **Gotham**, autoalojada como woff2
 del subconjunto latino en `src/client/fonts/` — los OTF licenciados nunca se versionan; solo se
 versionan los subconjuntos woff2 generados.
@@ -207,7 +208,7 @@ DiezmosSV/
 │   ├── client/                 # Panel React + Vite, /donar, fuentes, recursos
 │   └── shared/                 # Catálogos · DUI · NIT · ventanas legales · política de contraseñas
 │                               # correcciones fiscales · entrega · montos · correo
-├── migrations/                 # Esquema D1 (incremental, solo se agrega, 0001…0042)
+├── migrations/                 # Esquema D1 (incremental, solo se agrega, 0001…0043)
 ├── DTE/svfe-json-schemas/      # Esquemas JSON de MH para validación
 ├── docs/                       # Despliegue/UAT · manual del operador · restauración de retención
 │                               # cutover/conciliación de claims fiscales · recuperación previa al CDE
@@ -370,6 +371,9 @@ fuera de este repositorio y sin enlaces simbólicos:
 # /ruta/privada/absoluta/staging.env
 DIEZMOSSV_DEPLOY_TARGET=staging
 VITE_GIVEBUTTER_CAMPAIGN=example-campaign
+# Opcional: reemplace ambos valores con IDs numéricos reales y distintos, u omita ambos.
+# VITE_GIVEBUTTER_TITHE_FUND_ID=<id-real-fondo-diezmo>
+# VITE_GIVEBUTTER_OFFERING_FUND_ID=<id-real-fondo-ofrenda>
 DIEZMOSSV_APP_ORIGIN=https://staging.example.invalid
 DIEZMOSSV_DONOR_LOGO_FILE=/ruta/privada/absoluta/logo.png
 ```
@@ -380,6 +384,13 @@ seleccionado debe coincidir con `--env`; el PNG/JPEG debe ser decodificable por 
 raster localmente, exige que `/api/health` reporte `appEnv=staging` y compara exactamente el raster
 remoto anunciado. `cf:deploy:staging` ejecuta automáticamente el preflight y el build privado vinculado
 al ambiente; los mismos pasos pueden ejecutarse por separado sin desplegar:
+
+El mapeo de fondos de Givebutter es opcional pero atómico. Omita ambos IDs para ocultar la alternativa
+Givebutter y mantener Stripe disponible, o configure dos IDs numéricos reales y distintos: Diezmo se
+mapea a `VITE_GIVEBUTTER_TITHE_FUND_ID` y Ofrenda a `VITE_GIVEBUTTER_OFFERING_FUND_ID`. El build privado
+rechaza un par incompleto, vacío, no numérico, parecido a un marcador o duplicado. Son identificadores
+públicos de enrutamiento que solo entran al navegador después de la validación; nunca los adivine a partir
+del nombre de la campaña.
 
 ```bash
 npm run cf:branding:check -- --env staging
@@ -738,10 +749,13 @@ de resultado lee el estado durable de D1, no el regreso del navegador. Un contri
 necesita un acuse de EE. UU., no un CDE salvadoreño, por lo que este carril **nunca toca Wompi,
 `donation_intents` ni la tubería del CDE**.
 
-Stripe sigue siendo el formulario estadounidense predeterminado. Un botón claramente rotulado **Dar con
-Givebutter — Formulario en inglés** desmonta Stripe Embedded Checkout y monta la campaña Givebutter vinculada
-al ambiente con el mismo monto y la misma selección Única/Mensual. **Volver a Stripe — Formulario en español**
-revierte la elección y reutiliza la Session de Stripe existente en vez de crear otra.
+Stripe sigue siendo el formulario estadounidense predeterminado. Cuando están configurados ambos IDs de
+fondo de Givebutter revisados, un botón claramente rotulado **Dar con Givebutter — Formulario en inglés**
+desmonta Stripe Embedded Checkout y monta la campaña vinculada al ambiente. El Diezmo/Ofrenda elegido se
+mapea a su ID de fondo explícito; el monto y la frecuencia Única/Mensual son valores iniciales admitidos por
+el proveedor que se pide confirmar al donante en Givebutter. Sin el par de fondos, la alternativa se oculta.
+**Volver a Stripe — Formulario en español** revierte la elección y reutiliza la Session de Stripe existente
+en vez de crear otra.
 
 El asistente SV no crea un enlace Wompi en el Paso 1, cuando todavía se desconoce la residencia del
 donante. Si después el donante de la ruta SV selecciona Estados Unidos, la ruta de seguridad conserva el
@@ -1029,7 +1043,7 @@ El modelo de seguridad es el modelo del claim fiscal aplicado a una ruta de repa
 ## 📚 Modelo de datos
 
 <details>
-<summary><strong>Tablas de D1 (migrations/0001_init.sql, extendidas hasta la 0042)</strong></summary>
+<summary><strong>Tablas de D1 (migrations/0001_init.sql, extendidas hasta la 0043)</strong></summary>
 
 <br/>
 

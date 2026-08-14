@@ -38,6 +38,8 @@ describe("Stripe US giving provisioning documentation", () => {
       expect(document).toContain("docs/stripe-us-giving.md");
       expect(document).toContain("Givebutter");
       expect(document).toContain("VITE_GIVEBUTTER_CAMPAIGN");
+      expect(document).toContain("VITE_GIVEBUTTER_TITHE_FUND_ID");
+      expect(document).toContain("VITE_GIVEBUTTER_OFFERING_FUND_ID");
       expect(document).not.toContain("VITE_STRIPE");
     }
   });
@@ -149,7 +151,7 @@ describe("Stripe US giving provisioning documentation", () => {
 
   it("keeps every additive Stripe migration in the rollback preservation boundary", () => {
     const rollback = runbook.slice(runbook.indexOf("## Handoff del propietario y rollback"));
-    for (const migration of ["0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040", "0041", "0042"]) {
+    for (const migration of ["0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040", "0041", "0042", "0043"]) {
       expect(rollback).toContain(migration);
     }
     expect(rollback).toMatch(/no.*elimine|conserve/is);

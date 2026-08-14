@@ -137,8 +137,9 @@ Wompi, or the donor is recorded in D1 and the audit log.
 
 The public `/donar` page opens on a two-door landing: **El Salvador y el mundo** routes to the
 SV fiscal form (Wompi + CDE), and **EE. UU.** defaults to Stripe's Spanish Embedded Checkout form on the US 501(c)(3)
-account for one-time or monthly gifts. On that U.S. step the donor may explicitly unmount Stripe and use the
-existing English Givebutter form instead (`?ruta=sv` / `?ruta=eeuu` deep-links a door). The whole web UI (donor pages
+account for one-time or monthly gifts. When the target build has an explicit Diezmo/Ofrenda fund mapping, the
+donor may unmount Stripe and use the existing English Givebutter form instead (`?ruta=sv` / `?ruta=eeuu`
+deep-links a door). The whole web UI (donor pages
 and admin) uses **Gotham**, self-hosted as latin-subset woff2 under `src/client/fonts/` — the
 licensed OTFs are never committed; only the generated woff2 subsets are.
 
@@ -201,7 +202,7 @@ DiezmosSV/
 │   ├── client/                 # React + Vite admin panel, /donar, fonts, assets
 │   └── shared/                 # Catalogs · DUI · NIT · legal windows · password policy
 │                               # fiscal corrections · checkout · money · email
-├── migrations/                 # D1 schema (incremental, append-only 0001…0042)
+├── migrations/                 # D1 schema (incremental, append-only 0001…0043)
 ├── DTE/svfe-json-schemas/      # MH-bundled JSON schemas for validation
 ├── docs/                       # Deploy/UAT · operator runbook · retention-restore
 │                               # fiscal-claim cutover/reconciliation · pre-CDE recovery
@@ -359,6 +360,9 @@ owner-owned `0600` files outside this repository, without symlinks:
 # /absolute/private/path/staging.env
 DIEZMOSSV_DEPLOY_TARGET=staging
 VITE_GIVEBUTTER_CAMPAIGN=example-campaign
+# Optional: replace both values with distinct real numeric Fund IDs, or omit both.
+# VITE_GIVEBUTTER_TITHE_FUND_ID=<real-tithe-fund-id>
+# VITE_GIVEBUTTER_OFFERING_FUND_ID=<real-offering-fund-id>
 DIEZMOSSV_APP_ORIGIN=https://staging.example.invalid
 DIEZMOSSV_DONOR_LOGO_FILE=/absolute/private/path/logo.png
 ```
@@ -368,6 +372,12 @@ match `--env`; the PNG/JPEG must be decodable by the same `pdf-lib` path used fo
 remote deploy, the branding preflight validates that raster locally, requires `/api/health` to report
 `appEnv=staging`, and compares the exact advertised remote raster. `cf:deploy:staging` runs the preflight and
 target-bound private build automatically; the same steps can be run independently without deploying:
+
+The Givebutter Fund mapping is optional but atomic. Omit both Fund IDs to hide the Givebutter alternative
+while keeping Stripe available, or set both to distinct real numeric IDs: Diezmo maps to
+`VITE_GIVEBUTTER_TITHE_FUND_ID` and Ofrenda maps to `VITE_GIVEBUTTER_OFFERING_FUND_ID`. The private build
+rejects an incomplete, blank, nonnumeric, placeholder-like, or duplicate pair. These are public routing
+identifiers compiled into the browser only after validation; never guess them from the campaign name.
 
 ```bash
 npm run cf:branding:check -- --env staging
@@ -709,10 +719,12 @@ selection and verifies it again through signed Stripe webhooks; the result page 
 of trusting a browser return. A US taxpayer needs a US acknowledgment, not a Salvadoran CDE, so this lane
 **never touches Wompi, `donation_intents`, or the CDE pipeline**.
 
-Stripe remains the default U.S. form. A clearly labeled **Dar con Givebutter — Formulario en inglés**
-button unmounts Stripe Embedded Checkout and mounts the target-bound Givebutter campaign with the same
-amount and one-time/monthly prefill. **Volver a Stripe — Formulario en español** reverses the choice and
-reuses the existing Stripe Session rather than creating another one.
+Stripe remains the default U.S. form. When both reviewed Givebutter Fund IDs are configured, a clearly
+labeled **Dar con Givebutter — Formulario en inglés** button unmounts Stripe Embedded Checkout and mounts
+the target-bound campaign. The selected Diezmo/Ofrenda maps to its explicit Fund ID; amount and
+one-time/monthly frequency are provider-supported prefills that the donor is asked to confirm on
+Givebutter. With no Fund pair the alternative is hidden. **Volver a Stripe — Formulario en español**
+reverses the choice and reuses the existing Stripe Session rather than creating another one.
 
 The SV wizard does not mint a Wompi link on Step 1, while the donor's residence is still unknown. If an
 SV-path donor later selects Estados Unidos, the safety route preserves the truthful amount and Diezmo/Ofrenda
@@ -993,7 +1005,7 @@ The safety model is the fiscal-claim model applied to a repair path:
 ## 🗄 Data model
 
 <details>
-<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0042)</strong></summary>
+<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0043)</strong></summary>
 
 <br/>
 
