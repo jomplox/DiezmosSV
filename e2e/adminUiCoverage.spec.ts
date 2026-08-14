@@ -381,20 +381,35 @@ test("edits Salvadoran and U.S. email templates separately while identifying the
   await expect(usTemplates.getByText(/El asunto y cuerpo de estos correos son editables/)).toBeVisible();
   await expect(usTemplates.getByRole("textbox")).toHaveCount(6);
 
-  const immediate = usTemplates.locator(".email-template-card").filter({ hasText: "Constancia inmediata" });
-  const body = immediate.getByLabel("Cuerpo del correo");
-  const applyFormat = async (button: string, expected: string) => {
-    await body.fill("Texto");
+  for (const definition of definitions) {
+    const editor = templatePanel.getByRole("region", { name: definition.label, exact: true });
+    await expect(editor).toBeVisible();
+    await expect(editor.getByRole("textbox", { name: `Asunto — ${definition.label}`, exact: true })).toBeVisible();
+    await expect(editor.getByRole("textbox", { name: `Cuerpo del correo — ${definition.label}`, exact: true })).toBeVisible();
+    await expect(editor.getByRole("toolbar", { name: `Formato del cuerpo — ${definition.label}`, exact: true })).toBeVisible();
+    for (const format of ["Negrita", "Cursiva", "Subrayado", "Cita"]) {
+      await expect(editor.getByRole("button", { name: `${format} — ${definition.label}`, exact: true })).toBeVisible();
+    }
+  }
+
+  const immediate = templatePanel.getByRole("region", { name: "Constancia inmediata", exact: true });
+  const body = immediate.getByRole("textbox", { name: "Cuerpo del correo — Constancia inmediata", exact: true });
+  const applyMultilineFormat = async (button: string, expected: string, expectedSelection: [number, number]) => {
+    await body.fill("Primera\nSegunda\n\nTercera");
     await body.evaluate((textarea: HTMLTextAreaElement) => textarea.select());
-    await immediate.getByRole("button", { name: button }).click();
+    await immediate.getByRole("button", { name: `${button} — Constancia inmediata`, exact: true }).click();
     await expect(body).toHaveValue(expected);
+    await expect.poll(() => body.evaluate((textarea: HTMLTextAreaElement) => [textarea.selectionStart, textarea.selectionEnd]))
+      .toEqual(expectedSelection);
   };
-  await expect(immediate.getByRole("toolbar", { name: "Formato del cuerpo" })).toBeVisible();
-  await applyFormat("Negrita", "**Texto**");
-  await applyFormat("Cursiva", "*Texto*");
-  await applyFormat("Subrayado", "++Texto++");
-  await applyFormat("Cita", "> Texto");
-  await immediate.getByLabel("Asunto").fill("Gracias por su entrega, {{donante}}");
+  await applyMultilineFormat("Negrita", "**Primera**\n**Segunda**\n\n**Tercera**", [2, 34]);
+  await applyMultilineFormat("Cursiva", "*Primera*\n*Segunda*\n\n*Tercera*", [1, 29]);
+  await applyMultilineFormat("Subrayado", "++Primera++\n++Segunda++\n\n++Tercera++", [2, 34]);
+  await body.fill("Texto");
+  await body.evaluate((textarea: HTMLTextAreaElement) => textarea.select());
+  await immediate.getByRole("button", { name: "Cita — Constancia inmediata", exact: true }).click();
+  await expect(body).toHaveValue("> Texto");
+  await immediate.getByRole("textbox", { name: "Asunto — Constancia inmediata", exact: true }).fill("Gracias por su entrega, {{donante}}");
   await usTemplates.getByRole("button", { name: "Guardar plantillas de EE. UU." }).click();
   await expect.poll(() => savedTemplates?.stripeAcknowledgment.subject ?? null)
     .toBe("Gracias por su entrega, {{donante}}");

@@ -105,6 +105,22 @@ describe("HTML email rendering", () => {
     expect(html).toContain("Una cita<br />en dos líneas");
   });
 
+  it.each([
+    ["bold", "**", "strong"],
+    ["italic", "*", "em"],
+    ["underline", "++", "u"]
+  ])("renders balanced per-line %s markers emitted by the template editor", (_format, marker, tag) => {
+    const html = editableDonorEmailHtml({
+      organizationName: "Iglesia",
+      title: "Constancia",
+      bodyText: `${marker}Primera${marker}\n${marker}Segunda${marker}\n\n${marker}Tercera${marker}`
+    });
+
+    expect(html).toContain(`<${tag}>Primera</${tag}><br /><${tag}>Segunda</${tag}>`);
+    expect(html).toContain(`<${tag}>Tercera</${tag}>`);
+    expect(html).not.toContain(`${marker}Primera`);
+  });
+
   it("renders the supported formatting in an editable U.S. template without accepting raw HTML", () => {
     const html = editableDonorEmailHtml({
       organizationName: "Iglesia",

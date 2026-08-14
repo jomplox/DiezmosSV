@@ -12,7 +12,7 @@ import {
   stripeOrganizationDirtyPatch,
   stripeOrganizationPendingWrite
 } from "../../src/client/credentialSettings";
-import { scopedEmailTemplates } from "../../src/client/credentialsPanel";
+import { formatEmailTemplateSelection, scopedEmailTemplates } from "../../src/client/credentialsPanel";
 
 const credentialsPanelSource = readFileSync(resolve(import.meta.dirname, "../../src/client/credentialsPanel.tsx"), "utf8");
 const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
@@ -525,5 +525,48 @@ describe("Plantillas format toolbar roving tabindex (source contract)", () => {
       );
     }
     expect(credentialsPanelSource).toContain('onMouseDown={(event) => event.preventDefault()}');
+  });
+});
+
+describe("email template line formatting", () => {
+  test.each([
+    ["bold", "**Primera**\n**Segunda**\n\n**Tercera**", 2, 34],
+    ["italic", "*Primera*\n*Segunda*\n\n*Tercera*", 1, 29],
+    ["underline", "++Primera++\n++Segunda++\n\n++Tercera++", 2, 34]
+  ] as const)("wraps every nonempty selected line for %s and keeps the transformed selection active", (format, expectedValue, expectedStart, expectedEnd) => {
+    const value = "Primera\nSegunda\n\nTercera";
+
+    expect(formatEmailTemplateSelection(value, 0, value.length, format)).toEqual({
+      value: expectedValue,
+      selectionStart: expectedStart,
+      selectionEnd: expectedEnd
+    });
+  });
+
+  test("puts the caret between balanced markers when there is no selection", () => {
+    expect(formatEmailTemplateSelection("Hola mundo", 5, 5, "bold")).toEqual({
+      value: "Hola ****mundo",
+      selectionStart: 7,
+      selectionEnd: 7
+    });
+  });
+
+  test("preserves quote toggling over every touched line", () => {
+    const quoted = formatEmailTemplateSelection("Primera\nSegunda", 2, 10, "quote");
+    expect(quoted).toEqual({
+      value: "> Primera\n> Segunda",
+      selectionStart: 0,
+      selectionEnd: 19
+    });
+    expect(formatEmailTemplateSelection(
+      quoted.value,
+      quoted.selectionStart,
+      quoted.selectionEnd,
+      "quote"
+    )).toEqual({
+      value: "Primera\nSegunda",
+      selectionStart: 0,
+      selectionEnd: 15
+    });
   });
 });

@@ -1346,13 +1346,65 @@ function BrandingEditor({
 
 type EmailTemplateBodyFormat = "bold" | "italic" | "underline" | "quote";
 
+export function formatEmailTemplateSelection(
+  value: string,
+  selectionStart: number,
+  selectionEnd: number,
+  format: EmailTemplateBodyFormat
+): { value: string; selectionStart: number; selectionEnd: number } {
+  if (format === "quote") {
+    const lineStart = value.lastIndexOf("\n", Math.max(0, selectionStart - 1)) + 1;
+    const nextLineBreak = value.indexOf("\n", selectionEnd);
+    const lineEnd = nextLineBreak === -1 ? value.length : nextLineBreak;
+    const block = value.slice(lineStart, lineEnd);
+    const lines = block.split("\n");
+    const removeQuote = lines.every((line) => /^\s*>\s?/.test(line));
+    const replacement = lines
+      .map((line) => removeQuote ? line.replace(/^\s*>\s?/, "") : `> ${line}`)
+      .join("\n");
+    return {
+      value: `${value.slice(0, lineStart)}${replacement}${value.slice(lineEnd)}`,
+      selectionStart: lineStart,
+      selectionEnd: lineStart + replacement.length
+    };
+  }
+
+  const markers = format === "bold"
+    ? ["**", "**"] as const
+    : format === "italic"
+      ? ["*", "*"] as const
+      : ["++", "++"] as const;
+  const selected = value.slice(selectionStart, selectionEnd);
+  if (!selected) {
+    const replacement = `${markers[0]}${markers[1]}`;
+    const caret = selectionStart + markers[0].length;
+    return {
+      value: `${value.slice(0, selectionStart)}${replacement}${value.slice(selectionEnd)}`,
+      selectionStart: caret,
+      selectionEnd: caret
+    };
+  }
+
+  const lines = selected.split("\n");
+  const replacement = lines
+    .map((line) => line ? `${markers[0]}${line}${markers[1]}` : line)
+    .join("\n");
+  return {
+    value: `${value.slice(0, selectionStart)}${replacement}${value.slice(selectionEnd)}`,
+    selectionStart: selectionStart + (lines[0] ? markers[0].length : 0),
+    selectionEnd: selectionStart + replacement.length - (lines.at(-1) ? markers[1].length : 0)
+  };
+}
+
 function EmailTemplateBodyEditor({
   id,
+  templateLabel,
   value,
   placeholder,
   onChange
 }: {
   id: string;
+  templateLabel: string;
   value: string;
   placeholder: string;
   onChange: (value: string) => void;
@@ -1374,40 +1426,17 @@ function EmailTemplateBodyEditor({
   const applyFormat = (format: EmailTemplateBodyFormat) => {
     const textarea = textareaRef.current;
     if (!textarea) return;
-    const selectionStart = textarea.selectionStart;
-    const selectionEnd = textarea.selectionEnd;
-    let nextValue: string;
-    let nextSelectionStart: number;
-    let nextSelectionEnd: number;
-
-    if (format === "quote") {
-      const lineStart = value.lastIndexOf("\n", Math.max(0, selectionStart - 1)) + 1;
-      const nextLineBreak = value.indexOf("\n", selectionEnd);
-      const lineEnd = nextLineBreak === -1 ? value.length : nextLineBreak;
-      const block = value.slice(lineStart, lineEnd);
-      const lines = block.split("\n");
-      const removeQuote = lines.every((line) => /^\s*>\s?/.test(line));
-      const replacement = lines
-        .map((line) => removeQuote ? line.replace(/^\s*>\s?/, "") : `> ${line}`)
-        .join("\n");
-      nextValue = `${value.slice(0, lineStart)}${replacement}${value.slice(lineEnd)}`;
-      nextSelectionStart = lineStart;
-      nextSelectionEnd = lineStart + replacement.length;
-    } else {
-      const markers = format === "bold"
-        ? ["**", "**"]
-        : format === "italic"
-          ? ["*", "*"]
-          : ["++", "++"];
-      const selected = value.slice(selectionStart, selectionEnd);
-      const replacement = `${markers[0]}${selected}${markers[1]}`;
-      nextValue = `${value.slice(0, selectionStart)}${replacement}${value.slice(selectionEnd)}`;
-      nextSelectionStart = selectionStart + markers[0].length;
-      nextSelectionEnd = nextSelectionStart + selected.length;
-    }
-
-    pendingSelectionRef.current = { start: nextSelectionStart, end: nextSelectionEnd };
-    onChange(nextValue);
+    const formatted = formatEmailTemplateSelection(
+      value,
+      textarea.selectionStart,
+      textarea.selectionEnd,
+      format
+    );
+    pendingSelectionRef.current = {
+      start: formatted.selectionStart,
+      end: formatted.selectionEnd
+    };
+    onChange(formatted.value);
   };
 
   const moveFormatFocus = (step: number) => {
@@ -1426,23 +1455,23 @@ function EmailTemplateBodyEditor({
           ref={toolbarRef}
           className="email-template-format-toolbar"
           role="toolbar"
-          aria-label="Formato del cuerpo"
+          aria-label={`Formato del cuerpo — ${templateLabel}`}
           onKeyDown={(event) => {
             if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
             event.preventDefault();
             moveFormatFocus(event.key === "ArrowRight" ? 1 : -1);
           }}
         >
-          <button type="button" tabIndex={activeFormatIndex === 0 ? 0 : -1} onFocus={() => setActiveFormatIndex(0)} aria-label="Negrita" title="Negrita: **texto**" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("bold")}><strong>B</strong></button>
-          <button type="button" tabIndex={activeFormatIndex === 1 ? 0 : -1} onFocus={() => setActiveFormatIndex(1)} aria-label="Cursiva" title="Cursiva: *texto*" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("italic")}><em>I</em></button>
-          <button type="button" tabIndex={activeFormatIndex === 2 ? 0 : -1} onFocus={() => setActiveFormatIndex(2)} aria-label="Subrayado" title="Subrayado: ++texto++" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("underline")}><u>U</u></button>
-          <button type="button" tabIndex={activeFormatIndex === 3 ? 0 : -1} onFocus={() => setActiveFormatIndex(3)} aria-label="Cita" title="Cita: > texto" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("quote")}>❝</button>
+          <button type="button" tabIndex={activeFormatIndex === 0 ? 0 : -1} onFocus={() => setActiveFormatIndex(0)} aria-label={`Negrita — ${templateLabel}`} title="Negrita: **texto**" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("bold")}><strong>B</strong></button>
+          <button type="button" tabIndex={activeFormatIndex === 1 ? 0 : -1} onFocus={() => setActiveFormatIndex(1)} aria-label={`Cursiva — ${templateLabel}`} title="Cursiva: *texto*" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("italic")}><em>I</em></button>
+          <button type="button" tabIndex={activeFormatIndex === 2 ? 0 : -1} onFocus={() => setActiveFormatIndex(2)} aria-label={`Subrayado — ${templateLabel}`} title="Subrayado: ++texto++" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("underline")}><u>U</u></button>
+          <button type="button" tabIndex={activeFormatIndex === 3 ? 0 : -1} onFocus={() => setActiveFormatIndex(3)} aria-label={`Cita — ${templateLabel}`} title="Cita: > texto" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("quote")}>❝</button>
         </div>
       </div>
       <textarea
         ref={textareaRef}
         id={id}
-        aria-label="Cuerpo del correo"
+        aria-label={`Cuerpo del correo — ${templateLabel}`}
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
@@ -1484,15 +1513,22 @@ function EmailTemplateEditor({
     <div className="email-template-list">
       {group.map((definition) => {
         const value = draft[definition.type] ?? { subject: "", body: "" };
+        const titleId = `email-template-title-${definition.type}`;
         return (
-          <section className="email-template-card" key={definition.type}>
+          <section
+            className="email-template-card"
+            key={definition.type}
+            role="region"
+            aria-labelledby={titleId}
+          >
             <div>
-              <h4>{definition.label}</h4>
+              <h4 id={titleId}>{definition.label}</h4>
               <p>{definition.description}</p>
             </div>
             <label>
               <span>Asunto</span>
               <input
+                aria-label={`Asunto — ${definition.label}`}
                 value={value.subject}
                 onChange={(event) => onChange(definition.type, { subject: event.target.value })}
                 placeholder={definition.defaultSubject}
@@ -1500,6 +1536,7 @@ function EmailTemplateEditor({
             </label>
             <EmailTemplateBodyEditor
               id={`email-template-body-${definition.type}`}
+              templateLabel={definition.label}
               value={value.body}
               onChange={(body) => onChange(definition.type, { body })}
               placeholder={definition.defaultBody}

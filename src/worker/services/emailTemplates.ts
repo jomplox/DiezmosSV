@@ -45,6 +45,7 @@ export class EmailTemplateValidationError extends Error {}
 export class EmailTemplateStoredStateError extends Error {}
 
 const EMAIL_SUBJECT_CONTROL_PATTERN = /[\u0000-\u001F\u007F-\u009F]/u;
+const EMAIL_TEMPLATE_PLACEHOLDER_PATTERN = /\{\{[^{}]*\}\}/gu;
 
 const EMAIL_TEMPLATE_PLACEHOLDERS = [
   "{{numeroControl}}",
@@ -224,6 +225,7 @@ export function normalizeEmailTemplateSettings(input: unknown): EmailTemplateSet
     if (!subject || !body) {
       throw new EmailTemplateValidationError(`Complete asunto y cuerpo para: ${definition.label}.`);
     }
+    assertSupportedPlaceholders(definition, subject, body);
     normalized[definition.type] = { subject, body };
   }
   return normalized;
@@ -312,16 +314,36 @@ function mergeEmailTemplates(input: unknown): EmailTemplateSettings {
   for (const definition of EMAIL_TEMPLATE_DEFINITIONS) {
     const rawTemplate = input[definition.type];
     if (!isRecord(rawTemplate)) continue;
-    const rawSubject = stringValue(rawTemplate.subject);
-    assertSafeEmailSubject(rawSubject);
-    const subject = rawSubject.trim();
-    const body = stringValue(rawTemplate.body).trim();
-    defaults[definition.type] = {
-      subject: subject || defaults[definition.type].subject,
-      body: body || defaults[definition.type].body
-    };
+    try {
+      const rawSubject = stringValue(rawTemplate.subject);
+      assertSafeEmailSubject(rawSubject);
+      const subject = rawSubject.trim() || defaults[definition.type].subject;
+      const body = stringValue(rawTemplate.body).trim() || defaults[definition.type].body;
+      assertSupportedPlaceholders(definition, subject, body);
+      defaults[definition.type] = { subject, body };
+    } catch (error) {
+      if (!(error instanceof EmailTemplateValidationError)) throw error;
+    }
   }
   return defaults;
+}
+
+function assertSupportedPlaceholders(
+  definition: EmailTemplateDefinition,
+  subject: string,
+  body: string
+): void {
+  const allowed = new Set(definition.placeholders);
+  for (const value of [subject, body]) {
+    const placeholders = value.match(EMAIL_TEMPLATE_PLACEHOLDER_PATTERN) ?? [];
+    const unsupported = placeholders.find((placeholder) => !allowed.has(placeholder));
+    const unmatched = value.replace(EMAIL_TEMPLATE_PLACEHOLDER_PATTERN, "");
+    if (unsupported || unmatched.includes("{{") || unmatched.includes("}}")) {
+      throw new EmailTemplateValidationError(
+        `La plantilla ${definition.label} contiene una variable no disponible: ${unsupported ?? "marcador incompleto"}.`
+      );
+    }
+  }
 }
 
 function cloneDefaultTemplates(): EmailTemplateSettings {
@@ -346,7 +368,10 @@ function placeholderValues(record: DteDocumentRecord): Record<string, string> {
 }
 
 function replacePlaceholders(value: string, placeholders: Record<string, string>): string {
-  return Object.entries(placeholders).reduce((text, [token, replacement]) => text.split(token).join(replacement), value);
+  return value.replace(
+    EMAIL_TEMPLATE_PLACEHOLDER_PATTERN,
+    (token) => placeholders[token] ?? token
+  );
 }
 
 // Neutraliza los marcadores del formateador del operador dentro de texto suministrado

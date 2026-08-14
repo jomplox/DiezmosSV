@@ -183,6 +183,59 @@ describe("email template defaults", () => {
   });
 });
 
+describe("email template placeholder boundaries", () => {
+  it.each([
+    [
+      "subject",
+      "stripeAcknowledgment",
+      "{{numeroControl}}",
+      "La plantilla Constancia inmediata contiene una variable no disponible: {{numeroControl}}."
+    ],
+    [
+      "body",
+      "dteReceipt",
+      "{{anio}}",
+      "La plantilla Envío de comprobante contiene una variable no disponible: {{anio}}."
+    ]
+  ] as const)("rejects a %s placeholder outside the selected template allowlist", (field, type, token, expectedMessage) => {
+    const candidate = structuredClone(DEFAULT_EMAIL_TEMPLATES);
+    candidate[type][field] = `Texto ${token}`;
+
+    expect(() => normalizeEmailTemplateSettings(candidate)).toThrow(expectedMessage);
+  });
+
+  it("falls back only the invalid stored template before it can reach a donor email", () => {
+    const parsed = parseEmailTemplates(JSON.stringify({
+      ...DEFAULT_EMAIL_TEMPLATES,
+      dteReceipt: { subject: "CDE personalizado", body: "Gracias, {{anio}}." },
+      dteInvalidation: { subject: "Invalidación personalizada", body: "Estado: {{estado}}." }
+    }));
+
+    expect(parsed.dteReceipt).toEqual(DEFAULT_EMAIL_TEMPLATES.dteReceipt);
+    expect(parsed.dteInvalidation).toEqual({
+      subject: "Invalidación personalizada",
+      body: "Estado: {{estado}}."
+    });
+    expect(renderEmailTemplate(parsed.dteReceipt, fakeRecord()).formattedText).not.toContain("{{anio}}");
+  });
+
+  it("substitutes against the original template without re-expanding placeholder-looking donor text", () => {
+    const rendered = renderEmailTemplateValue(
+      {
+        subject: "Constancia para {{donante}} — {{codigoGeneracion}}",
+        body: "Hola {{donante}}. Código: {{codigoGeneracion}}."
+      },
+      {
+        "{{donante}}": "{{codigoGeneracion}}",
+        "{{codigoGeneracion}}": "GENERATION-ORIGINAL"
+      }
+    );
+
+    expect(rendered.subject).toBe("Constancia para {{codigoGeneracion}} — GENERATION-ORIGINAL");
+    expect(rendered.formattedText).toBe("Hola {{codigoGeneracion}}. Código: GENERATION-ORIGINAL.");
+  });
+});
+
 describe("scoped email template persistence", () => {
   it("rejects a stale validated snapshot when a legacy writer replaces it with a structurally invalid row", async () => {
     const database = migratedDatabase();
