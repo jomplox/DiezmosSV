@@ -66,12 +66,27 @@ describe("Stripe US giving provisioning documentation", () => {
     expect(runbook).toMatch(/subscription service emails|correos.*servicio.*suscripci/i);
     expect(runbook).toMatch(/exactly one Elim-branded acknowledgment|exactamente un acuse.*Elim/is);
 
-    for (const document of [english, spanish]) {
-      expect(document).toContain("receipt_email");
-      expect(document).toContain("customer_details.email");
-      expect(document).toContain("Successful payments");
-      expect(document).toMatch(/exactly one\s+Elim-branded acknowledgment|exactamente un acuse.*Elim/is);
-    }
+    const englishBoundary = english.slice(
+      english.indexOf("**Stripe receipt-email boundary."),
+      english.indexOf("The pure Stripe.js loader")
+    );
+    expect(englishBoundary).toMatch(/receipt_email.*customer_details\.email.*separate/is);
+    expect(englishBoundary).toMatch(/Dashboard\s*→\s*Settings\s*→\s*Business\s*→\s*Customer emails\s*→\s*Payments\s*→\s*disable `Successful payments`/is);
+    expect(englishBoundary).toMatch(/account-level Customer emails setting, not a per-Checkout\s+Session option/is);
+    expect(englishBoundary).toMatch(/Do not change it during the current production freeze/is);
+    expect(englishBoundary).toMatch(/subscription service emails.*distinct from successful-payment receipts.*separately approved/is);
+    expect(englishBoundary).toMatch(/one controlled donation.*exactly one\s+Elim-branded acknowledgment/is);
+
+    const spanishBoundary = spanish.slice(
+      spanish.indexOf("**Frontera de correo de recibo Stripe."),
+      spanish.indexOf("El cargador puro de Stripe.js")
+    );
+    expect(spanishBoundary).toMatch(/receipt_email.*customer_details\.email.*distinto/is);
+    expect(spanishBoundary).toMatch(/Dashboard\s*→\s*Settings\s*→\s*Business\s*→\s*Customer emails\s*→\s*Payments\s*→\s*disable `Successful payments`/is);
+    expect(spanishBoundary).toMatch(/a nivel de cuenta,\s*no una opción por Checkout Session/is);
+    expect(spanishBoundary).toMatch(/No la cambie durante el congelamiento actual de producción/is);
+    expect(spanishBoundary).toMatch(/correos de servicio de suscripción requeridos y distintos.*se apruebe cambiarlos por separado/is);
+    expect(spanishBoundary).toMatch(/donación controlada.*exactamente un acuse.*Elim/is);
   });
 
   it("pins least privilege, environment separation, and the owner-only handoff", () => {

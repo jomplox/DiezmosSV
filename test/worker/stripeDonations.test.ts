@@ -11,28 +11,6 @@ import {
 
 const requestId = "0c2e2165-edb7-4e4b-bc50-95a7fa3cdfe5";
 
-function serializedParameterKeys(value: unknown, prefix = ""): string[] {
-  if (Array.isArray(value)) {
-    return value.flatMap((item, index) => serializedParameterKeys(item, `${prefix}[${index}]`));
-  }
-  if (!value || typeof value !== "object") return [];
-
-  return Object.entries(value).flatMap(([key, nested]) => {
-    const path = prefix ? `${prefix}[${key}]` : key;
-    return [path, ...serializedParameterKeys(nested, path)];
-  });
-}
-
-function stripeReceiptEmailParameterPaths(params: unknown): string[] {
-  return serializedParameterKeys(params)
-    .filter((path) => /(?:^|\[)receipt_email(?:\]|$)/.test(path));
-}
-
-function receiptEmailBoundaryEvidence(params: unknown) {
-  const paths = stripeReceiptEmailParameterPaths(params);
-  return { passes: paths.length === 0, paths };
-}
-
 describe("Stripe Checkout donation contract", () => {
   it("normalizes only the two known FMCE legal-name display variants", () => {
     expect(stripeUsLegalNameForDisplay("FRIENDS OF MISION CRISTIANA ELIM"))
@@ -144,7 +122,6 @@ describe("Stripe Checkout donation contract", () => {
     expect(params).not.toHaveProperty("origin_context");
     expect(params).not.toHaveProperty("payment_method_types");
     expect(JSON.stringify(params)).not.toMatch(/affirm|afterpay|clearpay|klarna/i);
-    expect(receiptEmailBoundaryEvidence(params)).toEqual({ passes: true, paths: [] });
   });
 
   it("uses subscription mode and inline monthly pricing without creating a payment Customer option", async () => {
@@ -176,26 +153,6 @@ describe("Stripe Checkout donation contract", () => {
       unit_amount: 10000,
       recurring: { interval: "month" },
       product_data: { description: "Entrega mensual" }
-    });
-    expect(receiptEmailBoundaryEvidence(params)).toEqual({ passes: true, paths: [] });
-  });
-
-  it("reports only forced receipt parameter paths for nested and form-encoded Checkout payloads", () => {
-    expect(receiptEmailBoundaryEvidence({
-      receipt_email: true,
-      payment_intent_data: { receipt_email: true },
-      subscription_data: { invoice_settings: { receipt_email: true } },
-      customer: { receipt_email: true },
-      "customer[metadata][receipt_email]": true
-    })).toEqual({
-      passes: false,
-      paths: [
-        "receipt_email",
-        "payment_intent_data[receipt_email]",
-        "subscription_data[invoice_settings][receipt_email]",
-        "customer[receipt_email]",
-        "customer[metadata][receipt_email]"
-      ]
     });
   });
 

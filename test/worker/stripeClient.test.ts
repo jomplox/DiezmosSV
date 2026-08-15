@@ -14,6 +14,36 @@ import { sha256Hex, utf8Bytes } from "../../src/worker/utils/encoding";
 
 const requestId = "0c2e2165-edb7-4e4b-bc50-95a7fa3cdfe5";
 
+function repeatedlyDecodeFormKey(key: string): string {
+  let decoded = key;
+  for (let attempts = 0; attempts < 8; attempts += 1) {
+    try {
+      const next = decodeURIComponent(decoded.replace(/\+/g, " "));
+      if (next === decoded) break;
+      decoded = next;
+    } catch {
+      break;
+    }
+  }
+  return decoded;
+}
+
+function receiptEmailSerializedKeyPaths(serializedBody: string): string[] {
+  return serializedBody.split("&").flatMap((entry) => {
+    const rawKey = entry.split("=", 1)[0] ?? "";
+    const key = repeatedlyDecodeFormKey(rawKey);
+    const segments = key.match(/[^.\[\]]+/g) ?? [];
+    return segments.some((segment) => repeatedlyDecodeFormKey(segment).toLowerCase() === "receipt_email")
+      ? [key]
+      : [];
+  });
+}
+
+function receiptEmailBoundaryEvidence(serializedBody: string) {
+  const paths = receiptEmailSerializedKeyPaths(serializedBody);
+  return { passes: paths.length === 0, paths };
+}
+
 describe("Stripe SDK boundary", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -193,5 +223,101 @@ describe("Stripe SDK boundary", () => {
         amountTotal: 5000
       });
     expect(String(fetchMock.mock.calls[0]?.[0])).toBe("http://127.0.0.1:8791/v1/checkout/sessions");
+  });
+
+  it("keeps every serialized one-time and monthly Checkout request free of receipt-email paths", async () => {
+    const serializedBodies: string[] = [];
+    const fetchMock = vi.fn<typeof fetch>(async (_input, init) => {
+      serializedBodies.push(typeof init?.body === "string" ? init.body : "");
+      return new Response(JSON.stringify({
+        id: "cs_test_serialized_fixture",
+        object: "checkout.session",
+        client_reference_id: "stripe_checkout_serialized",
+        client_secret: "cs_test_serialized_fixture_secret_fixture",
+        url: null,
+        livemode: false,
+        status: "open",
+        payment_status: "unpaid",
+        mode: "payment",
+        amount_total: 5000,
+        currency: "usd",
+        customer: null,
+        subscription: null,
+        payment_intent: null,
+        customer_details: null,
+        customer_email: null,
+        metadata: {},
+        expires_at: 1786370400
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json", "Request-Id": "req_serialized_fixture" }
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const gateway = createStripeGateway(resolveStripeConfiguration({
+      APP_ENV: "local",
+      STRIPE_RESTRICTED_KEY: "rk_test_fixture",
+      STRIPE_PUBLISHABLE_KEY: "pk_test_fixture",
+      STRIPE_WEBHOOK_SECRET: "whsec_fixture",
+      STRIPE_PAYMENT_METHOD_CONFIGURATION_ID: "pmc_fixture",
+      STRIPE_BILLING_PORTAL_CONFIGURATION_ID: "bpc_fixture",
+      STRIPE_US_LEGAL_NAME: "Example Nonprofit",
+      STRIPE_US_EIN: "12-3456789",
+      STRIPE_US_PHONE: "+1 (555) 010-0200",
+      STRIPE_US_WEBSITE: "https://example.org",
+      STRIPE_US_MAILING_ADDRESS: "100 Example Street\nExample City, NY 10001, USA",
+      STRIPE_US_SIGNER_NAME: "Example Treasurer",
+      STRIPE_US_SIGNER_TITLE: "Treasurer",
+      STRIPE_API_PROXY_URL: "http://127.0.0.1:8791"
+    }));
+    const integrationIdentifier = await integrationIdentifierForRequest(requestId);
+    const oneTime = buildStripeCheckoutSessionParams({
+      checkoutId: "stripe_checkout_serialized",
+      requestId,
+      amountCents: 5000,
+      frequency: "ONCE",
+      giftType: "TITHE",
+      organizationName: "Organización de Prueba",
+      appOrigin: "http://127.0.0.1:8787",
+      paymentMethodConfigurationId: "pmc_fixture",
+      integrationIdentifier
+    });
+    const monthly = buildStripeCheckoutSessionParams({
+      checkoutId: "stripe_checkout_serialized_monthly",
+      requestId,
+      amountCents: 5000,
+      frequency: "MONTHLY",
+      giftType: "TITHE",
+      organizationName: "Organización de Prueba",
+      appOrigin: "http://127.0.0.1:8787",
+      paymentMethodConfigurationId: "pmc_fixture",
+      integrationIdentifier
+    });
+
+    const modeEvidence = [];
+    for (const params of [oneTime, monthly]) {
+      await gateway.createCheckoutSession(params, `stripe-checkout:${params.client_reference_id}`);
+      modeEvidence.push(receiptEmailBoundaryEvidence(serializedBodies.at(-1) ?? ""));
+    }
+    expect(modeEvidence).toEqual([
+      { passes: true, paths: [] },
+      { passes: true, paths: [] }
+    ]);
+
+    for (const [label, receiptParameter, expectedPath] of [
+      ["case", { Receipt_Email: true }, "Receipt_Email"],
+      ["nested case", { payment_intent_data: { Receipt_Email: true } }, "payment_intent_data[Receipt_Email]"],
+      ["encoded brackets", { "customer%5Bmetadata%5D%5Breceipt_email%5D": true }, "customer[metadata][receipt_email]"],
+      ["encoded underscore", { "customer[metadata][receipt%5Femail]": true }, "customer[metadata][receipt_email]"],
+      ["dot path", { "payment_intent_data.receipt_email": true }, "payment_intent_data.receipt_email"],
+      ["array path", { "receipt_email[]": true }, "receipt_email[]"]
+    ] as const) {
+      await gateway.createCheckoutSession(
+        { ...oneTime, ...receiptParameter } as unknown as Stripe.Checkout.SessionCreateParams,
+        `stripe-checkout:${label}`
+      );
+      expect(receiptEmailBoundaryEvidence(serializedBodies.at(-1) ?? ""))
+        .toEqual({ passes: false, paths: [expectedPath] });
+    }
   });
 });
