@@ -8,6 +8,16 @@ La campaña Givebutter es configuración pública vinculada al build: `VITE_GIVE
 
 Cada entrega estadounidense recibe un acuse inmediato 501(c)(3) en español, con la entidad legal, EIN, fecha, monto, tipo y frecuencia, y la declaración de que no se proporcionaron bienes ni servicios. La pantalla **Exportar** separa **El Salvador — CDE** de **EE. UU. — Stripe**: el segundo genera la **Constancia anual de donaciones — EE. UU.** a partir de entregas Stripe liquidadas, netas de reembolsos y agrupadas por el año calendario de `STRIPE_US_TIME_ZONE`. Es una constancia estadounidense, no un CDE ni un expediente fiscal salvadoreño; el carril SV sigue usando solamente CDE aceptados y su dossier existente.
 
+## Frontera de correo de recibo Stripe
+
+La aplicación omite `receipt_email` de toda Checkout Session, incluso de los datos anidados de PaymentIntent, suscripción, factura y Customer. Esto no impide que Stripe recopile `customer_details.email` en su formulario: el webhook usa ese correo después para el acuse 501(c)(3) con marca Elim. Recopilarlo para ese acuse es distinto de solicitar un recibo automático de Stripe.
+
+Omitir `receipt_email` no desactiva por sí solo los recibos automáticos de Stripe. **Successful payments** es una configuración de correos de clientes a nivel de cuenta, no una opción que pueda suprimirse por Checkout Session. Durante el congelamiento actual de producción no se cambia esta configuración.
+
+En una ventana de producción aprobada por el propietario, cambie la cuenta en **Dashboard → Settings → Business → Customer emails → Payments → disable `Successful payments`**. Preserve los correos de servicio de suscripción que sean necesarios y distintos de los recibos de pagos exitosos, salvo aprobación separada. Después del cambio aprobado, complete una donación controlada y verifique que llegue exactamente un acuse con marca Elim y ningún recibo automático adicional de Stripe.
+
+Referencias oficiales: [recibos de pagos](https://docs.stripe.com/payments/advanced/receipts) y [correos de facturación](https://docs.stripe.com/invoicing/send-email).
+
 ## Por qué Embedded Checkout y no un Payment Link
 
 Un Payment Link literal sirve para una donación única con monto elegido por el donante o para una suscripción de monto fijo, pero Stripe no admite donaciones recurrentes con monto libre en el mismo enlace. Esta aplicación necesita que el donante elija tanto el monto como **Única** o **Mensual**. Por eso el Worker crea una Checkout Session por intento con `ui_mode: "embedded_page"`: conserva el formulario alojado y actualizado por Stripe, admite ambos modos y mantiene nuestros identificadores, idempotencia, metadatos y webhook durable.

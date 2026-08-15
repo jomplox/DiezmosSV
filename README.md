@@ -748,6 +748,19 @@ layout. Its **Constancia anual de donaciones —
 EE. UU.** is a separate annual statement over settled Stripe gifts, net of refunds, in
 `STRIPE_US_TIME_ZONE`; it is never a Salvadoran CDE or a Salvadoran annual dossier.
 
+**Stripe receipt-email boundary.** The application omits `receipt_email` from every Checkout Session,
+including nested PaymentIntent, subscription, invoice, and Customer data. Stripe may still collect
+`customer_details.email`; the signed webhook uses it later for Elim's 501(c)(3) acknowledgment, which is
+separate from requesting a Stripe automatic receipt. Omitting `receipt_email` alone does not suppress Stripe
+automatic receipts: **Successful payments** is an account-level Customer emails setting, not a per-Checkout
+Session option. Do not change it during the current production freeze. In an owner-approved production window,
+go to **Dashboard → Settings → Business → Customer emails → Payments → disable `Successful payments`**.
+Preserve required subscription service emails that are distinct from successful-payment receipts unless they are
+separately approved for change. Afterwards, complete one controlled donation and verify exactly one
+Elim-branded acknowledgment arrives, with no additional Stripe automatic receipt. Official guidance:
+[payment receipts](https://docs.stripe.com/payments/advanced/receipts) and
+[billing emails](https://docs.stripe.com/invoicing/send-email).
+
 The pure Stripe.js loader is invoked only after a real, non-mock U.S. Session reaches the embedded form.
 The chooser, SV/Wompi path, local mock, result page, and admin do not request `js.stripe.com`.
 

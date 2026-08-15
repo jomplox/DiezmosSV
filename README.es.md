@@ -778,6 +778,19 @@ frecuencia, fecha, monto y declaración de bienes/servicios a través de su cerc
 **Constancia anual de donaciones — EE. UU.** es un estado separado, sobre entregas Stripe liquidadas,
 netas de reembolsos y dentro de `STRIPE_US_TIME_ZONE`; nunca es un CDE ni un dossier anual salvadoreño.
 
+**Frontera de correo de recibo Stripe.** La aplicación omite `receipt_email` de toda Checkout Session,
+incluso de los datos anidados de PaymentIntent, suscripción, factura y Customer. Stripe aún puede recopilar
+`customer_details.email`; el webhook firmado lo usa después para el acuse 501(c)(3) con marca Elim, que es
+distinto de solicitar un recibo automático de Stripe. Omitir `receipt_email` por sí solo no suprime los recibos
+automáticos de Stripe: **Successful payments** es una configuración de Customer emails a nivel de cuenta,
+no una opción por Checkout Session. No la cambie durante el congelamiento actual de producción. En una ventana
+de producción aprobada por el propietario, vaya a **Dashboard → Settings → Business → Customer emails → Payments
+→ disable `Successful payments`**. Preserve los correos de servicio de suscripción requeridos y distintos de los
+recibos de pagos exitosos, salvo que se apruebe cambiarlos por separado. Después, complete una donación controlada
+y verifique que llegue exactamente un acuse con marca Elim, sin un recibo automático adicional de Stripe. Guía
+oficial: [recibos de pagos](https://docs.stripe.com/payments/advanced/receipts) y
+[correos de facturación](https://docs.stripe.com/invoicing/send-email).
+
 El cargador puro de Stripe.js se invoca únicamente cuando una Session estadounidense real, no simulada,
 llega al formulario embebido. El selector inicial, la ruta SV/Wompi, la simulación local, la página de
 resultado y el panel administrativo no solicitan `js.stripe.com`.

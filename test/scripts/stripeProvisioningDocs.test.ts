@@ -56,6 +56,24 @@ describe("Stripe US giving provisioning documentation", () => {
     expect(runbook).toMatch(/dominio.*Apple Pay|Apple Pay.*dominio/is);
   });
 
+  it("documents the account-level Stripe receipt boundary and one-Elim-acknowledgment verification", () => {
+    expect(runbook).toMatch(/receipt_email/);
+    expect(runbook).toMatch(/customer_details\.email/);
+    expect(runbook).toMatch(/Dashboard.*Settings.*Business.*Customer emails.*Payments.*Successful payments/is);
+    expect(runbook).toMatch(/account-level|nivel de cuenta/i);
+    expect(runbook).toMatch(/no.*Checkout Session|ninguna.*Checkout Session/i);
+    expect(runbook).toMatch(/freeze|congelamiento/i);
+    expect(runbook).toMatch(/subscription service emails|correos.*servicio.*suscripci/i);
+    expect(runbook).toMatch(/exactly one Elim-branded acknowledgment|exactamente un acuse.*Elim/is);
+
+    for (const document of [english, spanish]) {
+      expect(document).toContain("receipt_email");
+      expect(document).toContain("customer_details.email");
+      expect(document).toContain("Successful payments");
+      expect(document).toMatch(/exactly one\s+Elim-branded acknowledgment|exactamente un acuse.*Elim/is);
+    }
+  });
+
   it("pins least privilege, environment separation, and the owner-only handoff", () => {
     expect(runbook).toContain("rk_test_");
     expect(runbook).toContain("rk_live_");
