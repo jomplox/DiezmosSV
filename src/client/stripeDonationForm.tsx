@@ -1,6 +1,7 @@
 import { EmbeddedCheckout, EmbeddedCheckoutProvider } from "@stripe/react-stripe-js";
+import type { StripeEmbeddedCheckoutAnalyticsEventUnion } from "@stripe/stripe-js";
 import { loadStripe } from "@stripe/stripe-js/pure";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
 
 export interface StripeCheckoutClientConfig {
   sessionId: string;
@@ -80,31 +81,18 @@ function LiveStripeDonationForm({
   onReady: () => void;
 }) {
   const stripePromise = useMemo(() => loadStripe(config.publishableKey), [config.publishableKey]);
-  const options = useMemo(() => ({ clientSecret: config.clientSecret }), [config.clientSecret]);
-  const rootRef = useRef<HTMLDivElement | null>(null);
-
-  useLayoutEffect(() => {
-    const root = rootRef.current;
-    if (!root) return;
-    const observedFrames = new Set<HTMLIFrameElement>();
-    const watchFrames = () => {
-      root.querySelectorAll<HTMLIFrameElement>(".donar-stripe-frame-mount iframe").forEach((frame) => {
-        if (observedFrames.has(frame)) return;
-        observedFrames.add(frame);
-        frame.addEventListener("load", onReady, { once: true });
-      });
-    };
-    const observer = new MutationObserver(watchFrames);
-    observer.observe(root, { childList: true, subtree: true });
-    watchFrames();
-    return () => {
-      observer.disconnect();
-      observedFrames.forEach((frame) => frame.removeEventListener("load", onReady));
-    };
+  const onAnalyticsEvent = useCallback((event: StripeEmbeddedCheckoutAnalyticsEventUnion) => {
+    if (event.eventType === "checkoutRendered") {
+      onReady();
+    }
   }, [onReady]);
+  const options = useMemo(() => ({
+    clientSecret: config.clientSecret,
+    onAnalyticsEvent
+  }), [config.clientSecret, onAnalyticsEvent]);
 
   return (
-    <div ref={rootRef} className="donar-stripe-live">
+    <div className="donar-stripe-live">
       <EmbeddedCheckoutProvider stripe={stripePromise} options={options}>
         <EmbeddedCheckout className="donar-stripe-frame-mount" />
       </EmbeddedCheckoutProvider>

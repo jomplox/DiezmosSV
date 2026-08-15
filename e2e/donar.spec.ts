@@ -40,6 +40,7 @@ const CONFIGURED_DONOR_LOGO = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="
 interface RouteDelay {
   held: Promise<void>;
   release: () => void;
+  requestCount: () => number;
 }
 
 async function delayRoute(
@@ -49,17 +50,19 @@ async function delayRoute(
 ): Promise<RouteDelay> {
   let markHeld!: () => void;
   let release!: () => void;
+  let requestCount = 0;
   const held = new Promise<void>((resolve) => { markHeld = resolve; });
   const released = new Promise<void>((resolve) => { release = resolve; });
   page.once("close", release);
   await page.route(url, async (route) => {
+    requestCount += 1;
     markHeld();
     await released;
     await route.fulfill(fulfill).catch(() => {
       // A RED assertion may close the page before releasing a held provider request.
     });
   });
-  return { held, release };
+  return { held, release, requestCount: () => requestCount };
 }
 
 async function enterWompiHandoff(page: Page): Promise<void> {
@@ -102,7 +105,20 @@ window.Stripe = function () {
     confirmCardPayment: function () {},
     _registerWrapper: function () {},
     registerAppInfo: function () {},
-    createEmbeddedCheckoutPage: function () {
+    createEmbeddedCheckoutPage: function (options) {
+      window.__stripeEmbeddedCheckoutCreates = (window.__stripeEmbeddedCheckoutCreates || 0) + 1;
+      window.__emitStripeAnalyticsEvent = function (eventType) {
+        var details = eventType === "deviceData"
+          ? { device: { category: "desktop", language: "es", platform: "test", viewport: { width: 1280, height: 720 } } }
+          : { items: [], currency: "usd", amount: 5000 };
+        options.onAnalyticsEvent({
+          checkoutSession: "cs_test_delayed_embedded_fixture",
+          eventType: eventType,
+          details: details,
+          clientMetadata: {},
+          timestamp: Math.floor(Date.now() / 1000)
+        });
+      };
       return Promise.resolve({
         mount: function (node) {
           mountedFrame = document.createElement("iframe");
@@ -1069,7 +1085,7 @@ test("provider preconnects begin only after the U.S. lane is selected", async ({
   expect(stripeSessionRequests).toBe(0);
 });
 
-test("Stripe keeps one loader from the Session request through delayed iframe readiness", async ({ page }) => {
+test("Stripe keeps one loader through a shell iframe until Checkout is rendered", async ({ page }) => {
   const sessionDelay = await delayRoute(page, "**/api/donations/stripe/checkout", {
     status: 201,
     contentType: "application/json",
@@ -1085,11 +1101,11 @@ test("Stripe keeps one loader from the Session request through delayed iframe re
     contentType: "application/javascript",
     body: MOCK_STRIPE_JS
   }));
-  const frameDelay = await delayRoute(page, "https://checkout.stripe.test/embedded-delayed", {
+  await page.route("https://checkout.stripe.test/embedded-delayed", (route) => route.fulfill({
     status: 200,
     contentType: "text/html; charset=utf-8",
-    body: "<html lang=\"es\"><body>Formulario demorado de Stripe</body></html>"
-  });
+    body: "<html lang=\"es\"><body><div id=\"stripe-shell\"></div></body></html>"
+  }));
 
   await enterStripeHandoff(page);
   await sessionDelay.held;
@@ -1098,17 +1114,35 @@ test("Stripe keeps one loader from the Session request through delayed iframe re
   await expect(loader).toHaveText("Preparando su formulario seguro con Stripe…");
   await expect(page.getByRole("status")).toHaveCount(1);
   await rememberNode(loader, "stripe-loader");
+  expect(sessionDelay.requestCount()).toBe(1);
 
   sessionDelay.release();
-  await frameDelay.held;
   await expect(page.getByTitle("Formulario seguro de Stripe")).toHaveCount(1);
+  await expect(page.frameLocator('iframe[title="Formulario seguro de Stripe"]')
+    .locator("#stripe-shell")).toHaveCount(1);
   await expect(loader).toBeVisible();
+  await expect(page.getByRole("status")).toHaveCount(1);
+  expect(await isRememberedNode(loader, "stripe-loader")).toBe(true);
+  expect(sessionDelay.requestCount()).toBe(1);
+  expect(await page.evaluate(() => (
+    window as Window & { __stripeEmbeddedCheckoutCreates?: number }
+  ).__stripeEmbeddedCheckoutCreates)).toBe(1);
+
+  await page.evaluate(() => (
+    window as Window & { __emitStripeAnalyticsEvent: (eventType: string) => void }
+  ).__emitStripeAnalyticsEvent("deviceData"));
+  await expect(loader).toBeVisible();
+  await expect(page.getByRole("status")).toHaveCount(1);
   expect(await isRememberedNode(loader, "stripe-loader")).toBe(true);
 
-  frameDelay.release();
-  await expect(page.frameLocator('iframe[title="Formulario seguro de Stripe"]')
-    .getByText("Formulario demorado de Stripe")).toBeVisible();
+  await page.evaluate(() => (
+    window as Window & { __emitStripeAnalyticsEvent: (eventType: string) => void }
+  ).__emitStripeAnalyticsEvent("checkoutRendered"));
   await expect(loader).toHaveCount(0);
+  expect(sessionDelay.requestCount()).toBe(1);
+  expect(await page.evaluate(() => (
+    window as Window & { __stripeEmbeddedCheckoutCreates?: number }
+  ).__stripeEmbeddedCheckoutCreates)).toBe(1);
 });
 
 test("Givebutter keeps a truthful reduced-motion loader until its bounded escape hatch", async ({ page }) => {
