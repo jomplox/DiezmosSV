@@ -34,6 +34,28 @@ const DONOR = {
 // A configured display name for the branding stub: distinct from the seeded demo
 // organization, so "the stub was honored" stays a real assertion.
 const BRANDING_DISPLAY_NAME = "Iglesia Ejemplo Central";
+const BRANDING_SUPPORT_EMAIL = "support@example.org";
+const CONFIGURED_DONOR_LOGO = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12"><rect width="12" height="12" fill="#111"/></svg>`;
+
+async function recordDonorLogoNodes(page: import("@playwright/test").Page): Promise<void> {
+  await page.addInitScript(() => {
+    const logoNodes: string[] = [];
+    const record = (node: Node) => {
+      if (!(node instanceof Element)) return;
+      if (node.matches(".donar-logo")) {
+        logoNodes.push(node.tagName);
+      }
+      node.querySelectorAll(".donar-logo").forEach((logo) => logoNodes.push(logo.tagName));
+    };
+    new MutationObserver((records) => records.forEach((mutation) => mutation.addedNodes.forEach(record)))
+      .observe(document, { childList: true, subtree: true });
+    (window as Window & { donorLogoNodes?: string[] }).donorLogoNodes = logoNodes;
+  });
+}
+
+async function recordedDonorLogoNodes(page: import("@playwright/test").Page): Promise<string[]> {
+  return page.evaluate(() => (window as Window & { donorLogoNodes?: string[] }).donorLogoNodes ?? []);
+}
 
 async function renderedSvFlagDiameter(icon: Locator): Promise<number> {
   return icon.evaluate((element) => {
@@ -72,6 +94,113 @@ test("a clean donor load reveals only the fully styled page", async ({ page }) =
   await page.waitForFunction(() => document.fonts.status === "loaded");
   await expect(root).toHaveCSS("visibility", "visible");
   await expect(page.getByText("Elija según su lugar de residencia.")).toBeVisible();
+});
+
+test("never mounts the stock donor mark while delayed configured branding settles on either donor route", async ({ page }) => {
+  for (const path of ["/donar", "/donar/stripe/resultado"]) {
+    let releaseBranding: ((route: import("@playwright/test").Route) => void) | undefined;
+    const brandingRequest = new Promise<import("@playwright/test").Route>((resolve) => {
+      releaseBranding = resolve;
+    });
+    await recordDonorLogoNodes(page);
+    await page.route("**/api/branding", (route) => releaseBranding?.(route));
+    await page.route("**/api/branding/donor-logo**", (route) =>
+      route.fulfill({ status: 200, contentType: "image/svg+xml", body: CONFIGURED_DONOR_LOGO })
+    );
+
+    await page.goto(path, { waitUntil: "domcontentloaded" });
+    await expect(page.locator("#root")).toHaveCSS("visibility", "visible", { timeout: 4_000 });
+    await expect(page.locator("svg.donar-logo")).toHaveCount(0);
+
+    const route = await brandingRequest;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        displayName: BRANDING_DISPLAY_NAME,
+        accentColor: "#000000",
+        supportEmail: BRANDING_SUPPORT_EMAIL,
+        logoVersion: null,
+        donorLogoVersion: "configured-logo"
+      })
+    });
+
+    await expect(page.getByRole("img", { name: BRANDING_DISPLAY_NAME })).toBeVisible();
+    await expect(page.getByRole("link", { name: BRANDING_SUPPORT_EMAIL })).toHaveAttribute("href", `mailto:${BRANDING_SUPPORT_EMAIL}`);
+    expect(await recordedDonorLogoNodes(page)).toEqual(["IMG"]);
+    await page.unroute("**/api/branding");
+    await page.unroute("**/api/branding/donor-logo**");
+  }
+});
+
+test("uses the stock donor mark only after no-logo branding or a branding failure resolves", async ({ page }) => {
+  for (const [label, response] of [
+    ["no logo", { status: 200, body: JSON.stringify({
+      displayName: BRANDING_DISPLAY_NAME,
+      accentColor: "#000000",
+      supportEmail: BRANDING_SUPPORT_EMAIL,
+      logoVersion: null,
+      donorLogoVersion: null
+    }) }],
+    ["request failure", { status: 500, body: JSON.stringify({ error: "branding_unavailable" }) }]
+  ] as const) {
+    for (const path of ["/donar", "/donar/stripe/resultado"]) {
+      let releaseBranding: ((route: import("@playwright/test").Route) => void) | undefined;
+      const brandingRequest = new Promise<import("@playwright/test").Route>((resolve) => {
+        releaseBranding = resolve;
+      });
+      await recordDonorLogoNodes(page);
+      await page.route("**/api/branding", (route) => releaseBranding?.(route));
+
+      await page.goto(path, { waitUntil: "domcontentloaded" });
+      await expect(page.locator("#root")).toHaveCSS("visibility", "visible", { timeout: 4_000 });
+      await expect(page.locator("svg.donar-logo"), label).toHaveCount(0);
+
+      const route = await brandingRequest;
+      await route.fulfill({ status: response.status, contentType: "application/json", body: response.body });
+
+      await expect(page.locator("svg.donar-logo"), label).toBeVisible();
+      expect(await recordedDonorLogoNodes(page)).toEqual(["svg"]);
+      await page.unroute("**/api/branding");
+    }
+  }
+});
+
+test("keeps the donor logo space neutral when a configured logo cannot decode", async ({ page }) => {
+  for (const path of ["/donar", "/donar/stripe/resultado"]) {
+    let releaseBranding: ((route: import("@playwright/test").Route) => void) | undefined;
+    const brandingRequest = new Promise<import("@playwright/test").Route>((resolve) => {
+      releaseBranding = resolve;
+    });
+    await recordDonorLogoNodes(page);
+    await page.route("**/api/branding", (route) => releaseBranding?.(route));
+    await page.route("**/api/branding/donor-logo**", (route) =>
+      route.fulfill({ status: 200, contentType: "image/png", body: "not an image" })
+    );
+
+    await page.goto(path, { waitUntil: "domcontentloaded" });
+    await expect(page.locator("#root")).toHaveCSS("visibility", "visible", { timeout: 4_000 });
+    await expect(page.locator("svg.donar-logo")).toHaveCount(0);
+
+    const route = await brandingRequest;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        displayName: BRANDING_DISPLAY_NAME,
+        accentColor: "#000000",
+        supportEmail: BRANDING_SUPPORT_EMAIL,
+        logoVersion: null,
+        donorLogoVersion: "broken-logo"
+      })
+    });
+
+    await expect(page.locator(".donar-logo-placeholder")).toBeVisible();
+    await expect(page.locator(".donar-logo")).toHaveCount(0);
+    expect(await recordedDonorLogoNodes(page)).toEqual([]);
+    await page.unroute("**/api/branding");
+    await page.unroute("**/api/branding/donor-logo**");
+  }
 });
 
 test("keeps the ceremonial browser title across every donor entry route", async ({ page }) => {

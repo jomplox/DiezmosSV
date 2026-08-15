@@ -8,7 +8,10 @@ import {
   brandingFieldError,
   brandingDonorLogoSrc,
   brandingLogoSrc,
-  parseBrandingResponse
+  donorBrandingRequestFailed,
+  parseBrandingResponse,
+  resolveDonorBranding,
+  unresolvedDonorBranding
 } from "../../src/client/branding";
 
 const stylesSource = readFileSync(resolve(import.meta.dirname, "../../src/client/styles.css"), "utf8");
@@ -79,6 +82,47 @@ describe("brandingLogoSrc", () => {
   it("references the public donor logo endpoint separately", () => {
     expect(brandingDonorLogoSrc("donor123")).toBe("/api/branding/donor-logo?v=donor123");
     expect(brandingDonorLogoSrc(null)).toBeNull();
+  });
+});
+
+describe("donor branding resolution", () => {
+  const configuredBranding = {
+    displayName: "Iglesia Central",
+    accentColor: "#123abc",
+    supportEmail: "support@example.org",
+    logoVersion: null,
+    donorLogoVersion: "donor-v1"
+  };
+
+  it("stays identity-neutral until a configured donor logo has decoded", async () => {
+    expect(unresolvedDonorBranding).toMatchObject({ kind: "unresolved", organizationName: null });
+    await expect(resolveDonorBranding(configuredBranding, async () => {})).resolves.toEqual({
+      kind: "configured",
+      organizationName: "Iglesia Central",
+      supportEmail: "support@example.org",
+      logo: {
+        src: "/api/branding/donor-logo?v=donor-v1",
+        name: "Iglesia Central"
+      }
+    });
+  });
+
+  it("selects the stock identity only for an explicit no-logo response or a request failure", async () => {
+    await expect(resolveDonorBranding({ ...configuredBranding, donorLogoVersion: null }, async () => {})).resolves.toMatchObject({
+      kind: "fallback",
+      showStockLogo: true,
+      organizationName: "Iglesia Central"
+    });
+    expect(donorBrandingRequestFailed()).toMatchObject({ kind: "fallback", showStockLogo: true, organizationName: null });
+  });
+
+  it("keeps configured-but-undecodable donor branding identity-neutral", async () => {
+    await expect(resolveDonorBranding(configuredBranding, async () => { throw new Error("decode failed"); })).resolves.toMatchObject({
+      kind: "fallback",
+      showStockLogo: false,
+      organizationName: "Iglesia Central",
+      supportEmail: "support@example.org"
+    });
   });
 });
 
@@ -211,8 +255,8 @@ describe("BrandingEditor edits the support email (source contract)", () => {
 
 describe("Donor landing uses the uploaded logo when present (source contract)", () => {
   it("renders the donor logo image and keeps the built-in vector fallback", () => {
-    expect(donarSource).toContain("brandingDonorLogoSrc");
-    expect(donarSource).toContain("donorLogoVersion");
+    expect(donarSource).toContain("resolveDonorBranding");
+    expect(donarSource).toContain("DonorBrandingLogo");
     expect(donarSource).toContain("OrganizationLogo");
     expect(donarSource).not.toContain("brandingLogoSrc(branding.logoVersion)");
   });

@@ -4321,6 +4321,17 @@ pre {
   margin: 8px auto 2px;
 }
 
+.donar-logo-slot {
+  min-height: 160px;
+  width: 100%;
+}
+
+.donar-logo-placeholder {
+  width: min(300px, 76%);
+  height: 150px;
+  margin: 8px auto 2px;
+}
+
 .donar-logo path {
   fill: #000000;
 }

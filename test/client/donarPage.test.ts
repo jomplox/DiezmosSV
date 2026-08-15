@@ -644,18 +644,6 @@ describe("donor cold-load paints once", () => {
     expect(mainSource).not.toContain("const brandingGate = isDonarPath(window.location.pathname)");
   });
 
-  // Swapping in an <img> that has not been fetched yet paints an empty box and then
-  // reflows when it arrives. Decode before committing it to state.
-  it("decodes the branded donor logo before swapping it in", () => {
-    expect(donarSource).toContain("decode()");
-    expect(donarSource).toContain("markDonorBrandingSettled");
-  });
-
-  it("keeps the built-in vector when the branded donor logo cannot be decoded", () => {
-    expect(donarSource).not.toContain("await image.decode().catch(() => {})");
-    expect(donarSource).toMatch(/catch \{\s+decodedLogo = null;/);
-    expect(donarSource).toContain("setBrandingLogo(decodedLogo)");
-  });
 });
 
 describe("donar wizard source contract", () => {
@@ -1120,7 +1108,7 @@ describe("donar responsive donor layout", () => {
 
     expect(landingBlock).toContain("{DONAR_LANDING_UNIFIER_LEAD}");
     expect(landingBlock).toMatch(
-      /<span className="donar-landing-unifier-church">\s*\{donarLandingUnifierChurch\(organizationName\)\}\s*<DonarFlagBadge country="sv" \/>\.\s*<\/span>/
+      /<span className="donar-landing-unifier-church">\s*\{donarLandingUnifierChurch\(branding\.organizationName\)\}\s*<DonarFlagBadge country="sv" \/>\.\s*<\/span>/
     );
     expect(landingBlock).not.toContain("<br");
     expect(stylesSource).toMatch(
@@ -1218,7 +1206,7 @@ describe("Stripe donar page source contract", () => {
 
   it("shows the production 501c3 explanation and mounts the Stripe form in place", () => {
     const intro = stripeIntro("Iglesia Ejemplo Central");
-    expect(donarSource).toContain("stripeIntro(organizationName)");
+    expect(donarSource).toContain("stripeIntro(branding.organizationName)");
     expect(intro).toContain("Friends of Iglesia Ejemplo Central (501c3)");
     // The US door funds the SAME church — the intro says so, never implying a
     // different beneficiary.
@@ -1436,7 +1424,7 @@ describe("two-door landing source contract", () => {
     expect(donarSource).toContain("DONAR_LANDING_HEADING");
     expect(donarSource).toContain("DONAR_LANDING_SUBTITLE");
     expect(donarSource).toContain("DONAR_LANDING_UNIFIER_LEAD");
-    expect(donarSource).toContain("donarLandingUnifierChurch(organizationName)");
+    expect(donarSource).toContain("donarLandingUnifierChurch(branding.organizationName)");
     expect(donarSource).toContain("DONAR_DOOR_SV_LABEL");
     expect(donarSource).toContain("DONAR_DOOR_SV_DESC");
     expect(donarSource).toContain("DONAR_DOOR_EEUU_LABEL");
@@ -1483,7 +1471,7 @@ describe("two-door landing source contract", () => {
   });
 
   it("renders uploaded landing logos directly on the clean donor card", () => {
-    expect(donarSource).toContain("brandingDonorLogoSrc");
+    expect(donarSource).toContain("resolveDonorBranding");
     expect(donarSource).not.toContain("donar-logo-frame");
     expect(stylesSource).toMatch(/\.donar-logo\s*{[^}]*width:\s*min\(300px,\s*76%\);[^}]*max-height:\s*150px;/s);
   });

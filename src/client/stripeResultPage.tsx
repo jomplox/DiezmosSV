@@ -1,10 +1,14 @@
 import { AlertCircle, CheckCircle2, Clock3, ShieldCheck } from "lucide-react";
 import { useEffect, useState } from "react";
-import { brandingDonorLogoSrc, parseBrandingResponse } from "./branding";
+import {
+  donorBrandingRequestFailed,
+  resolveDonorBranding,
+  unresolvedDonorBranding,
+  type DonorBrandingState
+} from "./branding";
 import {
   DONAR_LANDING_HEADING,
   DONAR_STEP_TITLE_ENTREGA,
-  DONAR_SUPPORT_EMAIL,
   STRIPE_PORTAL_PATH,
   STRIPE_RESULT_POLL_INTERVAL_MS,
   STRIPE_RESULT_POLL_TIMEOUT_MS,
@@ -12,7 +16,7 @@ import {
   stripeSessionIdFromSearch,
   stripeSessionPath
 } from "./donation";
-import { DonarSupport, OrganizationLogo } from "./donarPage";
+import { DonorBrandingLogo, DonarSupport } from "./donarPage";
 import { markDonorBrandingSettled } from "./donorReady";
 import { userFacingErrorMessage } from "./displayText";
 import { formatCents } from "../shared/money";
@@ -82,27 +86,17 @@ export function StripeResultPage() {
   const [view, setView] = useState<StripeResultView>(sessionId ? { kind: "checking" } : { kind: "invalid" });
   const [portalError, setPortalError] = useState("");
   const [openingPortal, setOpeningPortal] = useState(false);
-  const [brandingLogo, setBrandingLogo] = useState<{ src: string; name: string } | null>(null);
-  const [organizationName, setOrganizationName] = useState<string | null>(null);
-  const [supportEmail, setSupportEmail] = useState(DONAR_SUPPORT_EMAIL);
+  const [branding, setBranding] = useState<DonorBrandingState>(unresolvedDonorBranding);
 
   useEffect(() => {
     let cancelled = false;
     void stripePublicApi<unknown>("/api/branding")
-      .then((data) => {
-        if (cancelled) return;
-        const record = data && typeof data === "object" ? data as Record<string, unknown> : {};
-        const displayName = typeof record.displayName === "string" && record.displayName.trim()
-          ? record.displayName.trim()
-          : null;
-        const branding = parseBrandingResponse(data);
-        const src = brandingDonorLogoSrc(branding.donorLogoVersion);
-        setOrganizationName(displayName);
-        setSupportEmail(branding.supportEmail);
-        setBrandingLogo(src ? { src, name: displayName ?? "Logo de la iglesia" } : null);
+      .then(async (data) => {
+        const nextBranding = await resolveDonorBranding(data);
+        if (!cancelled) setBranding(nextBranding);
       })
       .catch(() => {
-        // Keep the neutral vector, wording, and support fallback.
+        if (!cancelled) setBranding(donorBrandingRequestFailed());
       })
       .finally(markDonorBrandingSettled);
     return () => {
@@ -183,11 +177,7 @@ export function StripeResultPage() {
   return (
     <div className="donar-screen">
       <div className="donar-card card donar-thanks donar-stripe-result">
-        {brandingLogo ? (
-          <img className="donar-logo" src={brandingLogo.src} alt={brandingLogo.name} />
-        ) : (
-          <OrganizationLogo organizationName={organizationName} />
-        )}
+        <DonorBrandingLogo branding={branding} />
         <h1>{DONAR_LANDING_HEADING}</h1>
         <p className="donar-step-label">{DONAR_STEP_TITLE_ENTREGA}</p>
         <div className="donar-glyph donar-result-icon">
@@ -247,7 +237,7 @@ export function StripeResultPage() {
         {!confirmed && (
           <a className="link-button donar-result-return" href="/donar?ruta=eeuu">Volver a Diezmos y Ofrendas</a>
         )}
-        <DonarSupport supportEmail={supportEmail} />
+        <DonarSupport supportEmail={branding.supportEmail} />
       </div>
     </div>
   );

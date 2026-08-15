@@ -84,7 +84,13 @@ import {
 } from "./donation";
 import { StripeDonationForm, type StripeCheckoutClientConfig } from "./stripeDonationForm";
 import { catalogOptionLabel, userFacingErrorMessage } from "./displayText";
-import { brandingDonorLogoSrc, parseBrandingResponse } from "./branding";
+import {
+  donorBrandingRequestFailed,
+  parseBrandingResponse,
+  resolveDonorBranding,
+  unresolvedDonorBranding,
+  type DonorBrandingState
+} from "./branding";
 import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "../worker/services/orgLogo";
 import { getCat008Districts, getCat013Municipalities, type CatalogOption } from "../shared/catalogs";
 import { formatDui, isValidDui } from "../shared/dui";
@@ -274,6 +280,20 @@ export function OrganizationLogo({ organizationName }: { organizationName: strin
   );
 }
 
+export function DonorBrandingLogo({ branding }: { branding: DonorBrandingState }) {
+  return (
+    <div className="donar-logo-slot">
+      {branding.kind === "configured" ? (
+        <img className="donar-logo" src={branding.logo.src} alt={branding.logo.name} />
+      ) : branding.kind === "fallback" && branding.showStockLogo ? (
+        <OrganizationLogo organizationName={branding.organizationName} />
+      ) : (
+        <div className="donar-logo-placeholder" aria-hidden="true" />
+      )}
+    </div>
+  );
+}
+
 // Home chooser artwork: preserve its original globe with the official SV flag
 // overlapping at the lower-right. The secondary screen has its own component below.
 function SvWorldIcon() {
@@ -421,19 +441,9 @@ export function DonarPage() {
   // ?ruta=sv / ?ruta=eeuu; null keeps the donor on the chooser. Door "eeuu" opens
   // the Stripe wizard directly, skipping the extranjero mechanics.
   const [door, setDoor] = useState<DonarDoor | null>(() => doorFromSearch(window.location.search));
-  // White-label logo for the landing chooser. When a church has uploaded a logo the
-  // donor page shows it in place of the built-in vector logo; the vector stays as the
-  // fallback. The accent color is deliberately NOT applied here — the donor wizard's
-  // monochrome Gotham brand is a design decision, so only the logo is branded.
-  const [brandingLogo, setBrandingLogo] = useState<{ src: string; name: string } | null>(null);
-  // Donor-facing organization copy must come from the public branding response.
-  // Keep it neutral until a valid configured name arrives instead of exposing the
-  // admin client's historical build placeholder on the public donation page.
-  const [organizationName, setOrganizationName] = useState<string | null>(null);
-  // The church's configured support contact, shown by DonarSupport at the bottom of every
-  // donor card. Seeded with the client-side default so the line renders before (and if)
-  // the /api/branding fetch resolves; replaced with the configured value when it does.
-  const [supportEmail, setSupportEmail] = useState(DONAR_SUPPORT_EMAIL);
+  // Branding begins identity-neutral. Once resolved, it either supplies a decoded donor
+  // logo or explicitly selects the stock/fixed-space fallback.
+  const [branding, setBranding] = useState<DonorBrandingState>(unresolvedDonorBranding);
   // US-donor (Stripe) path state: gift type + frequency (stacked segmented
   // control), the stable identifier for one amount/frequency/gift-type attempt, and the
   // promise that initializes Stripe Embedded Checkout inside Paso 2.
@@ -564,42 +574,16 @@ export function DonarPage() {
     return () => cancelAnimationFrame(resetFrame);
   }, [door, stage, step, usDonation]);
 
-  // Fetch the church's branding for the landing logo (name is used as alt text). Uses
-  // the same unauthenticated /api/branding as the admin; a failure keeps the built-in vector.
+  // Fetch and decode the donor logo before placing any identity in the visible tree.
   useEffect(() => {
     let cancelled = false;
     void donarApi<unknown>("/api/branding")
       .then(async (data) => {
-        if (cancelled) return;
-        const brandingRecord = data && typeof data === "object" ? (data as Record<string, unknown>) : {};
-        const configuredName =
-          typeof brandingRecord.displayName === "string" && brandingRecord.displayName.trim()
-            ? brandingRecord.displayName.trim()
-            : null;
-        const branding = parseBrandingResponse(data);
-        const src = brandingDonorLogoSrc(branding.donorLogoVersion);
-        // Decode BEFORE committing to state. Swapping the built-in vector for an <img>
-        // that has not been fetched yet paints an empty box and reflows when it lands;
-        // decoding first means the swap is a single already-painted frame. A decode
-        // failure just falls through and keeps the vector.
-        let decodedLogo: { src: string; name: string } | null = null;
-        if (src) {
-          const image = new Image();
-          image.src = src;
-          try {
-            await image.decode();
-            decodedLogo = { src, name: configuredName ?? "Logo de la iglesia" };
-          } catch {
-            decodedLogo = null;
-          }
-        }
-        if (cancelled) return;
-        setBrandingLogo(decodedLogo);
-        setOrganizationName(configuredName);
-        setSupportEmail(branding.supportEmail);
+        const nextBranding = await resolveDonorBranding(data);
+        if (!cancelled) setBranding(nextBranding);
       })
       .catch(() => {
-        // Keep the built-in vector and neutral organization wording.
+        if (!cancelled) setBranding(donorBrandingRequestFailed());
       })
       .finally(() => {
         // Success, failure, or a malformed payload — the branded form is now final, so
@@ -963,7 +947,7 @@ export function DonarPage() {
   }
 
   if (stage === "thanks") {
-    return <DonarThankYou monto={form.amount.trim()} supportEmail={supportEmail} />;
+    return <DonarThankYou monto={form.amount.trim()} supportEmail={branding.supportEmail} />;
   }
 
   // The chooser is the first sight of /donar: no door picked yet and no payment
@@ -972,11 +956,7 @@ export function DonarPage() {
     return (
       <div className="donar-screen">
         <div className="donar-card card donar-landing">
-          {brandingLogo ? (
-            <img className="donar-logo" src={brandingLogo.src} alt={brandingLogo.name} />
-          ) : (
-            <OrganizationLogo organizationName={organizationName} />
-          )}
+          <DonorBrandingLogo branding={branding} />
           <h1>{DONAR_LANDING_HEADING}</h1>
           {/* Unifying line: both doors fund the same mother church in El Salvador —
               they differ by residence / payment rail / tax receipt, not beneficiary.
@@ -984,7 +964,7 @@ export function DonarPage() {
               box, leaving an orphaned period). */}
           <p className="donar-landing-unifier">
             <span>{DONAR_LANDING_UNIFIER_LEAD}</span>{" "}
-            <span className="donar-landing-unifier-church">{donarLandingUnifierChurch(organizationName)} <DonarFlagBadge country="sv" />.</span>
+            <span className="donar-landing-unifier-church">{donarLandingUnifierChurch(branding.organizationName)} <DonarFlagBadge country="sv" />.</span>
           </p>
           <p className="donar-landing-subtitle">{DONAR_LANDING_SUBTITLE}</p>
           <div className="donar-doors">
@@ -999,7 +979,7 @@ export function DonarPage() {
               <span className="donar-door-desc">{DONAR_DOOR_EEUU_DESC}</span>
             </button>
           </div>
-          <DonarSupport supportEmail={supportEmail} />
+          <DonarSupport supportEmail={branding.supportEmail} />
         </div>
       </div>
     );
@@ -1364,7 +1344,7 @@ export function DonarPage() {
               {/* tabIndex={-1} makes this programmatically focusable without adding a
                   tab stop: it is the landing point when the donor returns to Stripe. */}
               <p className="donar-intro" ref={stripeIntroRef} tabIndex={-1}>
-                {stripeIntro(organizationName)}
+                {stripeIntro(branding.organizationName)}
               </p>
               {/* One persistent live region for the whole step: the surface swap is
                   silent otherwise, since each switch only unmounts and mounts markup. */}
@@ -1520,7 +1500,7 @@ export function DonarPage() {
           </div>
         )}
 
-        <DonarSupport supportEmail={supportEmail} />
+        <DonarSupport supportEmail={branding.supportEmail} />
       </div>
     </div>
   );

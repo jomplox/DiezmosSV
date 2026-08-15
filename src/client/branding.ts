@@ -58,6 +58,21 @@ export interface Branding {
   donorLogoVersion: string | null;
 }
 
+// Public donor pages must never borrow the stock mark while a configured logo is
+// still unknown. A request failure and an explicitly absent logo can use that
+// identity after resolution; a configured image that cannot decode keeps the
+// reserved space neutral instead.
+export type DonorBrandingState =
+  | { kind: "unresolved"; organizationName: null; supportEmail: string }
+  | { kind: "configured"; organizationName: string | null; supportEmail: string; logo: { src: string; name: string } }
+  | { kind: "fallback"; organizationName: string | null; supportEmail: string; showStockLogo: boolean };
+
+export const unresolvedDonorBranding: DonorBrandingState = {
+  kind: "unresolved",
+  organizationName: null,
+  supportEmail: CLIENT_BRANDING_DEFAULTS.supportEmail
+};
+
 // Normalize the raw /api/branding payload, tolerating anything malformed by falling
 // back to the historical defaults (branding must never break the login screen).
 export function parseBrandingResponse(data: unknown): Branding {
@@ -87,6 +102,49 @@ export function brandingLogoSrc(logoVersion: string | null): string | null {
 
 export function brandingDonorLogoSrc(donorLogoVersion: string | null): string | null {
   return donorLogoVersion ? `/api/branding/donor-logo?v=${donorLogoVersion}` : null;
+}
+
+function configuredOrganizationName(data: unknown): string | null {
+  const record = data && typeof data === "object" ? data as Record<string, unknown> : {};
+  return typeof record.displayName === "string" && record.displayName.trim() ? record.displayName.trim() : null;
+}
+
+async function decodeDonorLogo(src: string): Promise<void> {
+  const image = new Image();
+  image.src = src;
+  await image.decode();
+}
+
+export async function resolveDonorBranding(
+  data: unknown,
+  decode: (src: string) => Promise<void> = decodeDonorLogo
+): Promise<DonorBrandingState> {
+  const branding = parseBrandingResponse(data);
+  const organizationName = configuredOrganizationName(data);
+  const src = brandingDonorLogoSrc(branding.donorLogoVersion);
+  if (!src) {
+    return { kind: "fallback", organizationName, supportEmail: branding.supportEmail, showStockLogo: true };
+  }
+  try {
+    await decode(src);
+    return {
+      kind: "configured",
+      organizationName,
+      supportEmail: branding.supportEmail,
+      logo: { src, name: organizationName ?? "Logo de la iglesia" }
+    };
+  } catch {
+    return { kind: "fallback", organizationName, supportEmail: branding.supportEmail, showStockLogo: false };
+  }
+}
+
+export function donorBrandingRequestFailed(): DonorBrandingState {
+  return {
+    kind: "fallback",
+    organizationName: null,
+    supportEmail: CLIENT_BRANDING_DEFAULTS.supportEmail,
+    showStockLogo: true
+  };
 }
 
 // Apply branding to the live document: accent CSS variable + tab title. Safe to call
