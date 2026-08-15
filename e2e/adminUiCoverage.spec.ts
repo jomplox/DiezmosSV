@@ -351,10 +351,30 @@ test("edits Salvadoran and U.S. email templates separately while identifying the
   let persistedTemplates = Object.fromEntries(definitions
     .filter((definition) => definition.scope === "SV_CDE")
     .map((definition) => [definition.type, { subject: definition.defaultSubject, body: definition.defaultBody }]));
+  const cloneTemplates = (templates: Record<string, { subject: string; body: string }>) => Object.fromEntries(
+    Object.entries(templates).map(([type, template]) => [type, { ...template }])
+  );
   const normalizedTemplates = () => Object.fromEntries(definitions.map((definition) => [
     definition.type,
-    persistedTemplates[definition.type] ?? { subject: definition.defaultSubject, body: definition.defaultBody }
+    { ...(persistedTemplates[definition.type] ?? { subject: definition.defaultSubject, body: definition.defaultBody }) }
   ]));
+  const expectIndependentTemplateLeaves = (
+    requestIndex: number,
+    types: string[],
+    response: Record<string, { subject: string; body: string }> | null
+  ) => {
+    for (const type of types) {
+      const submitted = savedRequests[requestIndex]?.templates[type];
+      const stored = persistedTemplates[type];
+      const returned = response?.[type];
+      expect(submitted).toBeDefined();
+      expect(stored).toBeDefined();
+      expect(returned).toBeDefined();
+      expect(submitted).not.toBe(stored);
+      expect(submitted).not.toBe(returned);
+      expect(stored).not.toBe(returned);
+    }
+  };
   await installOwnerAdmin(page, async (route, url) => {
     if (url.pathname !== "/api/settings/email-templates") return false;
     const method = route.request().method();
@@ -363,12 +383,17 @@ test("edits Salvadoran and U.S. email templates separately while identifying the
         scope?: "SV_CDE" | "US_STRIPE";
         templates: Record<string, { subject: string; body: string }>;
       };
-      savedRequests.push(payload);
-      persistedTemplates = payload.scope ? { ...persistedTemplates, ...payload.templates } : payload.templates;
+      savedRequests.push({ scope: payload.scope, templates: cloneTemplates(payload.templates) });
+      if (payload.scope === "SV_CDE" && savedRequests.length === 1) {
+        persistedTemplates = normalizedTemplates();
+      }
+      persistedTemplates = payload.scope
+        ? { ...cloneTemplates(persistedTemplates), ...cloneTemplates(payload.templates) }
+        : cloneTemplates(payload.templates);
     }
     const templates = normalizedTemplates();
-    if (method === "PUT") lastSavedResponse = templates;
-    else lastGetResponse = templates;
+    if (method === "PUT") lastSavedResponse = cloneTemplates(templates);
+    else lastGetResponse = cloneTemplates(templates);
     await fulfillJson(route, {
       emailTemplates: {
         definitions,
@@ -413,8 +438,11 @@ test("edits Salvadoran and U.S. email templates separately while identifying the
   expect(Object.keys(savedRequests[0]?.templates ?? {}).sort()).toEqual(["dteInvalidation", "dteReceipt"]);
   await expect(page.getByRole("status")).toHaveText("Plantillas de El Salvador actualizadas");
   await expect(page.getByRole("status")).not.toContainText("Vuelva a cargar las plantillas antes de guardar.");
+  expect(Object.keys(persistedTemplates)).toEqual(definitions.map((definition) => definition.type));
+  expect(persistedTemplates.dteReceipt?.subject).toBe(savedSalvadoranSubject);
   expect(Object.keys(lastSavedResponse ?? {})).toEqual(definitions.map((definition) => definition.type));
   expect(lastSavedResponse?.dteReceipt.subject).toBe(savedSalvadoranSubject);
+  expectIndependentTemplateLeaves(0, ["dteReceipt", "dteInvalidation"], lastSavedResponse);
   await expect(receiptSubject).toHaveValue(savedSalvadoranSubject);
 
   await page.reload();
@@ -460,6 +488,7 @@ test("edits Salvadoran and U.S. email templates separately while identifying the
     .toBe("Gracias por su entrega, {{donante}}");
   expect(lastSavedResponse?.stripeAcknowledgment.body).toBe("> Texto");
   expect(lastSavedResponse?.dteReceipt.subject).toBe(savedSalvadoranSubject);
+  expectIndependentTemplateLeaves(1, ["stripeAcknowledgment", "stripeAnnualStatement", "stripeRefund"], lastSavedResponse);
   await expect(receiptSubject).toHaveValue(savedSalvadoranSubject);
 });
 
