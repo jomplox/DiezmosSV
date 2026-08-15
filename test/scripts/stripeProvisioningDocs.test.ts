@@ -12,6 +12,8 @@ const devVars = read(".dev.vars.example");
 const publicWrangler = read("wrangler.toml");
 const annualCertificateRaces = read("e2e/annualCertificateRaces.spec.ts");
 const adminUiCoverage = read("e2e/adminUiCoverage.spec.ts");
+const runbookReceiptStart = "## Frontera de correo de recibo Stripe";
+const runbookReceiptEnd = "## Por qué Embedded Checkout y no un Payment Link";
 
 function boundedReceiptBoundary(
   document: string,
@@ -59,9 +61,9 @@ const requiredRuntimeNames = [
 
 describe("Stripe US giving provisioning documentation", () => {
   it("fails closed when a receipt-boundary sentinel is missing, reversed, or duplicated", () => {
-    const start = "<receipt-start>";
-    const end = "<receipt-end>";
-    const file = "README.fixture.md";
+    const start = runbookReceiptStart;
+    const end = runbookReceiptEnd;
+    const file = "docs/stripe-us-giving.fixture.md";
     const cases = [
       { document: `before ${end}`, expected: `${file}: receipt-email boundary start sentinel is missing` },
       { document: `${start} after`, expected: `${file}: receipt-email boundary end sentinel is missing` },
@@ -102,14 +104,20 @@ describe("Stripe US giving provisioning documentation", () => {
   });
 
   it("documents the account-level Stripe receipt boundary and one-Elim-acknowledgment verification", () => {
-    expect(runbook).toMatch(/receipt_email/);
-    expect(runbook).toMatch(/customer_details\.email/);
-    expect(runbook).toMatch(/Dashboard.*Settings.*Business.*Customer emails.*Payments.*Successful payments/is);
-    expect(runbook).toMatch(/account-level|nivel de cuenta/i);
-    expect(runbook).toMatch(/no.*Checkout Session|ninguna.*Checkout Session/i);
-    expect(runbook).toMatch(/freeze|congelamiento/i);
-    expect(runbook).toMatch(/subscription service emails|correos.*servicio.*suscripci/i);
-    expect(runbook).toMatch(/exactly one Elim-branded acknowledgment|exactamente un acuse.*Elim/is);
+    const runbookBoundary = boundedReceiptBoundary(
+      runbook,
+      "docs/stripe-us-giving.md",
+      runbookReceiptStart,
+      runbookReceiptEnd
+    );
+    expect(runbookBoundary).toMatch(/receipt_email/);
+    expect(runbookBoundary).toMatch(/customer_details\.email/);
+    expect(runbookBoundary).toMatch(/Dashboard.*Settings.*Business.*Customer emails.*Payments.*Successful payments/is);
+    expect(runbookBoundary).toMatch(/account-level|nivel de cuenta/i);
+    expect(runbookBoundary).toMatch(/no.*Checkout Session|ninguna.*Checkout Session/i);
+    expect(runbookBoundary).toMatch(/freeze|congelamiento/i);
+    expect(runbookBoundary).toMatch(/subscription service emails|correos.*servicio.*suscripci/i);
+    expect(runbookBoundary).toMatch(/exactly one Elim-branded acknowledgment|exactamente un acuse.*Elim/is);
 
     const englishBoundary = boundedReceiptBoundary(
       english,

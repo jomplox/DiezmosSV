@@ -40,13 +40,54 @@ function receiptEmailSerializedKeyPaths(serializedBody: string): string[] {
 }
 
 function receiptEmailBoundaryEvidence(serializedBody: string) {
+  if (serializedBody.trim().length === 0) return { passes: false, paths: [] };
   const paths = receiptEmailSerializedKeyPaths(serializedBody);
   return { passes: paths.length === 0, paths };
+}
+
+function serializedStripeFetchBody(body: BodyInit | null | undefined): string {
+  if (body == null) throw new Error("Stripe fetch request body is missing");
+
+  const serialized = typeof body === "string"
+    ? body
+    : body instanceof URLSearchParams
+      ? body.toString()
+      : null;
+  if (serialized === null) throw new Error("Stripe fetch request body type is unsupported");
+  if (serialized.trim().length === 0) throw new Error("Stripe fetch request body is empty");
+  return serialized;
 }
 
 describe("Stripe SDK boundary", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("fails closed when serialized Stripe request evidence is empty", () => {
+    expect(receiptEmailBoundaryEvidence("")).toEqual({ passes: false, paths: [] });
+  });
+
+  it("normalizes the supported Stripe fetch request body shapes", () => {
+    expect(serializedStripeFetchBody("mode=payment")).toBe("mode=payment");
+    expect(serializedStripeFetchBody(new URLSearchParams({ mode: "subscription" })))
+      .toBe("mode=subscription");
+  });
+
+  it("rejects missing Stripe fetch request bodies", () => {
+    for (const body of [undefined, null]) {
+      expect(() => serializedStripeFetchBody(body)).toThrow("Stripe fetch request body is missing");
+    }
+  });
+
+  it("rejects empty Stripe fetch request bodies", () => {
+    for (const body of ["", new URLSearchParams()]) {
+      expect(() => serializedStripeFetchBody(body)).toThrow("Stripe fetch request body is empty");
+    }
+  });
+
+  it("rejects unsupported Stripe fetch request body shapes", () => {
+    expect(() => serializedStripeFetchBody(new Uint8Array([1])))
+      .toThrow("Stripe fetch request body type is unsupported");
   });
 
   it("creates and retrieves deterministic sandbox Checkout and Portal URLs", async () => {
@@ -228,7 +269,7 @@ describe("Stripe SDK boundary", () => {
   it("keeps every serialized one-time and monthly Checkout request free of receipt-email paths", async () => {
     const serializedBodies: string[] = [];
     const fetchMock = vi.fn<typeof fetch>(async (_input, init) => {
-      serializedBodies.push(typeof init?.body === "string" ? init.body : "");
+      serializedBodies.push(serializedStripeFetchBody(init?.body));
       return new Response(JSON.stringify({
         id: "cs_test_serialized_fixture",
         object: "checkout.session",
@@ -294,12 +335,14 @@ describe("Stripe SDK boundary", () => {
       integrationIdentifier
     });
 
-    const modeEvidence = [];
     for (const params of [oneTime, monthly]) {
       await gateway.createCheckoutSession(params, `stripe-checkout:${params.client_reference_id}`);
-      modeEvidence.push(receiptEmailBoundaryEvidence(serializedBodies.at(-1) ?? ""));
     }
-    expect(modeEvidence).toEqual([
+    expect(serializedBodies).toHaveLength(2);
+    expect(serializedBodies.every((body) => body.trim().length > 0)).toBe(true);
+    expect(serializedBodies.map((body) => new URLSearchParams(body).get("mode")))
+      .toEqual(["payment", "subscription"]);
+    expect(serializedBodies.map(receiptEmailBoundaryEvidence)).toEqual([
       { passes: true, paths: [] },
       { passes: true, paths: [] }
     ]);
@@ -316,7 +359,7 @@ describe("Stripe SDK boundary", () => {
         { ...oneTime, ...receiptParameter } as unknown as Stripe.Checkout.SessionCreateParams,
         `stripe-checkout:${label}`
       );
-      expect(receiptEmailBoundaryEvidence(serializedBodies.at(-1) ?? ""))
+      expect(receiptEmailBoundaryEvidence(serializedBodies.at(-1)!))
         .toEqual({ passes: false, paths: [expectedPath] });
     }
   });
