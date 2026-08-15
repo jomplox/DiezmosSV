@@ -14,6 +14,12 @@ export function stripeUsLegalNameForDisplay(value: string): string {
   return FMCE_LEGAL_NAME_DISPLAY_VARIANTS.has(value) ? FMCE_LEGAL_NAME_DISPLAY : value;
 }
 
+export function stripeUsConfiguredLegalNameForDisplay(value: string | undefined): string {
+  const raw = typeof value === "string" ? value : "";
+  const mapped = stripeUsLegalNameForDisplay(raw);
+  return mapped === raw ? raw.trim() : mapped;
+}
+
 export const STRIPE_US_TIME_ZONE_OPTIONS = [
   { value: "America/New_York", label: "Hora del Este — America/New_York" },
   { value: "America/Chicago", label: "Hora Central — America/Chicago" },

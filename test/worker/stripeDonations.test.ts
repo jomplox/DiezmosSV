@@ -204,6 +204,12 @@ describe("Stripe Checkout donation contract", () => {
       ...valid,
       STRIPE_US_LEGAL_NAME: "FRIENDS OF MISIÓN CRISTIANA ELIM"
     }).legalName).toBe("Friends of Misión Cristiana Elim");
+    const whitespacePaddedLegalName = "  FRIENDS OF MISION CRISTIANA ELIM  ";
+    expect(resolveStripeConfiguration({
+      ...valid,
+      STRIPE_US_LEGAL_NAME: whitespacePaddedLegalName
+    }).legalName).toBe("FRIENDS OF MISION CRISTIANA ELIM");
+    expect(whitespacePaddedLegalName).toBe("  FRIENDS OF MISION CRISTIANA ELIM  ");
     expect(valid.STRIPE_US_LEGAL_NAME).toBe("Example Nonprofit");
 
     expect(resolveStripeConfiguration({

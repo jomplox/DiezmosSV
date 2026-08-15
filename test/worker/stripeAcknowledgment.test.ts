@@ -329,15 +329,16 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
   });
 
   it("preserves maximum renderer-safe names, contacts, and all four address lines", async () => {
-    const legalName = `LEGAL ${"L".repeat(74)}`;
-    const signerName = `SIGNER ${"S".repeat(53)}`;
-    const signerTitle = `TITLE ${"T".repeat(54)}`;
-    const supportEmail = `${"e".repeat(88)}@example.org`;
+    const legalName = `LEGAL ${"gypqj".repeat(15).slice(0, 74)}`;
+    const organizationName = `ORG ${"gypqj".repeat(16).slice(0, 76)}`;
+    const signerName = `SIGNER ${"gypqj".repeat(11).slice(0, 53)}`;
+    const signerTitle = `TITLE ${"gypqj".repeat(11).slice(0, 54)}`;
+    const supportEmail = `${"g".repeat(88)}@example.org`;
     const phone = `+1${"2".repeat(38)}`;
     const website = `https://example.org/${"w".repeat(80)}`;
-    const address = [1, 2, 3, 4].map((line) => `ADDRESS-${line} ${"A".repeat(70)}`);
-    expect([legalName.length, signerName.length, signerTitle.length, supportEmail.length, phone.length, website.length])
-      .toEqual([80, 60, 60, 100, 40, 100]);
+    const address = [1, 2, 3, 4].map((line) => `ADDRESS-${line} ${"gypqj".repeat(14)}`);
+    expect([legalName.length, organizationName.length, signerName.length, signerTitle.length, supportEmail.length, phone.length, website.length])
+      .toEqual([80, 80, 60, 60, 100, 40, 100]);
     expect(address.map((line) => line.length)).toEqual([80, 80, 80, 80]);
     const drawText = vi.spyOn(PDFPage.prototype, "drawText");
     const bytes = await renderStripeAcknowledgmentPdf({
@@ -351,7 +352,7 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
       timeZone: "America/New_York",
       legalName,
       ein: "12-3456789",
-      organizationName: "Maximum Contact Ministry",
+      organizationName,
       supportEmail,
       organizationPhone: phone,
       organizationWebsite: website,
@@ -365,6 +366,8 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     const pdfPath = join(directory, "receipt.pdf");
     writeFileSync(pdfPath, bytes);
     const text = execFileSync("pdftotext", ["-layout", pdfPath, "-"], { encoding: "utf8" });
+    const bbox = execFileSync("pdftotext", ["-bbox-layout", pdfPath, "-"], { encoding: "utf8" });
+    expect((await PDFDocument.load(bytes)).getPageCount()).toBe(1);
     for (const marker of ["LEGAL", "SIGNER", "TITLE", "example.org", "ADDRESS-1", "ADDRESS-2", "ADDRESS-3", "ADDRESS-4"]) {
       expect(text).toContain(marker);
     }
@@ -374,6 +377,13 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
       expect(options.x + options.font.widthOfTextAtSize(String(drawn), options.size ?? 12)).toBeLessThanOrEqual(567);
       expect(options.y, String(drawn)).toBeGreaterThanOrEqual(176);
     }
+    const contactBounds = renderedBlockBounds(bbox, "ADDRESS-1");
+    const legalBottom = Math.max(
+      renderedLineBounds(bbox, "12-3456789").yMax,
+      renderedBlockBounds(bbox, "La Fundación").yMax
+    );
+    expect(contactBounds.yMin - legalBottom).toBeGreaterThanOrEqual(12);
+    expect(contactBounds.yMax).toBeLessThan(renderedLineBounds(bbox, "Traigan").yMin);
     const contactCalls = drawText.mock.calls.filter(([drawn, options]) =>
       options?.y !== undefined
       && options.y >= 177
@@ -1061,6 +1071,25 @@ function renderedLineBounds(
     };
   }
   throw new Error(`Rendered PDF line missing: ${textFragment}`);
+}
+
+function renderedBlockBounds(
+  bboxHtml: string,
+  textFragment: string
+): { xMin: number; yMin: number; xMax: number; yMax: number } {
+  for (const match of bboxHtml.matchAll(
+    /<block xMin="([\d.]+)" yMin="([\d.]+)" xMax="([\d.]+)" yMax="([\d.]+)">([\s\S]*?)<\/block>/gu
+  )) {
+    const renderedText = match[5]?.replace(/<[^>]+>/gu, " ").replace(/\s+/gu, " ") ?? "";
+    if (!renderedText.includes(textFragment)) continue;
+    return {
+      xMin: Number(match[1]),
+      yMin: Number(match[2]),
+      xMax: Number(match[3]),
+      yMax: Number(match[4])
+    };
+  }
+  throw new Error(`Rendered PDF block missing: ${textFragment}`);
 }
 
 async function seedGift(repo: Repository): Promise<void> {

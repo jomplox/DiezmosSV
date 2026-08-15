@@ -855,6 +855,96 @@ describe("Stripe U.S. annual statement preview and delivery", () => {
     expect(normalizedText).toMatch(/Statement No\. AGS-2025-[A-F0-9]{8}/);
   });
 
+  it("reserves newly mapped annual evidence with the exact FMCE display name", async () => {
+    seedGift(database, gift({ id: "gift_annual_legal_name_display" }));
+    const configuredEnv = configuredAnnualEnv(
+      workerEnv,
+      "FRIENDS OF MISION CRISTIANA ELIM"
+    );
+
+    await expect(sendStripeAnnualStatements(configuredEnv, repo, 2025, false, "user_operator", {
+      donor: "ana@example.org",
+      now: "2026-01-10T12:00:00.000Z"
+    })).resolves.toMatchObject({ sent: 1, failed: 0, review: 0 });
+
+    const row = database.prepare(
+      "SELECT snapshot_json FROM stripe_annual_statement_deliveries"
+    ).get() as { snapshot_json: string };
+    expect(JSON.parse(row.snapshot_json)).toMatchObject({
+      document: { legalName: "Friends of Misión Cristiana Elim" }
+    });
+    expect(configuredEnv.STRIPE_US_LEGAL_NAME).toBe("FRIENDS OF MISION CRISTIANA ELIM");
+  });
+
+  it("keeps frozen annual snapshot bytes unchanged across mapped read and corrected delivery", async () => {
+    const annualGift = gift({ id: "gift_frozen_annual_legal_name" });
+    seedGift(database, annualGift);
+    const frozen = await buildStripeAnnualStatementSnapshot({
+      year: 2025,
+      livemode: false,
+      donorKey: "ana@example.org",
+      donorName: "Ana",
+      donorEmail: "ana@example.org",
+      document: statementDocument({
+        legalName: "FRIENDS OF MISION CRISTIANA ELIM",
+        ein: "82-0889012",
+        organizationContact: {
+          phone: "+1 (786) 505-8446",
+          website: "https://www.elim.click",
+          mailingAddress: [
+            "2885 Sanford Ave SW, PMB 41357",
+            "Grandville, MI 49418, USA"
+          ]
+        }
+      }),
+      gifts: [annualGift]
+    });
+    insertSentStatement(database, "delivery_frozen_annual_legal_name", frozen);
+    const frozenBytes = Buffer.from(frozen.canonicalJson, "utf8");
+
+    await expect(sendStripeAnnualStatements(
+      configuredAnnualEnv(workerEnv, "FRIENDS OF MISION CRISTIANA ELIM"),
+      repo,
+      2025,
+      false,
+      "user_operator",
+      { donor: "ana@example.org", now: "2026-01-10T12:01:00.000Z" }
+    )).resolves.toMatchObject({ sent: 1, failed: 0, review: 0 });
+
+    const rows = database.prepare(
+      `SELECT id, revision, supersedes_delivery_id, status, snapshot_hash, snapshot_json
+         FROM stripe_annual_statement_deliveries ORDER BY revision`
+    ).all() as Array<{
+      id: string;
+      revision: number;
+      supersedes_delivery_id: string | null;
+      status: string;
+      snapshot_hash: string;
+      snapshot_json: string;
+    }>;
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
+      id: "delivery_frozen_annual_legal_name",
+      revision: 1,
+      supersedes_delivery_id: null,
+      status: "SENT",
+      snapshot_hash: frozen.hash
+    });
+    expect(Buffer.from(rows[0]!.snapshot_json, "utf8").equals(frozenBytes)).toBe(true);
+    expect(JSON.parse(rows[0]!.snapshot_json)).toMatchObject({
+      document: { legalName: "FRIENDS OF MISION CRISTIANA ELIM" }
+    });
+    expect(rows[1]).toMatchObject({
+      revision: 2,
+      supersedes_delivery_id: "delivery_frozen_annual_legal_name",
+      status: "SENT"
+    });
+    expect(JSON.parse(rows[1]!.snapshot_json)).toMatchObject({
+      document: { legalName: "Friends of Misión Cristiana Elim" }
+    });
+    expect(emailSend).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps mutable email branding separate from immutable annual artwork evidence", async () => {
     seedGift(database, gift({ id: "gift_branding_boundary", donor_email: "branding-boundary@example.org" }));
     const emailLogo = JSON.stringify({
@@ -1703,4 +1793,53 @@ function insertPendingStatement(
     "2026-01-10T11:00:00.000Z",
     "2026-01-10T11:00:00.000Z"
   );
+}
+
+function insertSentStatement(
+  database: ReturnType<typeof migratedDatabase>,
+  id: string,
+  snapshot: Awaited<ReturnType<typeof buildStripeAnnualStatementSnapshot>>
+): void {
+  database.prepare(
+    `INSERT INTO stripe_annual_statement_deliveries (
+       id, year, livemode, donor_key, donor_name, donor_email,
+       snapshot_hash, snapshot_json, revision, supersedes_delivery_id,
+       status, attempt_count, processing_claim_id, lease_expires_at,
+       dispatch_started_at, provider_id_hash, failure_code, retry_safe,
+       sent_at, created_at, updated_at
+     ) VALUES (?, 2025, 0, ?, ?, ?, ?, ?, 1, NULL,
+       'SENT', 1, NULL, NULL, ?, ?, NULL, 0, ?, ?, ?)`
+  ).run(
+    id,
+    snapshot.donor.key,
+    snapshot.donor.name,
+    snapshot.donor.email,
+    snapshot.hash,
+    snapshot.canonicalJson,
+    "2026-01-10T11:00:00.000Z",
+    `sha256:${"f".repeat(64)}`,
+    "2026-01-10T11:00:00.000Z",
+    "2026-01-10T11:00:00.000Z",
+    "2026-01-10T11:00:00.000Z"
+  );
+}
+
+function configuredAnnualEnv(base: Env, legalName: string): Env {
+  return {
+    ...base,
+    STRIPE_MOCK_MODE: undefined,
+    STRIPE_RESTRICTED_KEY: "rk_test_annual_legal_name",
+    STRIPE_PUBLISHABLE_KEY: "pk_test_annual_legal_name",
+    STRIPE_WEBHOOK_SECRET: "whsec_annual_legal_name",
+    STRIPE_PAYMENT_METHOD_CONFIGURATION_ID: "pmc_annual_legal_name",
+    STRIPE_BILLING_PORTAL_CONFIGURATION_ID: "bpc_annual_legal_name",
+    STRIPE_US_LEGAL_NAME: legalName,
+    STRIPE_US_EIN: "82-0889012",
+    STRIPE_US_TIME_ZONE: "America/New_York",
+    STRIPE_US_PHONE: "+1 (786) 505-8446",
+    STRIPE_US_WEBSITE: "https://www.elim.click",
+    STRIPE_US_MAILING_ADDRESS: "2885 Sanford Ave SW, PMB 41357\nGrandville, MI 49418, USA",
+    STRIPE_US_SIGNER_NAME: "Mathieu Guély",
+    STRIPE_US_SIGNER_TITLE: "Treasurer"
+  };
 }

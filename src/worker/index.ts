@@ -105,7 +105,7 @@ import {
 } from "./services/stripeAnnualStatement";
 import { AnalyticsCapacityError, computeAnalytics, elSalvadorRangeWindow, type AnalyticsRange } from "./services/analytics";
 import { CAT012_DEPARTMENTS, CAT020_COUNTRIES, CAT022_DOCUMENT_TYPES, findCatalogOption } from "../shared/catalogs";
-import { stripeUsLegalNameForDisplay } from "../shared/stripeUsConfiguration";
+import { stripeUsConfiguredLegalNameForDisplay } from "../shared/stripeUsConfiguration";
 import { aggregateDonorContacts, buildContactsCsv, resolveContactColumns, contactsCsvFilename } from "./services/contacts";
 import { buildDonorExplorerCsv, donorExplorerCsvFilename } from "./services/donorExport";
 import { buildF960Csv, buildF960Selection, buildF960Xlsx, XLSX_MIME, type F960Selection } from "./services/f960";
@@ -3965,7 +3965,7 @@ async function handleStripeSettings(ctx: ApiRouteContext): Promise<Response> {
         credentials: status.groups.stripe,
         operational: status.stripeOperational,
         configuration: {
-          legalName: stripeUsLegalNameForDisplay(ctx.env.STRIPE_US_LEGAL_NAME?.trim() ?? ""),
+          legalName: stripeUsConfiguredLegalNameForDisplay(ctx.env.STRIPE_US_LEGAL_NAME),
           ein: ctx.env.STRIPE_US_EIN?.trim() ?? "",
           timeZone: ctx.env.STRIPE_US_TIME_ZONE?.trim() ?? "",
           organizationPhone: ctx.env.STRIPE_US_PHONE?.trim() ?? "",
@@ -3986,9 +3986,9 @@ async function handleStripeSettings(ctx: ApiRouteContext): Promise<Response> {
     malformed: "throw"
   })) as StripeCredentialUpdateInput;
   try {
-    const configuredLegalName = ctx.env.STRIPE_US_LEGAL_NAME?.trim() ?? "";
+    const configuredLegalName = ctx.env.STRIPE_US_LEGAL_NAME;
     const submittedLegalName = input.legalName?.trim();
-    const credentialInput = submittedLegalName === stripeUsLegalNameForDisplay(configuredLegalName)
+    const credentialInput = submittedLegalName === stripeUsConfiguredLegalNameForDisplay(configuredLegalName)
       ? { ...input, legalName: configuredLegalName }
       : input;
     const patch = buildStripeCredentialSecretPatch(credentialInput, ctx.env);
