@@ -30,7 +30,7 @@ import {
   Users
 } from "lucide-react";
 import { Fragment, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
-import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, DocumentListPage, DonationIntentListItem, DteDocument, EmailSenderState, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, FiscalCorrectionData, FiscalCorrectionProtectedContext, FiscalReconciliationState, ReceiptEmailDeliveryState, StripeAcknowledgmentReconciliationItem, StripeAnnualStatementPreview, StripeAnnualStatementPreviewDonor, StripeAnnualStatementSendResult, StripeSettingsState, User, WompiIssuanceFailureItem, WompiNotificationSettings } from "./types";
+import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, DocumentListPage, DonationIntentListItem, DteDocument, EmailSenderState, EmailTemplateScope, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, FiscalCorrectionData, FiscalCorrectionProtectedContext, FiscalReconciliationState, ReceiptEmailDeliveryState, StripeAcknowledgmentReconciliationItem, StripeAnnualStatementPreview, StripeAnnualStatementPreviewDonor, StripeAnnualStatementSendResult, StripeSettingsState, User, WompiIssuanceFailureItem, WompiNotificationSettings } from "./types";
 import {
   resolveAuthBootstrapStatus,
   shouldShowBootstrapMode,
@@ -45,7 +45,18 @@ import { passwordResetConfirmValidationMessage } from "./passwordReset";
 import { isDonarGraciasPath, isDonarPath, isStripeResultPath } from "./donation";
 import { DonarGraciasPage, DonarPage } from "./donarPage";
 import { StripeResultPage } from "./stripeResultPage";
-import { type CredentialSettingsSectionId } from "./credentialSettings";
+import {
+  STRIPE_ORGANIZATION_PENDING_WRITE_TTL_MS,
+  createStripeSettingsRequestGate,
+  reconcileEmailTemplateDraft,
+  reconcileStripeOrganizationDraft,
+  resolveStripeOrganizationHydration,
+  stripeOrganizationDirtyPatch,
+  stripeOrganizationPendingWrite,
+  type CredentialSettingsSectionId,
+  type StripeOrganizationConfiguration,
+  type StripeOrganizationPendingWrite
+} from "./credentialSettings";
 import { AnalyticsView } from "./analyticsView";
 import { analyticsRangePresets, type AnalyticsRangePreset, type GiftTypeFilter } from "./analytics";
 import { DonorsView } from "./donorsView";
@@ -95,7 +106,7 @@ import {
 } from "../shared/catalogs";
 import { cleanDui, isDuiDocumentType, isValidDui } from "../shared/dui";
 import { formatElSalvadorDateTime } from "../shared/legalWindows";
-import { cloneEmailTemplates, CredentialsPanel } from "./credentialsPanel";
+import { cloneEmailTemplates, CredentialsPanel, scopedEmailTemplates } from "./credentialsPanel";
 import {
   AnnualCertificatePanel,
   BackupsPanel,
@@ -165,6 +176,12 @@ interface AutomaticRefreshFlight {
   state: "pending" | "completed";
   followerQueued: boolean;
   retryUsed: boolean;
+}
+
+interface StripeSettingsRefresh {
+  settings: StripeSettingsState;
+  baseline: StripeOrganizationConfiguration | null;
+  commit: (operation: () => void) => boolean;
 }
 
 // The general Documents status picker keeps a combined fiscal failure option. The
@@ -422,6 +439,16 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   const stripeStatementSearchInputGenerationRef = useRef(0);
   const annualReportOperationClaimsRef = useRef(new Map<string, symbol>());
   const automaticRefreshFlightRef = useRef<AutomaticRefreshFlight | null>(null);
+  // Guardar la organización de Stripe publica una versión nueva del Worker, así que
+  // durante la ventana de propagación un GET /api/settings/stripe puede atenderlo un
+  // isolate con el env anterior. Este registro guarda lo último que este cliente escribió
+  // con éxito, con su hora, para que ninguna rehidratación revierta el campo recién
+  // guardado mientras dura esa ventana.
+  const stripeOrganizationPendingWriteRef = useRef<StripeOrganizationPendingWrite | null>(null);
+  const stripeOrganizationPendingExpiryTimerRef = useRef<number | null>(null);
+  const stripeOrganizationBaselineRef = useRef<StripeOrganizationConfiguration | null>(null);
+  const stripeOrganizationLatestServerRef = useRef<StripeOrganizationConfiguration | null>(null);
+  const stripeSettingsRequestsRef = useRef(createStripeSettingsRequestGate());
   // CRM contacts export customization: period preset (with optional custom range), a
   // gift-type filter, and the selected CSV columns (all on by default).
   const [contactsPeriod, setContactsPeriod] = useState<ContactsPeriod>("todo");
@@ -509,6 +536,11 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     stripeStatementSearchInputGenerationRef.current += 1;
     annualReportOperationClaimsRef.current.clear();
     automaticRefreshFlightRef.current = null;
+    stripeSettingsRequestsRef.current.invalidate();
+    if (stripeOrganizationPendingExpiryTimerRef.current !== null) {
+      window.clearTimeout(stripeOrganizationPendingExpiryTimerRef.current);
+      stripeOrganizationPendingExpiryTimerRef.current = null;
+    }
     runActionOwnersRef.current.clear();
     runActionBusyNamesRef.current.clear();
   }, []);
@@ -518,7 +550,10 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     if (!allowed) return;
     const credentialEnvironment = allowed === "01" ? "production" : "test";
     setCredentialInput((current) =>
-      current.environment === credentialEnvironment ? current : emptyCredentialInput(credentialEnvironment)
+      current.environment === credentialEnvironment ? current : {
+        ...emptyCredentialInput(credentialEnvironment),
+        ...preservedStripeOrganizationInput(current)
+      }
     );
   }, [emissionEnvironment]);
 
@@ -820,6 +855,17 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     return runAccountOperation(() => api<T>(path, token, options));
   }
 
+  async function fetchStripeSettings(): Promise<StripeSettingsRefresh | null> {
+    const stripeSettingsRequest = stripeSettingsRequestsRef.current.start();
+    const baseline = stripeOrganizationBaselineRef.current;
+    const result = await accountApi<{ stripe: StripeSettingsState }>("/api/settings/stripe");
+    return {
+      settings: result.stripe,
+      baseline,
+      commit: stripeSettingsRequest.commit
+    };
+  }
+
   function commitRefreshState(control: RunActionControl | undefined, operation: () => void): boolean {
     if (control) {
       return control.commit(operation);
@@ -918,9 +964,9 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       commitRefreshState(control, () => setEmissionEnvironment(environmentResult.emissionEnvironment));
     }
     if (view === "credentials" && can(user, "OWNER")) {
-      const [credentialResult, stripeResult, acknowledgmentResult, environmentResult, emailTemplateResult, emailSenderResult, wompiNotificationResult, alertEmailResult] = await Promise.all([
+      const [credentialResult, stripeRefresh, acknowledgmentResult, environmentResult, emailTemplateResult, emailSenderResult, wompiNotificationResult, alertEmailResult] = await Promise.all([
         accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
-        accountApi<{ stripe: StripeSettingsState }>("/api/settings/stripe"),
+        fetchStripeSettings(),
         accountApi<{ acknowledgments: StripeAcknowledgmentReconciliationItem[] }>("/api/settings/stripe/acknowledgments"),
         accountApi<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment"),
         accountApi<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates"),
@@ -930,8 +976,9 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       ]);
       commitRefreshState(control, () => {
         setCredentials(credentialResult.credentials);
-        setStripeSettings(stripeResult.stripe);
-        setStripeRotationStatusStale(false);
+        if (stripeRefresh && applyStripeSettingsRefresh(stripeRefresh)) {
+          setStripeRotationStatusStale(false);
+        }
         setStripeAcknowledgmentReconciliation(acknowledgmentResult.acknowledgments);
         setEmissionEnvironment(environmentResult.emissionEnvironment);
         applyEmailTemplates(emailTemplateResult.emailTemplates);
@@ -1109,6 +1156,14 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     stripeStatementSearchInputGenerationRef.current += 1;
     annualReportOperationClaimsRef.current.clear();
     automaticRefreshFlightRef.current = null;
+    stripeSettingsRequestsRef.current.invalidate();
+    stripeOrganizationPendingWriteRef.current = null;
+    stripeOrganizationBaselineRef.current = null;
+    stripeOrganizationLatestServerRef.current = null;
+    if (stripeOrganizationPendingExpiryTimerRef.current !== null) {
+      window.clearTimeout(stripeOrganizationPendingExpiryTimerRef.current);
+      stripeOrganizationPendingExpiryTimerRef.current = null;
+    }
     setSettledCertificateSearchRevision(certificateSearchInputGenerationRef.current);
     setSettledStripeStatementSearchRevision(stripeStatementSearchInputGenerationRef.current);
     const certificateResetYear = String(new Date().getFullYear());
@@ -2277,7 +2332,10 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       ]);
       control.commit(() => {
         setToast(`Secretos actualizados: ${result.updated.length}`);
-        setCredentialInput(emptyCredentialInput(credentialInput.environment));
+        setCredentialInput((current) => ({
+          ...emptyCredentialInput(current.environment),
+          ...preservedStripeOrganizationInput(current)
+        }));
         setCredentials(credentialResult.credentials);
         applyEmailSender(emailSenderResult.emailSender);
       });
@@ -2286,33 +2344,52 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
 
   async function updateStripeCredentials() {
     await runAction("stripe-credentials", async (control) => {
+      const organization = stripeOrganizationFromCredentialInput(credentialInput);
+      const organizationBaseline = stripeOrganizationBaselineRef.current;
+      if (!organizationBaseline) {
+        setToast("Actualice la configuración de Stripe antes de guardar cambios.");
+        return;
+      }
+      const organizationPatch = stripeOrganizationDirtyPatch(organization, organizationBaseline);
       const body = {
         restrictedKey: credentialInput.stripeRestrictedKey,
         publishableKey: credentialInput.stripePublishableKey,
         paymentMethodConfigurationId: credentialInput.stripePaymentMethodConfigurationId,
         billingPortalConfigurationId: credentialInput.stripeBillingPortalConfigurationId,
-        legalName: credentialInput.stripeLegalName,
-        ein: credentialInput.stripeEin,
-        timeZone: credentialInput.stripeTimeZone,
-        organizationPhone: credentialInput.stripeOrganizationPhone,
-        organizationWebsite: credentialInput.stripeOrganizationWebsite,
-        organizationMailingAddress: credentialInput.stripeOrganizationMailingAddress,
-        signerName: credentialInput.stripeSignerName,
-        signerTitle: credentialInput.stripeSignerTitle
+        ...organizationPatch
       };
       const result = await accountApi<{ updated: string[] }>("/api/settings/stripe", { method: "POST", body });
+      stripeSettingsRequestsRef.current.invalidate();
       if (!control.commit(() => {
-        setCredentialInput((current) => ({ ...current, ...emptyStripeCredentialInput() }));
+        const pendingWrite = stripeOrganizationPendingWrite(organizationPatch, result.updated, Date.now());
+        if (pendingWrite) {
+          stripeOrganizationPendingWriteRef.current = {
+            values: {
+              ...stripeOrganizationPendingWriteRef.current?.values,
+              ...pendingWrite.values
+            },
+            savedAt: pendingWrite.savedAt
+          };
+          stripeOrganizationBaselineRef.current = {
+            ...organizationBaseline,
+            ...pendingWrite.values
+          };
+          scheduleStripeOrganizationPendingExpiry();
+        }
+        setCredentialInput((current) => ({
+          ...current,
+          ...emptyStripeWriteOnlyInput()
+        }));
         setToast(`Configuración de Stripe actualizada: ${result.updated.length}`);
       })) {
         return;
       }
       let credentialResult: { credentials: CredentialStatus };
-      let stripeResult: { stripe: StripeSettingsState };
+      let stripeRefresh: StripeSettingsRefresh | null;
       try {
-        [credentialResult, stripeResult] = await Promise.all([
+        [credentialResult, stripeRefresh] = await Promise.all([
           accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
-          accountApi<{ stripe: StripeSettingsState }>("/api/settings/stripe")
+          fetchStripeSettings()
         ]);
       } catch (error) {
         if (isApiError(error) && error.status === 401) {
@@ -2325,8 +2402,9 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       }
       control.commit(() => {
         setCredentials(credentialResult.credentials);
-        setStripeSettings(stripeResult.stripe);
-        setStripeRotationStatusStale(false);
+        if (stripeRefresh && applyStripeSettingsRefresh(stripeRefresh)) {
+          setStripeRotationStatusStale(false);
+        }
       });
     });
   }
@@ -2337,6 +2415,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
         method: "POST",
         body: { webhookSecretNext: credentialInput.stripeWebhookSecretNext }
       });
+      stripeSettingsRequestsRef.current.invalidate();
       if (!control.commit(() => {
         setCredentialInput((current) => ({ ...current, stripeWebhookSecretNext: "" }));
         setToast("Secreto siguiente preparado");
@@ -2344,11 +2423,11 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
         return;
       }
       let credentialResult: { credentials: CredentialStatus };
-      let stripeResult: { stripe: StripeSettingsState };
+      let stripeRefresh: StripeSettingsRefresh | null;
       try {
-        [credentialResult, stripeResult] = await Promise.all([
+        [credentialResult, stripeRefresh] = await Promise.all([
           accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
-          accountApi<{ stripe: StripeSettingsState }>("/api/settings/stripe")
+          fetchStripeSettings()
         ]);
       } catch (error) {
         if (isApiError(error) && error.status === 401) {
@@ -2362,8 +2441,9 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       }
       control.commit(() => {
         setCredentials(credentialResult.credentials);
-        setStripeSettings(stripeResult.stripe);
-        setStripeRotationStatusStale(false);
+        if (stripeRefresh && applyStripeSettingsRefresh(stripeRefresh)) {
+          setStripeRotationStatusStale(false);
+        }
       });
     });
   }
@@ -2371,19 +2451,21 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   async function promoteStripeWebhookSecret() {
     await runAction("stripe-webhook-promote", async (control) => {
       await accountApi("/api/settings/stripe/webhook-secret/promote", { method: "POST" });
+      stripeSettingsRequestsRef.current.invalidate();
       if (!control.commit(() => {
         setStripeRotationStatusStale(true);
         setToast("Secreto preparado promovido");
       })) return;
       try {
-        const [credentialResult, stripeResult] = await Promise.all([
+        const [credentialResult, stripeRefresh] = await Promise.all([
           accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
-          accountApi<{ stripe: StripeSettingsState }>("/api/settings/stripe")
+          fetchStripeSettings()
         ]);
         control.commit(() => {
           setCredentials(credentialResult.credentials);
-          setStripeSettings(stripeResult.stripe);
-          setStripeRotationStatusStale(false);
+          if (stripeRefresh && applyStripeSettingsRefresh(stripeRefresh)) {
+            setStripeRotationStatusStale(false);
+          }
         });
       } catch (error) {
         if (isApiError(error) && error.status === 401) throw error;
@@ -2397,19 +2479,21 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   async function cancelStripeWebhookSecret() {
     await runAction("stripe-webhook-cancel", async (control) => {
       await accountApi("/api/settings/stripe/webhook-secret/cancel", { method: "POST" });
+      stripeSettingsRequestsRef.current.invalidate();
       if (!control.commit(() => {
         setStripeRotationStatusStale(true);
         setToast("Secreto preparado cancelado");
       })) return;
       try {
-        const [credentialResult, stripeResult] = await Promise.all([
+        const [credentialResult, stripeRefresh] = await Promise.all([
           accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
-          accountApi<{ stripe: StripeSettingsState }>("/api/settings/stripe")
+          fetchStripeSettings()
         ]);
         control.commit(() => {
           setCredentials(credentialResult.credentials);
-          setStripeSettings(stripeResult.stripe);
-          setStripeRotationStatusStale(false);
+          if (stripeRefresh && applyStripeSettingsRefresh(stripeRefresh)) {
+            setStripeRotationStatusStale(false);
+          }
         });
       } catch (error) {
         if (isApiError(error) && error.status === 401) throw error;
@@ -2462,6 +2546,72 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     setEmailTemplateDraft(cloneEmailTemplates(settings.templates));
   }
 
+  function scheduleStripeOrganizationPendingExpiry() {
+    if (stripeOrganizationPendingExpiryTimerRef.current !== null) {
+      window.clearTimeout(stripeOrganizationPendingExpiryTimerRef.current);
+      stripeOrganizationPendingExpiryTimerRef.current = null;
+    }
+    const pendingWrite = stripeOrganizationPendingWriteRef.current;
+    if (!pendingWrite) return;
+    const delay = Math.max(
+      0,
+      pendingWrite.savedAt + STRIPE_ORGANIZATION_PENDING_WRITE_TTL_MS - Date.now() + 1
+    );
+    stripeOrganizationPendingExpiryTimerRef.current = window.setTimeout(() => {
+      stripeOrganizationPendingExpiryTimerRef.current = null;
+      if (stripeOrganizationPendingWriteRef.current !== pendingWrite) {
+        scheduleStripeOrganizationPendingExpiry();
+        return;
+      }
+      const latestServerConfiguration = stripeOrganizationLatestServerRef.current;
+      if (latestServerConfiguration) {
+        const baseline = stripeOrganizationBaselineRef.current ?? latestServerConfiguration;
+        const resolved = resolveStripeOrganizationHydration(latestServerConfiguration, pendingWrite, Date.now());
+        if (resolved.pendingWrite) {
+          scheduleStripeOrganizationPendingExpiry();
+          return;
+        }
+        stripeOrganizationPendingWriteRef.current = null;
+        stripeOrganizationBaselineRef.current = resolved.configuration;
+        setCredentialInput((current) => {
+          const currentOrganization = stripeOrganizationFromCredentialInput(current);
+          const reconciled = reconcileStripeOrganizationDraft(currentOrganization, baseline, resolved.configuration);
+          return { ...current, ...stripeOrganizationCredentialInput(reconciled) };
+        });
+      }
+      void fetchStripeSettings()
+        .then((refresh) => {
+          if (refresh) applyStripeSettingsRefresh(refresh);
+        })
+        .catch((error) => {
+          if (!(error instanceof StaleAccountStateError)) setStripeRotationStatusStale(true);
+        });
+    }, delay);
+  }
+
+  function applyStripeSettingsRefresh(refresh: StripeSettingsRefresh): boolean {
+    return refresh.commit(() => {
+      const { settings } = refresh;
+      setStripeSettings(settings);
+      stripeOrganizationLatestServerRef.current = settings.configuration;
+      const resolved = resolveStripeOrganizationHydration(settings.configuration, stripeOrganizationPendingWriteRef.current, Date.now());
+      stripeOrganizationPendingWriteRef.current = resolved.pendingWrite;
+      const baseline = refresh.baseline ?? stripeOrganizationBaselineRef.current;
+      setCredentialInput((current) => {
+        const currentOrganization = stripeOrganizationFromCredentialInput(current);
+        const reconciled = baseline
+          ? reconcileStripeOrganizationDraft(currentOrganization, baseline, resolved.configuration)
+          : resolved.configuration;
+        return {
+          ...current,
+          ...stripeOrganizationCredentialInput(reconciled)
+        };
+      });
+      stripeOrganizationBaselineRef.current = resolved.configuration;
+      scheduleStripeOrganizationPendingExpiry();
+    });
+  }
+
   function applyEmailSender(sender: EmailSenderState) {
     setEmailSender(sender);
     setEmailSenderDraft(sender.senderName);
@@ -2485,15 +2635,31 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     });
   }
 
-  async function updateEmailTemplates() {
+  async function updateEmailTemplates(scope: EmailTemplateScope) {
     await runAction("email-templates", async (control) => {
+      // Cada botón anuncia un país y debe escribir solo ese país. El servidor fusiona el
+      // grupo enviado sobre lo que tiene guardado en ese instante; completar aquí el otro
+      // grupo con la copia cargada al abrir el panel revertiría lo que otro propietario
+      // guardó mientras tanto.
+      const baseline = cloneEmailTemplates(emailTemplates?.templates ?? {});
+      const requestDraft = cloneEmailTemplates(emailTemplateDraft);
+      const submittedTemplates = scopedEmailTemplates(emailTemplates, requestDraft, scope);
       const result = await accountApi<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates", {
         method: "PUT",
-        body: { templates: emailTemplateDraft }
+        body: { scope, templates: submittedTemplates }
       });
       control.commit(() => {
-        applyEmailTemplates(result.emailTemplates);
-        setToast("Plantillas de correo actualizadas");
+        setEmailTemplates(result.emailTemplates);
+        setEmailTemplateDraft((current) => reconcileEmailTemplateDraft(
+          current,
+          requestDraft,
+          result.emailTemplates.templates,
+          baseline,
+          Object.keys(submittedTemplates)
+        ));
+        setToast(scope === "US_STRIPE"
+          ? "Plantillas de EE. UU. actualizadas"
+          : "Plantillas de El Salvador actualizadas");
       });
     });
   }
@@ -3115,9 +3281,9 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
             onBootstrapWriter={bootstrapCredentialWriter}
             runAccountOperation={runAccountOperation}
             onRefresh={async () => {
-              const [credentialResult, stripeResult, acknowledgmentResult, environmentResult, emailTemplateResult, emailSenderResult, wompiNotificationResult, alertEmailResult] = await Promise.all([
+              const [credentialResult, stripeRefresh, acknowledgmentResult, environmentResult, emailTemplateResult, emailSenderResult, wompiNotificationResult, alertEmailResult] = await Promise.all([
                 accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
-                accountApi<{ stripe: StripeSettingsState }>("/api/settings/stripe"),
+                fetchStripeSettings(),
                 accountApi<{ acknowledgments: StripeAcknowledgmentReconciliationItem[] }>("/api/settings/stripe/acknowledgments"),
                 accountApi<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment"),
                 accountApi<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates"),
@@ -3126,8 +3292,9 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
                 accountApi<AlertEmailState>("/api/settings/alert-email")
               ]);
               setCredentials(credentialResult.credentials);
-              setStripeSettings(stripeResult.stripe);
-              setStripeRotationStatusStale(false);
+              if (stripeRefresh && applyStripeSettingsRefresh(stripeRefresh)) {
+                setStripeRotationStatusStale(false);
+              }
               setStripeAcknowledgmentReconciliation(acknowledgmentResult.acknowledgments);
               setEmissionEnvironment(environmentResult.emissionEnvironment);
               applyEmailTemplates(emailTemplateResult.emailTemplates);
@@ -4879,18 +5046,82 @@ function emptyStripeCredentialInput(): Pick<
   | "stripeSignerTitle"
 > {
   return {
+    ...emptyStripeWriteOnlyInput(),
+    ...stripeOrganizationCredentialInput()
+  };
+}
+
+function emptyStripeWriteOnlyInput(): Pick<
+  CredentialFormInput,
+  | "stripeRestrictedKey"
+  | "stripePublishableKey"
+  | "stripeWebhookSecretNext"
+  | "stripePaymentMethodConfigurationId"
+  | "stripeBillingPortalConfigurationId"
+> {
+  return {
     stripeRestrictedKey: "",
     stripePublishableKey: "",
     stripeWebhookSecretNext: "",
     stripePaymentMethodConfigurationId: "",
-    stripeBillingPortalConfigurationId: "",
-    stripeLegalName: "",
-    stripeEin: "",
-    stripeTimeZone: "",
-    stripeOrganizationPhone: "",
-    stripeOrganizationWebsite: "",
-    stripeOrganizationMailingAddress: "",
-    stripeSignerName: "",
-    stripeSignerTitle: ""
+    stripeBillingPortalConfigurationId: ""
+  };
+}
+
+// Los ocho campos de la organización de Stripe se precargan del servidor. Un reinicio
+// ajeno a Stripe debe conservar cualquier edición local para que el parche posterior
+// pueda compararla con la última línea base aceptada del servidor.
+function preservedStripeOrganizationInput(
+  current: CredentialFormInput
+): ReturnType<typeof stripeOrganizationCredentialInput> {
+  return {
+    stripeLegalName: current.stripeLegalName,
+    stripeEin: current.stripeEin,
+    stripeTimeZone: current.stripeTimeZone,
+    stripeOrganizationPhone: current.stripeOrganizationPhone,
+    stripeOrganizationWebsite: current.stripeOrganizationWebsite,
+    stripeOrganizationMailingAddress: current.stripeOrganizationMailingAddress,
+    stripeSignerName: current.stripeSignerName,
+    stripeSignerTitle: current.stripeSignerTitle
+  };
+}
+
+function stripeOrganizationFromCredentialInput(
+  input: CredentialFormInput
+): StripeOrganizationConfiguration {
+  return {
+    legalName: input.stripeLegalName,
+    ein: input.stripeEin,
+    timeZone: input.stripeTimeZone,
+    organizationPhone: input.stripeOrganizationPhone,
+    organizationWebsite: input.stripeOrganizationWebsite,
+    organizationMailingAddress: input.stripeOrganizationMailingAddress,
+    signerName: input.stripeSignerName,
+    signerTitle: input.stripeSignerTitle
+  };
+}
+
+function stripeOrganizationCredentialInput(
+  configuration?: StripeSettingsState["configuration"]
+): Pick<
+  CredentialFormInput,
+  | "stripeLegalName"
+  | "stripeEin"
+  | "stripeTimeZone"
+  | "stripeOrganizationPhone"
+  | "stripeOrganizationWebsite"
+  | "stripeOrganizationMailingAddress"
+  | "stripeSignerName"
+  | "stripeSignerTitle"
+> {
+  return {
+    stripeLegalName: configuration?.legalName ?? "",
+    stripeEin: configuration?.ein ?? "",
+    stripeTimeZone: configuration?.timeZone ?? "",
+    stripeOrganizationPhone: configuration?.organizationPhone ?? "",
+    stripeOrganizationWebsite: configuration?.organizationWebsite ?? "",
+    stripeOrganizationMailingAddress: configuration?.organizationMailingAddress ?? "",
+    stripeSignerName: configuration?.signerName ?? "",
+    stripeSignerTitle: configuration?.signerTitle ?? ""
   };
 }

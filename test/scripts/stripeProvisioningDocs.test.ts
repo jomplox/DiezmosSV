@@ -31,12 +31,15 @@ const requiredRuntimeNames = [
 ] as const;
 
 describe("Stripe US giving provisioning documentation", () => {
-  it("mirrors the runtime-only configuration contract in both canonical READMEs", () => {
+  it("mirrors the Stripe runtime and Givebutter build configuration contracts in both canonical READMEs", () => {
     for (const document of [english, spanish]) {
       for (const name of requiredRuntimeNames) expect(document).toContain(name);
       expect(document).toContain("STRIPE_MOCK_MODE");
       expect(document).toContain("docs/stripe-us-giving.md");
-      expect(document).not.toMatch(/givebutter/i);
+      expect(document).toContain("Givebutter");
+      expect(document).toContain("VITE_GIVEBUTTER_CAMPAIGN");
+      expect(document).toContain("VITE_GIVEBUTTER_TITHE_FUND_ID");
+      expect(document).toContain("VITE_GIVEBUTTER_OFFERING_FUND_ID");
       expect(document).not.toContain("VITE_STRIPE");
     }
   });
@@ -148,7 +151,7 @@ describe("Stripe US giving provisioning documentation", () => {
 
   it("keeps every additive Stripe migration in the rollback preservation boundary", () => {
     const rollback = runbook.slice(runbook.indexOf("## Handoff del propietario y rollback"));
-    for (const migration of ["0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040"]) {
+    for (const migration of ["0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040", "0041", "0042", "0043"]) {
       expect(rollback).toContain(migration);
     }
     expect(rollback).toMatch(/no.*elimine|conserve/is);
@@ -195,8 +198,9 @@ describe("Stripe US giving provisioning documentation", () => {
     );
   });
 
-  it("removes the obsolete client campaign value from private artifacts", () => {
-    expect(localArtifacts).not.toMatch(/givebutter|VITE_GIVEBUTTER/i);
+  it("documents the target-bound Givebutter campaign without moving Stripe into Vite", () => {
+    expect(localArtifacts).toContain("VITE_GIVEBUTTER_CAMPAIGN");
+    expect(localArtifacts).toMatch(/givebutter/i);
     expect(localArtifacts).toMatch(/Stripe.*runtime|runtime.*Stripe/is);
   });
 });

@@ -13,18 +13,20 @@ import {
   Upload,
   X
 } from "lucide-react";
-import { type FormEvent, useMemo, useRef, useState } from "react";
+import { type FormEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   STRIPE_US_LEGAL_NAME_MAX_LENGTH,
   STRIPE_US_MAILING_ADDRESS_LINE_MAX_LENGTH,
   STRIPE_US_SIGNER_NAME_MAX_LENGTH,
   STRIPE_US_SIGNER_TITLE_MAX_LENGTH,
+  STRIPE_US_TIME_ZONE_OPTIONS,
   STRIPE_US_WEBSITE_MAX_LENGTH
 } from "../shared/stripeUsConfiguration";
 import type {
   CredentialStatus,
   CredentialStatusItem,
   EmailSenderState,
+  EmailTemplateScope,
   EmailTemplateSettings,
   EmailTemplateValue,
   EmissionEnvironmentState,
@@ -152,7 +154,7 @@ export function CredentialsPanel({
     resolution: "CONFIRMED_SENT" | "CONFIRMED_NOT_SENT"
   ) => Promise<void>;
   onEmailTemplateChange: (type: string, patch: Partial<EmailTemplateValue>) => void;
-  onEmailTemplateSubmit: () => Promise<void>;
+  onEmailTemplateSubmit: (scope: EmailTemplateScope) => Promise<void>;
   onEmailSenderChange: (value: string) => void;
   onEmailReplyToChange: (value: string) => void;
   onEmailSenderSubmit: () => Promise<void>;
@@ -607,7 +609,7 @@ export function CredentialsPanel({
                         </div>
                       ))}
                     </div>
-                    <small className="span-2">Los campos de reemplazo nunca se precargan y se limpian después de guardarse.</small>
+                    <small className="span-2">Las credenciales y secretos de reemplazo nunca se precargan y se limpian después de guardarse.</small>
                     <label>
                       <CredentialFieldLabel label="Clave restringida" configured={credentialConfigured(status, "STRIPE_RESTRICTED_KEY")} />
                       <CredentialActiveValue status={status} name="STRIPE_RESTRICTED_KEY" />
@@ -632,43 +634,43 @@ export function CredentialsPanel({
                     </label>
                     <label>
                       <CredentialFieldLabel label="Nombre legal" configured={credentialConfigured(status, "STRIPE_US_LEGAL_NAME")} />
-                      <CredentialActiveValue status={status} name="STRIPE_US_LEGAL_NAME" />
                       <input type="text" autoComplete="off" maxLength={STRIPE_US_LEGAL_NAME_MAX_LENGTH} value={input.stripeLegalName} onChange={(event) => onChange({ ...input, stripeLegalName: event.target.value })} />
                     </label>
                     <label>
                       <CredentialFieldLabel label="EIN" configured={credentialConfigured(status, "STRIPE_US_EIN")} />
-                      <CredentialActiveValue status={status} name="STRIPE_US_EIN" />
-                      <input type="password" autoComplete="new-password" value={input.stripeEin} onChange={(event) => onChange({ ...input, stripeEin: event.target.value })} placeholder="12-3456789" />
+                      <input type="text" autoComplete="off" inputMode="numeric" value={input.stripeEin} onChange={(event) => onChange({ ...input, stripeEin: event.target.value })} placeholder="12-3456789" />
                     </label>
                     <label className="span-2">
                       <CredentialFieldLabel label="Zona horaria" configured={credentialConfigured(status, "STRIPE_US_TIME_ZONE")} />
-                      <CredentialActiveValue status={status} name="STRIPE_US_TIME_ZONE" />
-                      <input type="text" value={input.stripeTimeZone} onChange={(event) => onChange({ ...input, stripeTimeZone: event.target.value })} placeholder="America/New_York" />
+                      <select value={input.stripeTimeZone} onChange={(event) => onChange({ ...input, stripeTimeZone: event.target.value })}>
+                        <option value="">Seleccione una zona horaria</option>
+                        {input.stripeTimeZone && !STRIPE_US_TIME_ZONE_OPTIONS.some((option) => option.value === input.stripeTimeZone) && (
+                          <option value={input.stripeTimeZone}>Actual — {input.stripeTimeZone}</option>
+                        )}
+                        {STRIPE_US_TIME_ZONE_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                      </select>
                     </label>
                     <label>
                       <CredentialFieldLabel label="Teléfono de la organización" configured={credentialConfigured(status, "STRIPE_US_PHONE")} />
-                      <CredentialActiveValue status={status} name="STRIPE_US_PHONE" />
                       <input type="tel" autoComplete="off" value={input.stripeOrganizationPhone} onChange={(event) => onChange({ ...input, stripeOrganizationPhone: event.target.value })} placeholder="+1 (000) 000-0000" />
                     </label>
                     <label>
                       <CredentialFieldLabel label="Sitio web" configured={credentialConfigured(status, "STRIPE_US_WEBSITE")} />
-                      <CredentialActiveValue status={status} name="STRIPE_US_WEBSITE" />
                       <input type="url" autoComplete="off" maxLength={STRIPE_US_WEBSITE_MAX_LENGTH} value={input.stripeOrganizationWebsite} onChange={(event) => onChange({ ...input, stripeOrganizationWebsite: event.target.value })} placeholder="https://example.org" />
                     </label>
                     <label className="span-2">
                       <CredentialFieldLabel label="Dirección postal" configured={credentialConfigured(status, "STRIPE_US_MAILING_ADDRESS")} />
-                      <CredentialActiveValue status={status} name="STRIPE_US_MAILING_ADDRESS" />
                       <textarea value={input.stripeOrganizationMailingAddress} onChange={(event) => onChange({ ...input, stripeOrganizationMailingAddress: event.target.value })} placeholder={"Calle y número\nCiudad, estado, código postal, EE. UU."} rows={4} />
                       <small>Use de 2 a 4 renglones, con hasta {STRIPE_US_MAILING_ADDRESS_LINE_MAX_LENGTH} caracteres por renglón.</small>
                     </label>
                     <label>
                       <CredentialFieldLabel label="Nombre del firmante autorizado" configured={credentialConfigured(status, "STRIPE_US_SIGNER_NAME")} />
-                      <CredentialActiveValue status={status} name="STRIPE_US_SIGNER_NAME" />
                       <input type="text" autoComplete="off" maxLength={STRIPE_US_SIGNER_NAME_MAX_LENGTH} value={input.stripeSignerName} onChange={(event) => onChange({ ...input, stripeSignerName: event.target.value })} />
                     </label>
                     <label>
                       <CredentialFieldLabel label="Cargo del firmante autorizado" configured={credentialConfigured(status, "STRIPE_US_SIGNER_TITLE")} />
-                      <CredentialActiveValue status={status} name="STRIPE_US_SIGNER_TITLE" />
                       <input type="text" autoComplete="off" maxLength={STRIPE_US_SIGNER_TITLE_MAX_LENGTH} value={input.stripeSignerTitle} onChange={(event) => onChange({ ...input, stripeSignerTitle: event.target.value })} placeholder="Treasurer" />
                     </label>
                     <div className="credential-field-block span-2">
@@ -1342,6 +1344,147 @@ function BrandingEditor({
   );
 }
 
+type EmailTemplateBodyFormat = "bold" | "italic" | "underline" | "quote";
+
+export function formatEmailTemplateSelection(
+  controlledValue: string,
+  selectionStart: number,
+  selectionEnd: number,
+  format: EmailTemplateBodyFormat
+): { value: string; selectionStart: number; selectionEnd: number } {
+  // HTML textareas expose every CRLF/CR line ending as LF, and their selection
+  // offsets index that normalized value. Apply the same single normalization
+  // before slicing a controlled value loaded from storage.
+  const value = controlledValue.replace(/\r\n?/g, "\n");
+  if (format === "quote") {
+    const lineStart = value.lastIndexOf("\n", Math.max(0, selectionStart - 1)) + 1;
+    const nextLineBreak = value.indexOf("\n", selectionEnd);
+    const lineEnd = nextLineBreak === -1 ? value.length : nextLineBreak;
+    const block = value.slice(lineStart, lineEnd);
+    const lines = block.split("\n");
+    const removeQuote = lines.every((line) => /^\s*>\s?/.test(line));
+    const replacement = lines
+      .map((line) => removeQuote ? line.replace(/^\s*>\s?/, "") : `> ${line}`)
+      .join("\n");
+    return {
+      value: `${value.slice(0, lineStart)}${replacement}${value.slice(lineEnd)}`,
+      selectionStart: lineStart,
+      selectionEnd: lineStart + replacement.length
+    };
+  }
+
+  const markers = format === "bold"
+    ? ["**", "**"] as const
+    : format === "italic"
+      ? ["*", "*"] as const
+      : ["++", "++"] as const;
+  const selected = value.slice(selectionStart, selectionEnd);
+  if (!selected) {
+    const replacement = `${markers[0]}${markers[1]}`;
+    const caret = selectionStart + markers[0].length;
+    return {
+      value: `${value.slice(0, selectionStart)}${replacement}${value.slice(selectionEnd)}`,
+      selectionStart: caret,
+      selectionEnd: caret
+    };
+  }
+
+  const lines = selected.split("\n");
+  const replacement = lines
+    .map((line) => line ? `${markers[0]}${line}${markers[1]}` : line)
+    .join("\n");
+  return {
+    value: `${value.slice(0, selectionStart)}${replacement}${value.slice(selectionEnd)}`,
+    selectionStart: selectionStart + (lines[0] ? markers[0].length : 0),
+    selectionEnd: selectionStart + replacement.length - (lines.at(-1) ? markers[1].length : 0)
+  };
+}
+
+function EmailTemplateBodyEditor({
+  id,
+  templateLabel,
+  value,
+  placeholder,
+  onChange
+}: {
+  id: string;
+  templateLabel: string;
+  value: string;
+  placeholder: string;
+  onChange: (value: string) => void;
+}) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const pendingSelectionRef = useRef<{ start: number; end: number } | null>(null);
+  const toolbarRef = useRef<HTMLDivElement>(null);
+  // role="toolbar" es un solo punto de tabulación: las flechas mueven el foco
+  // entre los botones y solo el activo queda alcanzable con Tab.
+  const [activeFormatIndex, setActiveFormatIndex] = useState(0);
+  useLayoutEffect(() => {
+    const pending = pendingSelectionRef.current;
+    if (!pending) return;
+    pendingSelectionRef.current = null;
+    textareaRef.current?.focus();
+    textareaRef.current?.setSelectionRange(pending.start, pending.end);
+  }, [value]);
+
+  const applyFormat = (format: EmailTemplateBodyFormat) => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    const formatted = formatEmailTemplateSelection(
+      value,
+      textarea.selectionStart,
+      textarea.selectionEnd,
+      format
+    );
+    pendingSelectionRef.current = {
+      start: formatted.selectionStart,
+      end: formatted.selectionEnd
+    };
+    onChange(formatted.value);
+  };
+
+  const moveFormatFocus = (step: number) => {
+    const buttons = Array.from(toolbarRef.current?.querySelectorAll("button") ?? []);
+    if (buttons.length === 0) return;
+    const nextIndex = (activeFormatIndex + step + buttons.length) % buttons.length;
+    setActiveFormatIndex(nextIndex);
+    buttons[nextIndex].focus();
+  };
+
+  return (
+    <div className="email-template-body-field">
+      <div className="email-template-body-head">
+        <label htmlFor={id}><span>Cuerpo del correo</span></label>
+        <div
+          ref={toolbarRef}
+          className="email-template-format-toolbar"
+          role="toolbar"
+          aria-label={`Formato del cuerpo — ${templateLabel}`}
+          onKeyDown={(event) => {
+            if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+            event.preventDefault();
+            moveFormatFocus(event.key === "ArrowRight" ? 1 : -1);
+          }}
+        >
+          <button type="button" tabIndex={activeFormatIndex === 0 ? 0 : -1} onFocus={() => setActiveFormatIndex(0)} aria-label={`Negrita — ${templateLabel}`} title="Negrita: **texto**" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("bold")}><strong>B</strong></button>
+          <button type="button" tabIndex={activeFormatIndex === 1 ? 0 : -1} onFocus={() => setActiveFormatIndex(1)} aria-label={`Cursiva — ${templateLabel}`} title="Cursiva: *texto*" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("italic")}><em>I</em></button>
+          <button type="button" tabIndex={activeFormatIndex === 2 ? 0 : -1} onFocus={() => setActiveFormatIndex(2)} aria-label={`Subrayado — ${templateLabel}`} title="Subrayado: ++texto++" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("underline")}><u>U</u></button>
+          <button type="button" tabIndex={activeFormatIndex === 3 ? 0 : -1} onFocus={() => setActiveFormatIndex(3)} aria-label={`Cita — ${templateLabel}`} title="Cita: > texto" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("quote")}>❝</button>
+        </div>
+      </div>
+      <textarea
+        ref={textareaRef}
+        id={id}
+        aria-label={`Cuerpo del correo — ${templateLabel}`}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+      />
+      <small className="email-template-format-help">Formato: **negrita**, *cursiva*, ++subrayado++ y &gt; cita.</small>
+    </div>
+  );
+}
+
 function EmailTemplateEditor({
   settings,
   draft,
@@ -1353,11 +1496,60 @@ function EmailTemplateEditor({
   draft: Record<string, EmailTemplateValue>;
   busy: boolean;
   onChange: (type: string, patch: Partial<EmailTemplateValue>) => void;
-  onSubmit: () => Promise<void>;
+  onSubmit: (scope: EmailTemplateScope) => Promise<void>;
 }) {
   const definitions = settings?.definitions ?? [];
-  const placeholders = settings?.placeholders ?? [];
-  const complete = definitions.every((definition) => draft[definition.type]?.subject.trim() && draft[definition.type]?.body.trim());
+  const legacyPlaceholders = settings?.placeholders ?? [];
+  const salvadoranDefinitions = definitions.filter((definition) => isEmailTemplateScope("SV_CDE", definition.scope));
+  const usDefinitions = definitions.filter((definition) => isEmailTemplateScope("US_STRIPE", definition.scope));
+  // Cada botón guarda solo las plantillas de su país, así que la exigencia de asunto
+  // y cuerpo se evalúa por grupo: un cuerpo vacío en EE. UU. no debe bloquear el
+  // guardado de El Salvador ni al revés.
+  const groupComplete = (group: typeof definitions) => group.every(
+    (definition) => draft[definition.type]?.subject.trim() && draft[definition.type]?.body.trim()
+  );
+  const salvadoranComplete = groupComplete(salvadoranDefinitions);
+  const usComplete = groupComplete(usDefinitions);
+  const groupPlaceholders = (group: typeof definitions): string[] => Array.from(new Set(
+    group.flatMap((definition) => definition.placeholders ?? legacyPlaceholders)
+  ));
+  const renderTemplateCards = (group: typeof definitions) => (
+    <div className="email-template-list">
+      {group.map((definition) => {
+        const value = draft[definition.type] ?? { subject: "", body: "" };
+        const titleId = `email-template-title-${definition.type}`;
+        return (
+          <section
+            className="email-template-card"
+            key={definition.type}
+            role="region"
+            aria-labelledby={titleId}
+          >
+            <div>
+              <h4 id={titleId}>{definition.label}</h4>
+              <p>{definition.description}</p>
+            </div>
+            <label>
+              <span>Asunto</span>
+              <input
+                aria-label={`Asunto — ${definition.label}`}
+                value={value.subject}
+                onChange={(event) => onChange(definition.type, { subject: event.target.value })}
+                placeholder={definition.defaultSubject}
+              />
+            </label>
+            <EmailTemplateBodyEditor
+              id={`email-template-body-${definition.type}`}
+              templateLabel={definition.label}
+              value={value.body}
+              onChange={(body) => onChange(definition.type, { body })}
+              placeholder={definition.defaultBody}
+            />
+          </section>
+        );
+      })}
+    </div>
+  );
   return (
     <section className="credential-form-panel email-template-panel">
       <div className="panel-head">
@@ -1382,79 +1574,77 @@ function EmailTemplateEditor({
             <div className="email-template-guidance">
               <span>Use estas variables solamente en los correos CDE de El Salvador.</span>
               <div className="email-template-placeholders" aria-label="Variables disponibles para El Salvador">
-                {placeholders.map((placeholder) => <code key={placeholder}>{placeholder}</code>)}
+                {groupPlaceholders(salvadoranDefinitions).map((placeholder) => <code key={placeholder}>{placeholder}</code>)}
               </div>
             </div>
-            <div className="email-template-list">
-              {definitions.map((definition) => {
-                const value = draft[definition.type] ?? { subject: "", body: "" };
-                return (
-                  <section className="email-template-card" key={definition.type}>
-                    <div>
-                      <h4>{definition.label}</h4>
-                      <p>{definition.description}</p>
-                    </div>
-                    <label>
-                      <span>Asunto</span>
-                      <input
-                        value={value.subject}
-                        onChange={(event) => onChange(definition.type, { subject: event.target.value })}
-                        placeholder={definition.defaultSubject}
-                      />
-                    </label>
-                    <label>
-                      <span>Cuerpo del correo</span>
-                      <textarea
-                        value={value.body}
-                        onChange={(event) => onChange(definition.type, { body: event.target.value })}
-                        placeholder={definition.defaultBody}
-                      />
-                    </label>
-                  </section>
-                );
-              })}
-            </div>
+            {renderTemplateCards(salvadoranDefinitions)}
             <div className="credential-actions email-template-actions">
               <div>
                 <Mail size={16} />
                 <span>Estos textos se aplican al próximo envío o reenvío de CDE.</span>
               </div>
-              <button className="primary" type="button" disabled={busy || !complete} onClick={() => void onSubmit()}>
+              <button className="primary" type="button" disabled={busy || !salvadoranComplete} onClick={() => void onSubmit("SV_CDE")}>
                 <Mail size={16} />
-                {busy ? "Guardando" : "Guardar plantillas"}
+                {busy ? "Guardando" : "Guardar plantillas de El Salvador"}
               </button>
             </div>
           </section>
 
-          <section className="email-template-country-group email-template-country-group-protected" aria-label="Plantillas de EE. UU. — Stripe 501(c)(3)">
+          <section className="email-template-country-group email-template-country-group-us" aria-label="Plantillas de EE. UU. — Stripe 501(c)(3)">
             <div className="email-template-country-head">
               <div>
                 <h3>EE. UU. — Stripe 501(c)(3)</h3>
                 <p>Constancias estadounidenses separadas de los mensajes CDE salvadoreños.</p>
               </div>
-              <span className="email-template-protected-badge"><Lock size={13} />Texto legal protegido</span>
+              <span className="email-template-protected-badge"><Lock size={13} />PDF legal protegido</span>
             </div>
             <p className="email-template-protected-note">
-              El sistema incorpora el nombre legal, EIN, fecha, monto y la declaración sobre bienes o servicios. Estas cláusulas no usan ni modifican las plantillas de El Salvador. La marca, el remitente y el correo de respuesta se configuran en sus secciones correspondientes.
+              El asunto y cuerpo de estos correos son editables. Los PDF adjuntos de la constancia inmediata y anual conservan su diseño y contenido legal fijo.
             </p>
-            <div className="email-template-managed-list">
-              <article>
-                <h4>Constancia inmediata</h4>
-                <p>Se envía al confirmarse una donación única o mensual de Stripe.</p>
-              </article>
-              <article>
-                <h4>Corrección o revocación por reembolso</h4>
-                <p>Reemplaza o revoca la constancia anterior según el monto reembolsado.</p>
-              </article>
-              <article>
-                <h4>Constancia anual</h4>
-                <p>Resume el total neto anual y emite una corrección si cambian las donaciones o reembolsos.</p>
-              </article>
+            <div className="email-template-guidance">
+              <span>Use estas variables solamente en los correos de EE. UU.</span>
+              <div className="email-template-placeholders" aria-label="Variables disponibles para Estados Unidos">
+                {groupPlaceholders(usDefinitions).map((placeholder) => <code key={placeholder}>{placeholder}</code>)}
+              </div>
+            </div>
+            {renderTemplateCards(usDefinitions)}
+            <div className="credential-actions email-template-actions">
+              <div>
+                <Mail size={16} />
+                <span>Estos textos se aplican al próximo correo de Stripe que se prepare.</span>
+              </div>
+              <button className="primary" type="button" disabled={busy || !usComplete} onClick={() => void onSubmit("US_STRIPE")}>
+                <Mail size={16} />
+                {busy ? "Guardando" : "Guardar plantillas de EE. UU."}
+              </button>
             </div>
           </section>
         </>
       )}
     </section>
+  );
+}
+
+// PUT /api/settings/email-templates recibe el país en `scope` y solo las plantillas de ese
+// país: el servidor las fusiona sobre lo que tiene guardado en ese instante y valida las
+// cinco. Completar aquí el otro grupo con la copia que este panel cargó al abrirse
+// revertiría en silencio lo que otra persona propietaria hubiera guardado mientras tanto,
+// así que este helper recorta el envío y nunca lo rellena. La partición es la misma que usa
+// el editor: cualquier scope inesperado cae del lado salvadoreño en ambos sitios, para que
+// ninguna plantilla visible en un grupo quede fuera de su propio guardado.
+export function isEmailTemplateScope(scope: EmailTemplateScope, candidate: EmailTemplateScope): boolean {
+  return scope === "US_STRIPE" ? candidate === "US_STRIPE" : candidate !== "US_STRIPE";
+}
+
+export function scopedEmailTemplates(
+  settings: EmailTemplateSettings | null,
+  templates: Record<string, EmailTemplateValue>,
+  scope: EmailTemplateScope
+): Record<string, EmailTemplateValue> {
+  return Object.fromEntries(
+    (settings?.definitions ?? [])
+      .filter((definition) => isEmailTemplateScope(scope, definition.scope) && templates[definition.type])
+      .map((definition) => [definition.type, { ...templates[definition.type] }])
   );
 }
 

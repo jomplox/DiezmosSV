@@ -40,9 +40,82 @@ describe("private deployment configuration", () => {
       })
     ).toMatchObject({
       target: "staging",
+      campaign: "campaign-fixture",
+      givebutterFunds: null,
       origin: "https://staging.example.invalid",
       donorLogo: { contentType: "image/png", bytes: pngBytes }
     });
+  });
+
+  it("loads an optional complete Givebutter fund pair without disclosing it", () => {
+    const fixture = deploymentFixture();
+    writeFileSync(
+      fixture.configPath,
+      fixture.configContents.replace(
+        "VITE_GIVEBUTTER_CAMPAIGN=campaign-fixture\n",
+        [
+          "VITE_GIVEBUTTER_CAMPAIGN=campaign-fixture",
+          "VITE_GIVEBUTTER_TITHE_FUND_ID=731902",
+          "VITE_GIVEBUTTER_OFFERING_FUND_ID=842013",
+          ""
+        ].join("\n")
+      ),
+      { mode: 0o600 }
+    );
+
+    const config = loadPrivateDeployConfig({
+      target: "staging",
+      env: { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath },
+      repositoryRoot: fixture.repositoryRoot
+    });
+    const givebutterFunds: { tithe: string; offering: string } | null = config.givebutterFunds;
+
+    expect(givebutterFunds).toEqual({ tithe: "731902", offering: "842013" });
+  });
+
+  it.each([
+    ["VITE_GIVEBUTTER_TITHE_FUND_ID=731902\n", /paired Givebutter fund settings/],
+    [
+      "VITE_GIVEBUTTER_TITHE_FUND_ID=\"   \"\nVITE_GIVEBUTTER_OFFERING_FUND_ID=842013\n",
+      /nonblank numeric Givebutter fund identifiers/
+    ],
+    [
+      "VITE_GIVEBUTTER_TITHE_FUND_ID=not-numeric\nVITE_GIVEBUTTER_OFFERING_FUND_ID=842013\n",
+      /nonblank numeric Givebutter fund identifiers/
+    ],
+    [
+      "VITE_GIVEBUTTER_TITHE_FUND_ID=123456\nVITE_GIVEBUTTER_OFFERING_FUND_ID=842013\n",
+      /placeholder-like Givebutter fund identifier/
+    ],
+    [
+      "VITE_GIVEBUTTER_TITHE_FUND_ID=731902\nVITE_GIVEBUTTER_OFFERING_FUND_ID=731902\n",
+      /distinct Givebutter fund identifiers/
+    ]
+  ])("rejects an incomplete or ambiguous optional Givebutter fund mapping", (fundSettings, expected) => {
+    const fixture = deploymentFixture();
+    writeFileSync(
+      fixture.configPath,
+      fixture.configContents.replace(
+        "VITE_GIVEBUTTER_CAMPAIGN=campaign-fixture\n",
+        `VITE_GIVEBUTTER_CAMPAIGN=campaign-fixture\n${fundSettings}`
+      ),
+      { mode: 0o600 }
+    );
+
+    expect(() =>
+      loadPrivateDeployConfig({
+        target: "staging",
+        env: { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath },
+        repositoryRoot: fixture.repositoryRoot
+      })
+    ).toThrow(expected);
+    expectSanitizedFailure(() =>
+      loadPrivateDeployConfig({
+        target: "staging",
+        env: { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath },
+        repositoryRoot: fixture.repositoryRoot
+      }), fixture
+    );
   });
 
   it("accepts JPEG bytes when the private extension agrees", () => {
@@ -89,6 +162,7 @@ describe("private deployment configuration", () => {
 
   it.each([
     "DIEZMOSSV_DEPLOY_TARGET",
+    "VITE_GIVEBUTTER_CAMPAIGN",
     "DIEZMOSSV_APP_ORIGIN",
     "DIEZMOSSV_DONOR_LOGO_FILE"
   ])("names %s when that required setting is absent", (key) => {
@@ -113,6 +187,26 @@ describe("private deployment configuration", () => {
         repositoryRoot: fixture.repositoryRoot
       }), fixture
     );
+  });
+
+  it.each([
+    ["example-campaign", /placeholder/],
+    ["campaign/with/path", /single Givebutter campaign slug/]
+  ])("rejects the unusable Givebutter campaign value %s", (campaign, expected) => {
+    const fixture = deploymentFixture();
+    writeFileSync(
+      fixture.configPath,
+      fixture.configContents.replace("campaign-fixture", campaign),
+      { mode: 0o600 }
+    );
+
+    expect(() =>
+      loadPrivateDeployConfig({
+        target: "staging",
+        env: { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath },
+        repositoryRoot: fixture.repositoryRoot
+      })
+    ).toThrow(expected);
   });
 
   it("rejects a missing config file and an empty one without disclosure", () => {
@@ -400,6 +494,7 @@ function deploymentFixture(options: {
   const configPath = join(privateRoot, "staging.env");
   const configContents = [
     `DIEZMOSSV_DEPLOY_TARGET=${options.target ?? "staging"}`,
+    "VITE_GIVEBUTTER_CAMPAIGN=campaign-fixture",
     `DIEZMOSSV_APP_ORIGIN=${options.origin ?? "https://staging.example.invalid"}`,
     `DIEZMOSSV_DONOR_LOGO_FILE=${logoPath}`,
     ""
@@ -427,7 +522,11 @@ function expectSanitizedFailure(action: () => unknown, fixture: Fixture): void {
     "password-fixture",
     fixture.logoPath,
     fixture.configPath,
-    "929e7cf"
+    "929e7cf",
+    "731902",
+    "842013",
+    "not-numeric",
+    "123456"
   ]) {
     expect(message).not.toContain(privateValue);
   }

@@ -2684,8 +2684,7 @@ input.file-input-hidden {
 }
 
 .email-template-country-head p,
-.email-template-protected-note,
-.email-template-managed-list p {
+.email-template-protected-note {
   color: var(--ink-muted);
   font-size: 12px;
   line-height: 1.45;
@@ -2714,24 +2713,10 @@ input.file-input-hidden {
   color: var(--ink-secondary);
 }
 
-.email-template-country-group-protected {
+.email-template-country-group-us {
   background: var(--surface-muted);
 }
 
-.email-template-managed-list {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.email-template-managed-list article {
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--surface);
-}
-
-.email-template-managed-list h4,
 .email-template-card h4 {
   margin: 0 0 3px;
   font-size: 13px;
@@ -2775,6 +2760,44 @@ input.file-input-hidden {
 .email-template-card textarea {
   min-height: 116px;
   resize: vertical;
+}
+
+.email-template-body-field {
+  display: grid;
+  gap: 6px;
+}
+
+.email-template-body-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.email-template-format-toolbar {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.email-template-format-toolbar button {
+  width: 30px;
+  min-height: 28px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink-secondary);
+  font: inherit;
+}
+
+.email-template-format-toolbar button:hover {
+  border-color: var(--ink-muted);
+  color: var(--ink);
+}
+
+.email-template-format-help {
+  color: var(--ink-muted);
+  font-size: 11px;
 }
 
 .email-template-actions {
@@ -4037,6 +4060,146 @@ pre {
   margin-top: 10px;
 }
 
+/* Announced, never shown: the visible switch buttons already name each form. */
+.donar-provider-announcement {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+/* The provider controls and Givebutter frame share the same 440px column. */
+.donar-provider-choice {
+  width: min(100%, 440px);
+  min-height: 50px;
+  justify-self: center;
+  display: grid;
+  grid-template-columns: 30px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 11px;
+  border: 1px solid #d8d8d8;
+  border-radius: 12px;
+  color: #111111;
+  background: #ffffff;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.07);
+  text-align: left;
+  cursor: pointer;
+  transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease;
+}
+
+.donar-provider-choice:hover {
+  transform: translateY(-1px);
+  border-color: #111111;
+  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.1);
+}
+
+.donar-provider-choice:focus-visible {
+  outline: 3px solid rgba(0, 0, 0, 0.28);
+  outline-offset: 3px;
+}
+
+.donar-provider-choice img {
+  display: block;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  object-fit: contain;
+  background: #febf10;
+}
+
+.donar-provider-stripe-mark {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: #635bff;
+}
+
+.donar-provider-stripe-mark::after {
+  content: "S";
+  color: #ffffff;
+  font-family: Arial, sans-serif;
+  font-size: 19px;
+  font-weight: 700;
+}
+
+.donar-provider-choice-copy {
+  display: grid;
+  gap: 2px;
+}
+
+.donar-provider-choice-copy strong {
+  font-family: var(--font-gotham-bold);
+  font-size: 14px;
+}
+
+.donar-provider-choice-copy small {
+  color: #5d5d5d;
+  font-family: var(--font-gotham-book);
+  font-size: 11px;
+}
+
+.donar-provider-choice-arrow {
+  color: #4f4f4f;
+  font-size: 17px;
+}
+
+.donar-givebutter-surface {
+  display: grid;
+  gap: 12px;
+  justify-items: center;
+}
+
+.donar-givebutter-confirmation {
+  width: min(100%, 440px);
+  color: #555555;
+  font-size: 13px;
+  line-height: 1.45;
+  text-align: center;
+}
+
+/* Positioning context for the loading placeholder: the frame's own box, so the
+   placeholder cannot ride up over the controls when the escape hatch is promoted. */
+.donar-givebutter-frame-area {
+  position: relative;
+  display: grid;
+  width: min(100%, 440px);
+}
+
+.donar-givebutter-frame {
+  width: min(100%, 440px);
+  min-height: 760px;
+  border: 0;
+  background: #ffffff;
+}
+
+.donar-givebutter-loading {
+  position: absolute;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 0 16px;
+  color: #5d5d5d;
+  font-size: 14px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.donar-givebutter-hint {
+  color: #555555;
+  font-size: 12px;
+  text-align: center;
+  text-underline-offset: 3px;
+  white-space: nowrap;
+}
+
 /* The manual Wompi backup link inherits the admin teal .link-button — repaint it
    in the donor's monochrome grays. */
 .donar-card .link-button {
@@ -4265,6 +4428,14 @@ pre {
   .donar-segment-option,
   .donar-chip {
     transition: none;
+  }
+  .donar-provider-choice {
+    transition: none;
+  }
+  .donar-provider-choice:hover,
+  .donar-provider-choice:focus-visible,
+  .donar-provider-choice:active {
+    transform: none;
   }
 }
 
@@ -4711,10 +4882,6 @@ pre {
   .export-pagination {
     align-items: stretch;
     flex-direction: column;
-  }
-
-  .email-template-managed-list {
-    grid-template-columns: 1fr;
   }
 
   .export-pagination span {

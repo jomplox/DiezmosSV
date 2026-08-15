@@ -89,7 +89,7 @@ facturado por invocación, auditable y barato de operar.
 | 🔎 **Explorador de donantes** | La vista **Donantes** resuelve los CDE aceptados en un registro de donantes — identidad, contacto, ubicación, cantidad de aportaciones, total histórico y última aportación — con llave en el documento fiscal, con respaldo en el correo y luego en el documento mismo. Filtre por tipo/número de documento, nombre, correo, rango de monto, diezmo/ofrenda y origen en línea/manual; exporte el conjunto filtrado como CSV. ADMIN en adelante; los números de documento se enmascaran en la tabla y solo se revelan en el panel de detalle. |
 | 🏷️ **Marca blanca** | Personalice el panel, las páginas del donante, el correo al donante, **el PDF del comprobante y la constancia anual** con el nombre visible de su iglesia, su color de acento, su dirección de soporte y sus logos (guardados en R2) desde la configuración de **Marca** — sin necesidad de un fork. Un logo cargado se ajusta a la misma banda de tinta reservada que trae el logo por defecto, de modo que el diseño alrededor sigue siendo válido. |
 | 🛡️ **Acceso seguro** | Hash de contraseñas con PBKDF2, sesiones por token bearer, control de acceso basado en roles, restablecimiento de contraseña autogestionado y limitación de tasa respaldada en D1 sobre el inicio de sesión, el restablecimiento de contraseña y los endpoints públicos de donación — con procedencia auditada por cada claim. |
-| 📬 **Correo con marca** | Todo el correo al donante (comprobante, aviso de invalidación, constancia anual, restablecimiento de contraseña) se envía como HTML con la marca de la organización y plantillas configurables. |
+| 📬 **Correo con marca** | Todo el correo al donante se envía como HTML con la marca de la organización. Los propietarios pueden editar plantillas separadas de asunto/cuerpo para comprobantes CDE e invalidaciones de El Salvador, y para constancias inmediatas, correcciones/revocaciones por reembolso y constancias anuales de Stripe en EE. UU. Los PDF estadounidenses permanecen como documentos legales fijos. |
 | 🚨 **Alertas operativas** | Alerta a una dirección de correo configurable ante fallos de emisión, fallos de entrega del comprobante, indisponibilidad de MH, eventos estancados, fallos de retención y vencimiento del certificado de firma de MH. Cada incidente emite además un evento `operational_alert` en Workers Logs, libre de datos personales, para alertar de forma independiente desde Cloudflare Observability y entregar por Notifications. |
 | 🗃️ **Retención legal** | Un cron mensual exporta a R2 una instantánea inmutable y verificada por hash de todos los registros legales, para retención tributaria de varios años con independencia de D1. El panel **Respaldos mensuales** permite explorar, verificar y descargar cada mes como ZIP. |
 
@@ -138,8 +138,10 @@ Solo se emiten los eventos con `ResultadoTransaccion = ExitosaAprobada`. Todo lo
 Wompi o al donante queda registrado en D1 y en la bitácora de auditoría.
 
 La página pública `/donar` abre con una portada de dos puertas: **El Salvador y el mundo** dirige al
-formulario fiscal SV (Wompi + CDE), y **EE. UU.** dirige a Stripe Embedded Checkout en español y dentro de la misma página sobre la
-cuenta 501(c)(3) estadounidense para entregas únicas o mensuales (`?ruta=sv` / `?ruta=eeuu` enlaza directo a una puerta). Toda la
+formulario fiscal SV (Wompi + CDE), y **EE. UU.** usa por defecto Stripe Embedded Checkout en español y dentro de la misma página sobre la
+cuenta 501(c)(3) estadounidense para entregas únicas o mensuales. Cuando el build del ambiente tiene un
+mapeo explícito de fondos para Diezmo/Ofrenda, el donante puede desmontar Stripe y usar el formulario
+existente de Givebutter en inglés (`?ruta=sv` / `?ruta=eeuu` enlaza directo a una puerta). Toda la
 interfaz web (páginas del donante y panel de administración) usa **Gotham**, autoalojada como woff2
 del subconjunto latino en `src/client/fonts/` — los OTF licenciados nunca se versionan; solo se
 versionan los subconjuntos woff2 generados.
@@ -206,7 +208,7 @@ DiezmosSV/
 │   ├── client/                 # Panel React + Vite, /donar, fuentes, recursos
 │   └── shared/                 # Catálogos · DUI · NIT · ventanas legales · política de contraseñas
 │                               # correcciones fiscales · entrega · montos · correo
-├── migrations/                 # Esquema D1 (incremental, solo se agrega, 0001…0040)
+├── migrations/                 # Esquema D1 (incremental, solo se agrega, 0001…0043)
 ├── DTE/svfe-json-schemas/      # Esquemas JSON de MH para validación
 ├── docs/                       # Despliegue/UAT · manual del operador · restauración de retención
 │                               # cutover/conciliación de claims fiscales · recuperación previa al CDE
@@ -368,6 +370,10 @@ fuera de este repositorio y sin enlaces simbólicos:
 ```dotenv
 # /ruta/privada/absoluta/staging.env
 DIEZMOSSV_DEPLOY_TARGET=staging
+VITE_GIVEBUTTER_CAMPAIGN=example-campaign
+# Opcional: reemplace ambos valores con IDs numéricos reales y distintos, u omita ambos.
+# VITE_GIVEBUTTER_TITHE_FUND_ID=<id-real-fondo-diezmo>
+# VITE_GIVEBUTTER_OFFERING_FUND_ID=<id-real-fondo-ofrenda>
 DIEZMOSSV_APP_ORIGIN=https://staging.example.invalid
 DIEZMOSSV_DONOR_LOGO_FILE=/ruta/privada/absoluta/logo.png
 ```
@@ -378,6 +384,13 @@ seleccionado debe coincidir con `--env`; el PNG/JPEG debe ser decodificable por 
 raster localmente, exige que `/api/health` reporte `appEnv=staging` y compara exactamente el raster
 remoto anunciado. `cf:deploy:staging` ejecuta automáticamente el preflight y el build privado vinculado
 al ambiente; los mismos pasos pueden ejecutarse por separado sin desplegar:
+
+El mapeo de fondos de Givebutter es opcional pero atómico. Omita ambos IDs para ocultar la alternativa
+Givebutter y mantener Stripe disponible, o configure dos IDs numéricos reales y distintos: Diezmo se
+mapea a `VITE_GIVEBUTTER_TITHE_FUND_ID` y Ofrenda a `VITE_GIVEBUTTER_OFFERING_FUND_ID`. El build privado
+rechaza un par incompleto, vacío, no numérico, parecido a un marcador o duplicado. Son identificadores
+públicos de enrutamiento que solo entran al navegador después de la validación; nunca los adivine a partir
+del nombre de la campaña.
 
 ```bash
 npm run cf:branding:check -- --env staging
@@ -443,7 +456,7 @@ Dos guardas de despliegue hacen fallar el comando en vez de publicar un desplieg
 | Guarda | Se ejecuta en | Bloquea salvo que |
 |---|---|---|
 | `scripts/assert-fiscal-cutover.mjs` | `cf:migrate:prod`, `cf:deploy:prod`, `cf:cutover:staging` | `FISCAL_CUTOVER_QUIESCED=1` esté definido. Las migraciones 0020/0021 y el Worker con soporte de claims deben entrar en **una sola ventana de mantenimiento con tráfico detenido**: drene las solicitudes del Worker anterior, pause colas/cron y el tráfico que muta datos, y luego reconozca la ventana. |
-| `scripts/run-private-build.mjs` | `build:private`, y a través de él `cf:deploy:staging` y `cf:deploy:prod` | El archivo de despliegue vinculado al ambiente y exclusivo del dueño, el origen y el raster del donante pasan validación. Los valores de Stripe son solo de runtime y nunca se inyectan en Vite. |
+| `scripts/run-private-build.mjs` | `build:private`, y a través de él `cf:deploy:staging` y `cf:deploy:prod` | El archivo de despliegue vinculado al ambiente y exclusivo del dueño, el slug de campaña Givebutter, el origen y el raster del donante pasan validación. Solo el slug público se inyecta en Vite; los valores de Stripe siguen siendo solo de runtime. |
 
 Guarde los parámetros de la prueba de humo en ese archivo `0600` fuera del árbol del repositorio. El
 runner usa esa ruta aprobada por defecto, así que `npm run smoke:staging` basta salvo que
@@ -592,8 +605,8 @@ configuración privada seleccionada y se duplican por ambiente de Wrangler:
 | `STRIPE_API_PROXY_URL` | Puente HTTP opcional y exclusivo de loopback para entornos locales de `workerd` sin HTTPS saliente. Ejecute `npm run dev:stripe-api-proxy`; staging, producción, hosts que no sean loopback, credenciales y rutas URL se rechazan. |
 
 **Frontera de tiempo de build.** La envoltura vinculada al ambiente
-`npm run build:private -- --env staging|production` valida el archivo externo de release/marca, pero
-no inyecta ningún valor de proveedor en Vite. Las claves, IDs de configuración, identidad legal y
+`npm run build:private -- --env staging|production` valida el archivo externo de release/marca e
+inyecta únicamente el slug público `VITE_GIVEBUTTER_CAMPAIGN` usado por la alternativa elegida por el donante. Las claves, IDs de configuración, identidad legal y
 política BNPL de Stripe son configuración de runtime del Worker. Solo la clave publicable se devuelve
 al navegador, junto con una sesión de Embedded Checkout creada; la clave restringida y el secreto del webhook
 nunca salen del Worker. Colocar cualquiera en un valor `VITE_*` está prohibido porque fijaría el ambiente
@@ -735,6 +748,14 @@ Checkout Session idempotente para esa selección y la verifica de nuevo mediante
 de resultado lee el estado durable de D1, no el regreso del navegador. Un contribuyente estadounidense
 necesita un acuse de EE. UU., no un CDE salvadoreño, por lo que este carril **nunca toca Wompi,
 `donation_intents` ni la tubería del CDE**.
+
+Stripe sigue siendo el formulario estadounidense predeterminado. Cuando están configurados ambos IDs de
+fondo de Givebutter revisados, un botón claramente rotulado **Dar con Givebutter — Formulario en inglés**
+desmonta Stripe Embedded Checkout y monta la campaña vinculada al ambiente. El Diezmo/Ofrenda elegido se
+mapea a su ID de fondo explícito; el monto y la frecuencia Única/Mensual son valores iniciales admitidos por
+el proveedor que se pide confirmar al donante en Givebutter. Sin el par de fondos, la alternativa se oculta.
+**Volver a Stripe — Formulario en español** revierte la elección y reutiliza la Session de Stripe existente
+en vez de crear otra.
 
 El asistente SV no crea un enlace Wompi en el Paso 1, cuando todavía se desconoce la residencia del
 donante. Si después el donante de la ruta SV selecciona Estados Unidos, la ruta de seguridad conserva el
@@ -1022,7 +1043,7 @@ El modelo de seguridad es el modelo del claim fiscal aplicado a una ruta de repa
 ## 📚 Modelo de datos
 
 <details>
-<summary><strong>Tablas de D1 (migrations/0001_init.sql, extendidas hasta la 0040)</strong></summary>
+<summary><strong>Tablas de D1 (migrations/0001_init.sql, extendidas hasta la 0043)</strong></summary>
 
 <br/>
 

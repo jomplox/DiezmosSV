@@ -6,6 +6,7 @@ import {
 } from "./support/inMemoryD1";
 import { installWorkerFetchGlobals } from "./support/workerFetchGlobals";
 import { sha256Hex, utf8Bytes } from "../../src/worker/utils/encoding";
+import { DEFAULT_EMAIL_TEMPLATES } from "../../src/worker/services/emailTemplates";
 
 installWorkerFetchGlobals();
 
@@ -166,7 +167,7 @@ describe("credential administration", () => {
 });
 
 describe("Stripe owner settings", () => {
-  it("returns presence-only configuration and safe last-webhook health to owners", async () => {
+  it("returns owner-visible organization configuration while keeping provider credentials private", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
     db.stripeWebhookEvents.push({
@@ -208,6 +209,16 @@ describe("Stripe owner settings", () => {
       stripe: {
         credentials: { ready: true },
         operational: { appEnv: "staging", mode: "Pruebas", mockMode: false },
+        configuration: {
+          legalName: "Private Legal Name",
+          ein: "12-3456789",
+          timeZone: "America/New_York",
+          organizationPhone: "+1 555 010 0100",
+          organizationWebsite: "https://example.org",
+          organizationMailingAddress: "100 Test Avenue\nNew York, NY 10001, USA",
+          signerName: "Test Signer",
+          signerTitle: "Treasurer"
+        },
         webhookHealth: {
           lastReceivedAt: "2026-08-11T10:00:00.000Z",
           eventType: "checkout.session.completed",
@@ -220,7 +231,7 @@ describe("Stripe owner settings", () => {
     const serialized = JSON.stringify(data);
     for (const privateValue of [
       "rk_test_private", "pk_test_private", "whsec_private", "pmc_private", "bpc_private",
-      "Private Legal Name", "12-3456789", "evt_private_object_id", "donor@example.org", "private_failure_internal"
+      "evt_private_object_id", "donor@example.org", "private_failure_internal"
     ]) {
       expect(serialized).not.toContain(privateValue);
     }
@@ -327,6 +338,100 @@ describe("Stripe owner settings", () => {
       );
       expect(response.status).toBe(400);
       expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("rejects blanking a configured organization value and reports a save with no edits", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const configured = {
+      APP_ENV: "staging",
+      CLOUDFLARE_ACCOUNT_ID: "account",
+      CLOUDFLARE_API_TOKEN: "writer-token",
+      CLOUDFLARE_SCRIPT_NAME: "worker",
+      STRIPE_US_LEGAL_NAME: "Example Nonprofit",
+      STRIPE_US_EIN: "12-3456789",
+      STRIPE_US_TIME_ZONE: "America/New_York",
+      STRIPE_US_PHONE: "+1 555 010 0100",
+      STRIPE_US_WEBSITE: "https://example.org",
+      STRIPE_US_MAILING_ADDRESS: "100 Test Avenue\nNew York, NY 10001, USA",
+      STRIPE_US_SIGNER_NAME: "Test Signer",
+      STRIPE_US_SIGNER_TITLE: "Treasurer"
+    };
+    const submitted = {
+      legalName: "Example Nonprofit",
+      ein: "12-3456789",
+      timeZone: "America/New_York",
+      organizationPhone: "+1 555 010 0100",
+      organizationWebsite: "https://example.org",
+      organizationMailingAddress: "100 Test Avenue\nNew York, NY 10001, USA",
+      signerName: "Test Signer",
+      signerTitle: "Treasurer"
+    };
+    const save = async (body: Record<string, string>) => worker.fetch(
+      new Request("https://example.org/api/settings/stripe", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      }),
+      env(db, configured)
+    );
+    try {
+      const blanked = await save({ ...submitted, organizationWebsite: "" });
+      expect(blanked.status).toBe(400);
+      await expect(blanked.json()).resolves.toMatchObject({ error: "blank_us_website" });
+
+      const unchanged = await save(submitted);
+      expect(unchanged.status).toBe(400);
+      await expect(unchanged.json()).resolves.toMatchObject({ error: "no_stripe_credentials_supplied" });
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(db.audits.find((row) => row.action === "STRIPE_CREDENTIALS_UPDATED")).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("still rotates a credential for a client that never sends the organization fields", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify({ success: true }), {
+      headers: { "Content-Type": "application/json" }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const response = await worker.fetch(
+        new Request("https://example.org/api/settings/stripe", {
+          method: "POST",
+          headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+          body: JSON.stringify({ restrictedKey: "rk_test_rotated_private" })
+        }),
+        env(db, {
+          APP_ENV: "staging",
+          CLOUDFLARE_ACCOUNT_ID: "account",
+          CLOUDFLARE_API_TOKEN: "writer-token",
+          CLOUDFLARE_SCRIPT_NAME: "worker",
+          STRIPE_US_LEGAL_NAME: "Example Nonprofit",
+          STRIPE_US_EIN: "12-3456789",
+          STRIPE_US_TIME_ZONE: "America/New_York",
+          STRIPE_US_PHONE: "+1 555 010 0100",
+          STRIPE_US_WEBSITE: "https://example.org",
+          STRIPE_US_MAILING_ADDRESS: "100 Test Avenue\nNew York, NY 10001, USA",
+          STRIPE_US_SIGNER_NAME: "Test Signer",
+          STRIPE_US_SIGNER_TITLE: "Treasurer"
+        })
+      );
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        ok: true,
+        updated: ["STRIPE_RESTRICTED_KEY"],
+        deleted: []
+      });
     } finally {
       vi.unstubAllGlobals();
     }
@@ -712,39 +817,280 @@ describe("Wompi notification settings", () => {
 });
 
 describe("email template settings", () => {
+  const salvadoranTemplates = {
+    dteReceipt: {
+      subject: "  CDE {{numeroControl}} actualizado  ",
+      body: "  Entrega {{monto}}.  "
+    },
+    dteInvalidation: {
+      subject: "CDE {{numeroControl}} invalidado",
+      body: "Estado {{estado}}."
+    }
+  };
+  const unitedStatesTemplates = {
+    stripeAcknowledgment: { subject: "Constancia inmediata v2", body: "Gracias, {{donante}}." },
+    stripeRefund: { subject: "Corrección v2", body: "Monto neto {{montoNeto}}." },
+    stripeAnnualStatement: { subject: "Constancia anual v2", body: "Total {{totalNeto}}." }
+  };
+
+  it("rejects legacy unscoped replacement and leaves settings and audit unchanged", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    db.settings.push({
+      key: "email_templates_json",
+      value: JSON.stringify(DEFAULT_EMAIL_TEMPLATES),
+      updated_by: "previous_owner"
+    });
+    const settingsBefore = structuredClone(db.settings);
+
+    const response = await putEmailTemplates(db, {
+      templates: DEFAULT_EMAIL_TEMPLATES
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "email_templates_reload_required"
+    });
+    expect(db.settings).toEqual(settingsBefore);
+    expect(db.audits).toHaveLength(0);
+  });
+
+  it("returns a reload conflict for malformed stored JSON without writing or auditing", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    db.settings.push({ key: "email_templates_json", value: "{malformed", updated_by: "previous_owner" });
+    const settingsBefore = structuredClone(db.settings);
+
+    const response = await putEmailTemplates(db, {
+      scope: "SV_CDE",
+      templates: salvadoranTemplates
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "email_templates_reload_required"
+    });
+    expect(db.settings).toEqual(settingsBefore);
+    expect(db.audits).toHaveLength(0);
+  });
+
+  it("returns a reload conflict for an invalid untouched scope without overwriting it", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    const stored = {
+      ...DEFAULT_EMAIL_TEMPLATES,
+      stripeRefund: { subject: "Corrección personalizada", body: "   " }
+    };
+    db.settings.push({ key: "email_templates_json", value: JSON.stringify(stored), updated_by: "previous_owner" });
+    const settingsBefore = structuredClone(db.settings);
+
+    const response = await putEmailTemplates(db, {
+      scope: "SV_CDE",
+      templates: salvadoranTemplates
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "email_templates_reload_required"
+    });
+    expect(db.settings).toEqual(settingsBefore);
+    expect(db.audits).toHaveLength(0);
+  });
+
+  it("returns a reload conflict when a legacy writer installs a structurally invalid row after preflight", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    db.settings.push({
+      key: "email_templates_json",
+      value: JSON.stringify(DEFAULT_EMAIL_TEMPLATES),
+      updated_by: "previous_owner"
+    });
+    const legacyRaw = JSON.stringify({
+      dteReceipt: DEFAULT_EMAIL_TEMPLATES.dteReceipt,
+      dteInvalidation: DEFAULT_EMAIL_TEMPLATES.dteInvalidation
+    });
+    let signalBatchReached!: () => void;
+    let releaseBatch!: () => void;
+    const batchReached = new Promise<void>((resolve) => {
+      signalBatchReached = resolve;
+    });
+    const batchReleased = new Promise<void>((resolve) => {
+      releaseBatch = resolve;
+    });
+    db.beforeEmailTemplateBatch = async () => {
+      db.beforeEmailTemplateBatch = null;
+      signalBatchReached();
+      await batchReleased;
+    };
+
+    const responsePromise = putEmailTemplates(db, {
+      scope: "SV_CDE",
+      templates: salvadoranTemplates
+    });
+    await batchReached;
+    const setting = db.settings.find((row) => row.key === "email_templates_json")!;
+    setting.value = legacyRaw;
+    setting.updated_by = "legacy_worker";
+    releaseBatch();
+    const response = await responsePromise;
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "email_templates_reload_required"
+    });
+    expect(db.settings).toContainEqual(expect.objectContaining({
+      key: "email_templates_json",
+      value: legacyRaw,
+      updated_by: "legacy_worker"
+    }));
+    expect(db.audits).toHaveLength(0);
+  });
+
+  it("retries a changed valid snapshot and preserves the intervening opposite-scope update", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    db.settings.push({
+      key: "email_templates_json",
+      value: JSON.stringify(DEFAULT_EMAIL_TEMPLATES),
+      updated_by: "previous_owner"
+    });
+    const concurrentRefund = { subject: "Corrección concurrente", body: "Monto neto {{montoNeto}}." };
+    db.beforeEmailTemplateBatch = () => {
+      db.beforeEmailTemplateBatch = null;
+      const setting = db.settings.find((row) => row.key === "email_templates_json")!;
+      setting.value = JSON.stringify({
+        ...DEFAULT_EMAIL_TEMPLATES,
+        stripeRefund: concurrentRefund
+      });
+      setting.updated_by = "concurrent_owner";
+    };
+
+    const response = await putEmailTemplates(db, {
+      scope: "SV_CDE",
+      templates: salvadoranTemplates
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      emailTemplates: {
+        templates: {
+          dteReceipt: { subject: "CDE {{numeroControl}} actualizado" },
+          stripeRefund: concurrentRefund
+        }
+      }
+    });
+    expect(db.emailTemplateBatchCount).toBe(2);
+    expect(db.audits).toHaveLength(1);
+  });
+
+  it("bounds repeated valid snapshot contention and returns a reload conflict", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    db.settings.push({
+      key: "email_templates_json",
+      value: JSON.stringify(DEFAULT_EMAIL_TEMPLATES),
+      updated_by: "previous_owner"
+    });
+    db.beforeEmailTemplateBatch = () => {
+      const setting = db.settings.find((row) => row.key === "email_templates_json")!;
+      const current = JSON.parse(String(setting.value)) as typeof DEFAULT_EMAIL_TEMPLATES;
+      setting.value = JSON.stringify({
+        ...current,
+        stripeRefund: {
+          subject: `Corrección concurrente ${db.emailTemplateBatchCount}`,
+          body: "Monto neto {{montoNeto}}."
+        }
+      });
+      setting.updated_by = "concurrent_owner";
+    };
+
+    const response = await putEmailTemplates(db, {
+      scope: "SV_CDE",
+      templates: salvadoranTemplates
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "email_templates_reload_required"
+    });
+    expect(db.emailTemplateBatchCount).toBe(3);
+    const stored = JSON.parse(String(db.settings[0]?.value)) as typeof DEFAULT_EMAIL_TEMPLATES;
+    expect(stored.dteReceipt).toEqual(DEFAULT_EMAIL_TEMPLATES.dteReceipt);
+    expect(db.audits).toHaveLength(0);
+  });
+
+  it("repairs invalid values inside the submitted scope and preserves valid opposite-scope values", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    const stored = {
+      ...DEFAULT_EMAIL_TEMPLATES,
+      dteReceipt: { subject: "", body: "valor dañado" },
+      stripeRefund: { subject: "Corrección personalizada", body: "Monto neto {{montoNeto}}." }
+    };
+    db.settings.push({ key: "email_templates_json", value: JSON.stringify(stored), updated_by: "previous_owner" });
+
+    const response = await putEmailTemplates(db, {
+      scope: "SV_CDE",
+      templates: salvadoranTemplates
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      emailTemplates: {
+        templates: {
+          dteReceipt: { subject: "CDE {{numeroControl}} actualizado", body: "Entrega {{monto}}." },
+          stripeRefund: stored.stripeRefund
+        }
+      }
+    });
+  });
+
   it("lets owners edit subject and body templates for each email type", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
 
-    const response = await worker.fetch(
-      new Request("https://example.org/api/settings/email-templates", {
-        method: "PUT",
-        headers: {
-          Authorization: "Bearer test-token",
-          "Content-Type": "application/json"
+    const salvadoranResponse = await putEmailTemplates(db, {
+      scope: "SV_CDE",
+      templates: {
+        dteReceipt: {
+          subject: "CDE {{numeroControl}} emitido",
+          body: "Estimado {{donante}}, se emitió {{numeroControl}} por {{monto}}."
         },
-        body: JSON.stringify({
-          templates: {
-            dteReceipt: {
-              subject: "CDE {{numeroControl}} emitido",
-              body: "Estimado {{donante}}, se emitió {{numeroControl}} por {{monto}}."
-            },
-            dteInvalidation: {
-              subject: "CDE {{numeroControl}} invalidado",
-              body: "El CDE {{numeroControl}} quedó {{estado}}."
-            }
-          }
-        })
-      }),
-      env(db)
-    );
+        dteInvalidation: {
+          subject: "CDE {{numeroControl}} invalidado",
+          body: "El CDE {{numeroControl}} quedó {{estado}}."
+        }
+      }
+    });
+    expect(salvadoranResponse.status).toBe(200);
+
+    const response = await putEmailTemplates(db, {
+      scope: "US_STRIPE",
+      templates: {
+        stripeAcknowledgment: {
+          subject: "Constancia inmediata para {{donante}}",
+          body: "Gracias por su entrega de {{monto}} a {{nombreLegal}}."
+        },
+        stripeRefund: {
+          subject: "{{tipoConstancia}} para {{donante}}",
+          body: "El monto neto reconocido es {{montoNeto}}."
+        },
+        stripeAnnualStatement: {
+          subject: "Constancia anual {{anio}} para {{donante}}",
+          body: "Adjuntamos el resumen de {{descripcionDonaciones}} por {{totalNeto}}."
+        }
+      }
+    });
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
       emailTemplates: {
         definitions: [
           expect.objectContaining({ type: "dteReceipt", label: "Envío de comprobante" }),
-          expect.objectContaining({ type: "dteInvalidation", label: "Invalidación de comprobante" })
+          expect.objectContaining({ type: "dteInvalidation", label: "Invalidación de comprobante" }),
+          expect.objectContaining({ type: "stripeAcknowledgment", scope: "US_STRIPE", label: "Constancia inmediata" }),
+          expect.objectContaining({ type: "stripeRefund", scope: "US_STRIPE", label: "Corrección o revocación por reembolso" }),
+          expect.objectContaining({ type: "stripeAnnualStatement", scope: "US_STRIPE", label: "Constancia anual" })
         ],
         placeholders: expect.arrayContaining(["{{numeroControl}}", "{{donante}}", "{{monto}}"]),
         templates: {
@@ -755,6 +1101,18 @@ describe("email template settings", () => {
           dteInvalidation: {
             subject: "CDE {{numeroControl}} invalidado",
             body: "El CDE {{numeroControl}} quedó {{estado}}."
+          },
+          stripeAcknowledgment: {
+            subject: "Constancia inmediata para {{donante}}",
+            body: "Gracias por su entrega de {{monto}} a {{nombreLegal}}."
+          },
+          stripeRefund: {
+            subject: "{{tipoConstancia}} para {{donante}}",
+            body: "El monto neto reconocido es {{montoNeto}}."
+          },
+          stripeAnnualStatement: {
+            subject: "Constancia anual {{anio}} para {{donante}}",
+            body: "Adjuntamos el resumen de {{descripcionDonaciones}} por {{totalNeto}}."
           }
         }
       }
@@ -781,12 +1139,217 @@ describe("email template settings", () => {
       emailTemplates: {
         templates: {
           dteReceipt: { subject: "CDE {{numeroControl}} emitido" },
-          dteInvalidation: { subject: "CDE {{numeroControl}} invalidado" }
+          dteInvalidation: { subject: "CDE {{numeroControl}} invalidado" },
+          stripeAcknowledgment: { subject: "Constancia inmediata para {{donante}}" },
+          stripeRefund: { subject: "{{tipoConstancia}} para {{donante}}" },
+          stripeAnnualStatement: { subject: "Constancia anual {{anio}} para {{donante}}" }
         }
       }
     });
   });
+
+  it("writes only the submitted country group and keeps what the other owner just saved", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    // Propietario 2 guarda EE. UU. mientras el panel de propietario 1 sigue abierto con
+    // la copia anterior.
+    const usResponse = await putEmailTemplates(db, {
+      scope: "US_STRIPE",
+      templates: {
+        stripeAcknowledgment: { subject: "Constancia inmediata v2", body: "Gracias, {{donante}}." },
+        stripeRefund: { subject: "Corrección v2", body: "Monto neto {{montoNeto}}." },
+        stripeAnnualStatement: { subject: "Constancia anual v2", body: "Total {{totalNeto}}." }
+      }
+    });
+
+    expect(usResponse.status).toBe(200);
+
+    // Propietario 1 guarda El Salvador sin haber visto la escritura de propietario 2.
+    const svResponse = await putEmailTemplates(db, {
+      scope: "SV_CDE",
+      templates: {
+        dteReceipt: { subject: "CDE {{numeroControl}} emitido", body: "Se emitió {{numeroControl}}." },
+        dteInvalidation: { subject: "CDE {{numeroControl}} invalidado", body: "Quedó {{estado}}." }
+      }
+    });
+
+    expect(svResponse.status).toBe(200);
+    await expect(svResponse.json()).resolves.toMatchObject({
+      emailTemplates: {
+        templates: {
+          dteReceipt: { subject: "CDE {{numeroControl}} emitido" },
+          dteInvalidation: { subject: "CDE {{numeroControl}} invalidado" },
+          stripeAcknowledgment: { subject: "Constancia inmediata v2", body: "Gracias, {{donante}}." },
+          stripeRefund: { subject: "Corrección v2" },
+          stripeAnnualStatement: { subject: "Constancia anual v2" }
+        }
+      }
+    });
+    // Con el guardado por país, la fila de auditoría es el único registro de quién cambió
+    // qué grupo de correspondencia fiscal.
+    expect(db.audits.map((audit) => ({
+      actorId: audit.actor_id,
+      ...JSON.parse(String(audit.metadata_json))
+    }))).toEqual([
+      {
+        actorId: "user_owner",
+        scope: "US_STRIPE",
+        types: ["stripeAcknowledgment", "stripeRefund", "stripeAnnualStatement"]
+      },
+      {
+        actorId: "user_owner",
+        scope: "SV_CDE",
+        types: ["dteReceipt", "dteInvalidation"]
+      }
+    ]);
+  });
+
+  it("preserves concurrent Salvadoran and U.S. saves after both requests read the same baseline", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    db.settings.push({
+      key: "email_templates_json",
+      value: JSON.stringify(DEFAULT_EMAIL_TEMPLATES),
+      updated_by: "previous_owner"
+    });
+    let settingReads = 0;
+    let releaseReads!: () => void;
+    const bothRequestsRead = new Promise<void>((resolve) => {
+      releaseReads = resolve;
+    });
+    db.beforeSettingRead = async () => {
+      settingReads += 1;
+      if (settingReads === 2) releaseReads();
+      await bothRequestsRead;
+    };
+
+    const [svResponse, usResponse] = await Promise.all([
+      putEmailTemplates(db, { scope: "SV_CDE", templates: salvadoranTemplates }),
+      putEmailTemplates(db, { scope: "US_STRIPE", templates: unitedStatesTemplates })
+    ]);
+    db.beforeSettingRead = null;
+
+    expect([svResponse.status, usResponse.status]).toEqual([200, 200]);
+    const stored = JSON.parse(String(db.settings.find((row) => row.key === "email_templates_json")?.value));
+    expect(stored).toMatchObject({
+      dteReceipt: { subject: "CDE {{numeroControl}} actualizado" },
+      stripeAcknowledgment: { subject: "Constancia inmediata v2" },
+      stripeRefund: { subject: "Corrección v2" },
+      stripeAnnualStatement: { subject: "Constancia anual v2" }
+    });
+    expect(db.audits.map((audit) => JSON.parse(String(audit.metadata_json)).scope).sort()).toEqual([
+      "SV_CDE",
+      "US_STRIPE"
+    ]);
+  });
+
+  it("does not persist the settings mutation when the matching audit insert fails", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    const stored = {
+      ...DEFAULT_EMAIL_TEMPLATES,
+      stripeRefund: { subject: "Corrección personalizada", body: "Monto neto {{montoNeto}}." }
+    };
+    db.settings.push({ key: "email_templates_json", value: JSON.stringify(stored), updated_by: "previous_owner" });
+    const settingsBefore = structuredClone(db.settings);
+    db.failNextAuditAction = "EMAIL_TEMPLATES_UPDATED";
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    try {
+      const response = await putEmailTemplates(db, {
+        scope: "SV_CDE",
+        templates: salvadoranTemplates
+      });
+
+      expect(response.status).toBe(500);
+      expect(db.settings).toEqual(settingsBefore);
+      expect(db.audits).toHaveLength(0);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("still validates the submitted group when the save is scoped", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const blankBody = await putEmailTemplates(db, {
+      scope: "US_STRIPE",
+      templates: {
+        stripeAcknowledgment: { subject: "Constancia inmediata", body: "   " },
+        stripeRefund: { subject: "Corrección", body: "Monto neto {{montoNeto}}." },
+        stripeAnnualStatement: { subject: "Constancia anual", body: "Total {{totalNeto}}." }
+      }
+    });
+
+    expect(blankBody.status).toBe(400);
+    await expect(blankBody.json()).resolves.toMatchObject({
+      error: "invalid_email_templates",
+      message: "Complete asunto y cuerpo para: Constancia inmediata."
+    });
+
+    const badSubject = await putEmailTemplates(db, {
+      scope: "SV_CDE",
+      templates: {
+        dteReceipt: { subject: "Asunto\r\ninyectado", body: "Se emitió {{numeroControl}}." },
+        dteInvalidation: { subject: "CDE invalidado", body: "Quedó {{estado}}." }
+      }
+    });
+
+    expect(badSubject.status).toBe(400);
+    await expect(badSubject.json()).resolves.toMatchObject({ error: "invalid_email_templates" });
+
+    // Una plantilla del grupo enviado que falta tampoco puede colarse con el valor guardado.
+    const missingTemplate = await putEmailTemplates(db, {
+      scope: "SV_CDE",
+      templates: {
+        dteReceipt: { subject: "CDE emitido", body: "Se emitió {{numeroControl}}." }
+      }
+    });
+
+    expect(missingTemplate.status).toBe(400);
+    await expect(missingTemplate.json()).resolves.toMatchObject({
+      message: "Complete la plantilla: Invalidación de comprobante."
+    });
+
+    expect(db.settings).not.toContainEqual(expect.objectContaining({ key: "email_templates_json" }));
+  });
+
+  it("rejects an unrecognized scope instead of falling back to a full replace", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const response = await putEmailTemplates(db, {
+      scope: "SV",
+      templates: {
+        dteReceipt: { subject: "CDE emitido", body: "Se emitió {{numeroControl}}." },
+        dteInvalidation: { subject: "CDE invalidado", body: "Quedó {{estado}}." }
+      }
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "invalid_email_templates",
+      message: "Grupo de plantillas de correo no reconocido."
+    });
+    expect(db.settings).not.toContainEqual(expect.objectContaining({ key: "email_templates_json" }));
+  });
 });
+
+async function putEmailTemplates(db: InMemoryD1, body: unknown): Promise<Response> {
+  return worker.fetch(
+    new Request("https://example.org/api/settings/email-templates", {
+      method: "PUT",
+      headers: {
+        Authorization: "Bearer test-token",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    }),
+    env(db)
+  );
+}
 
 describe("email sender setting", () => {
   it("lets owners customize and read back the visible sender name and Reply-To address", async () => {

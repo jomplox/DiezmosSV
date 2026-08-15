@@ -251,6 +251,7 @@ export interface StripeAnnualStatementDeliveryRecord {
   donor_email: string | null;
   snapshot_hash: string;
   snapshot_json: string;
+  email_content_json: string | null;
   revision: number;
   supersedes_delivery_id: string | null;
   status: "PENDING" | "PROCESSING" | "SENT" | "FAILED" | "REVIEW";
@@ -460,7 +461,7 @@ export async function reserveStripeAnnualStatementDelivery(
 
 export async function claimStripeAnnualStatementDelivery(
   db: D1Database,
-  input: { id: string; claimId: string; now: string }
+  input: { id: string; claimId: string; emailContentJson: string; now: string }
 ): Promise<StripeAnnualStatementDeliveryRecord | null> {
   await db.prepare(
     `UPDATE stripe_annual_statement_deliveries
@@ -478,6 +479,7 @@ export async function claimStripeAnnualStatementDelivery(
             lease_expires_at = ?,
             attempt_count = attempt_count + 1, dispatch_started_at = NULL,
             provider_id_hash = NULL, failure_code = NULL, retry_safe = 0,
+            email_content_json = COALESCE(email_content_json, ?),
             updated_at = ?
       WHERE id = ? AND (
         status = 'PENDING'
@@ -492,7 +494,7 @@ export async function claimStripeAnnualStatementDelivery(
            AND fence.status IN ('PENDING', 'PROCESSING', 'REVIEW')
       )
       RETURNING *`
-  ).bind(input.claimId, leaseExpiresAt, input.now, input.id, input.now)
+  ).bind(input.claimId, leaseExpiresAt, input.emailContentJson, input.now, input.id, input.now)
     .first<StripeAnnualStatementDeliveryRecord>();
 }
 

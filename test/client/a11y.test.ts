@@ -48,6 +48,24 @@ describe("keyboard accessibility contract", () => {
     expect(fiscalCorrectionFocusSource).not.toMatch(/from ["'](?:react|lucide-react)["']/);
   });
 
+  it("makes the email format toolbar a single tab stop with arrow-key navigation", () => {
+    const toolbar = credentialsPanelSource.slice(
+      credentialsPanelSource.indexOf('className="email-template-format-toolbar"'),
+      credentialsPanelSource.indexOf('<textarea', credentialsPanelSource.indexOf('className="email-template-format-toolbar"'))
+    );
+
+    expect(toolbar).toContain('event.key !== "ArrowLeft" && event.key !== "ArrowRight"');
+    expect(toolbar).toContain('moveFormatFocus(event.key === "ArrowRight" ? 1 : -1)');
+    expect(toolbar.match(/tabIndex=\{activeFormatIndex === \d \? 0 : -1\}/g)).toHaveLength(4);
+    // El foco no se roba al hacer clic: la selección del textarea debe sobrevivir al formateo.
+    expect(toolbar.match(/onMouseDown=\{\(event\) => event\.preventDefault\(\)\}/g)).toHaveLength(4);
+    // La flecha debe mover el índice activo y llevarse el foco con él: sin
+    // cualquiera de las dos líneas el rotativo queda a medias.
+    expect(credentialsPanelSource).toContain("const nextIndex = (activeFormatIndex + step + buttons.length) % buttons.length;");
+    expect(credentialsPanelSource).toContain("setActiveFormatIndex(nextIndex);");
+    expect(credentialsPanelSource).toContain("buttons[nextIndex].focus();");
+  });
+
   it("labels the quick-DTE Monto input for screen readers", () => {
     expect(appSource).toContain('aria-label="Monto"');
   });

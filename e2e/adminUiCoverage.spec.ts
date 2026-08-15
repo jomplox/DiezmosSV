@@ -292,38 +292,77 @@ test("covers every owner navigation surface with accessible filters and no app r
   expect(runtimeErrors).toEqual([]);
 });
 
-test("keeps Salvadoran and U.S. legal email templates visibly separated", async ({ page }) => {
+test("edits Salvadoran and U.S. email templates separately while identifying the fixed U.S. PDFs", async ({ page }) => {
+  let savedTemplates: Record<string, { subject: string; body: string }> | null = null;
+  const definitions = [
+    {
+      type: "dteReceipt",
+      scope: "SV_CDE",
+      label: "Envío de comprobante",
+      description: "Correo que recibe el donante con su CDE en PDF y JSON.",
+      defaultSubject: "Comprobante de su donación {{numeroControl}}",
+      defaultBody: "Cuerpo salvadoreño",
+      placeholders: ["{{numeroControl}}", "{{donante}}", "{{monto}}"]
+    },
+    {
+      type: "dteInvalidation",
+      scope: "SV_CDE",
+      label: "Invalidación de comprobante",
+      description: "Correo que recibe el donante cuando su CDE queda invalidado.",
+      defaultSubject: "Invalidación de su comprobante {{numeroControl}}",
+      defaultBody: "Cuerpo de invalidación",
+      placeholders: ["{{numeroControl}}", "{{donante}}", "{{estado}}"]
+    },
+    {
+      type: "stripeAcknowledgment",
+      scope: "US_STRIPE",
+      label: "Constancia inmediata",
+      description: "Se envía al confirmarse una donación única o mensual de Stripe.",
+      defaultSubject: "Constancia de su donación",
+      defaultBody: "Primera\r\nSegunda",
+      placeholders: ["{{donante}}", "{{monto}}", "{{nombreLegal}}"]
+    },
+    {
+      type: "stripeRefund",
+      scope: "US_STRIPE",
+      label: "Corrección o revocación por reembolso",
+      description: "Reemplaza o revoca la constancia anterior según el monto reembolsado.",
+      defaultSubject: "{{tipoConstancia}} de su donación",
+      defaultBody: "Cuerpo de reembolso",
+      placeholders: ["{{donante}}", "{{tipoConstancia}}", "{{montoNeto}}"]
+    },
+    {
+      type: "stripeAnnualStatement",
+      scope: "US_STRIPE",
+      label: "Constancia anual",
+      description: "Resume el total neto anual.",
+      defaultSubject: "Constancia anual {{anio}} — EE. UU.",
+      defaultBody: "Cuerpo anual",
+      placeholders: ["{{donante}}", "{{anio}}", "{{totalNeto}}"]
+    }
+  ];
+  let templates = Object.fromEntries(definitions.map((definition) => [
+    definition.type,
+    { subject: definition.defaultSubject, body: definition.defaultBody }
+  ]));
   await installOwnerAdmin(page, async (route, url) => {
     if (url.pathname !== "/api/settings/email-templates") return false;
+    if (route.request().method() === "PUT") {
+      const payload = route.request().postDataJSON() as {
+        scope?: "SV_CDE" | "US_STRIPE";
+        templates: Record<string, { subject: string; body: string }>;
+      };
+      savedTemplates = payload.templates;
+      // El endpoint real fusiona el grupo enviado sobre lo guardado y solo reemplaza las
+      // cinco cuando el cuerpo no trae `scope`. Reemplazar siempre modelaría un servidor
+      // que descarta el país que no se envió.
+      templates = payload.scope ? { ...templates, ...payload.templates } : payload.templates;
+    }
     await fulfillJson(route, {
       emailTemplates: {
-        definitions: [
-          {
-            type: "dteReceipt",
-            label: "Envío de comprobante",
-            description: "Correo que recibe el donante con su CDE en PDF y JSON.",
-            defaultSubject: "Comprobante de su donación {{numeroControl}}",
-            defaultBody: "Cuerpo salvadoreño"
-          },
-          {
-            type: "dteInvalidation",
-            label: "Invalidación de comprobante",
-            description: "Correo que recibe el donante cuando su CDE queda invalidado.",
-            defaultSubject: "Invalidación de su comprobante {{numeroControl}}",
-            defaultBody: "Cuerpo de invalidación"
-          }
-        ],
+        definitions,
         placeholders: ["{{numeroControl}}", "{{donante}}", "{{monto}}"],
-        templates: {
-          dteReceipt: {
-            subject: "Comprobante de su donación {{numeroControl}}",
-            body: "Cuerpo salvadoreño"
-          },
-          dteInvalidation: {
-            subject: "Invalidación de su comprobante {{numeroControl}}",
-            body: "Cuerpo de invalidación"
-          }
-        }
+        templates
       }
     });
     return true;
@@ -336,13 +375,53 @@ test("keeps Salvadoran and U.S. legal email templates visibly separated", async 
   const salvadoranTemplates = templatePanel.getByRole("region", { name: "Plantillas de El Salvador — CDE" });
   const usTemplates = templatePanel.getByRole("region", { name: "Plantillas de EE. UU. — Stripe 501(c)(3)" });
   await expect(salvadoranTemplates.getByRole("heading", { name: "El Salvador — CDE" })).toBeVisible();
-  await expect(salvadoranTemplates.getByRole("button", { name: "Guardar plantillas" })).toBeVisible();
+  await expect(salvadoranTemplates.getByRole("button", { name: "Guardar plantillas de El Salvador" })).toBeVisible();
   await expect(usTemplates.getByRole("heading", { name: "EE. UU. — Stripe 501(c)(3)" })).toBeVisible();
-  await expect(usTemplates.getByText("Texto legal protegido")).toBeVisible();
-  await expect(usTemplates.getByText("Constancia inmediata")).toBeVisible();
-  await expect(usTemplates.getByText("Corrección o revocación por reembolso")).toBeVisible();
-  await expect(usTemplates.getByText("Constancia anual")).toBeVisible();
-  await expect(usTemplates.locator("input, textarea")).toHaveCount(0);
+  await expect(usTemplates.getByText("PDF legal protegido")).toBeVisible();
+  await expect(usTemplates.getByText(/El asunto y cuerpo de estos correos son editables/)).toBeVisible();
+  await expect(usTemplates.getByRole("textbox")).toHaveCount(6);
+
+  for (const definition of definitions) {
+    const editor = templatePanel.getByRole("region", { name: definition.label, exact: true });
+    await expect(editor).toBeVisible();
+    await expect(editor.getByRole("textbox", { name: `Asunto — ${definition.label}`, exact: true })).toBeVisible();
+    await expect(editor.getByRole("textbox", { name: `Cuerpo del correo — ${definition.label}`, exact: true })).toBeVisible();
+    await expect(editor.getByRole("toolbar", { name: `Formato del cuerpo — ${definition.label}`, exact: true })).toBeVisible();
+    for (const format of ["Negrita", "Cursiva", "Subrayado", "Cita"]) {
+      await expect(editor.getByRole("button", { name: `${format} — ${definition.label}`, exact: true })).toBeVisible();
+    }
+  }
+
+  const immediate = templatePanel.getByRole("region", { name: "Constancia inmediata", exact: true });
+  const body = immediate.getByRole("textbox", { name: "Cuerpo del correo — Constancia inmediata", exact: true });
+  await expect(body).toHaveValue("Primera\nSegunda");
+  await body.evaluate((textarea: HTMLTextAreaElement) => textarea.select());
+  await immediate.getByRole("button", { name: "Negrita — Constancia inmediata", exact: true }).click();
+  await expect(body).toHaveValue("**Primera**\n**Segunda**");
+  await expect(body).toBeFocused();
+  await expect.poll(() => body.evaluate((textarea: HTMLTextAreaElement) => [textarea.selectionStart, textarea.selectionEnd]))
+    .toEqual([2, 21]);
+
+  const applyMultilineFormat = async (button: string, expected: string, expectedSelection: [number, number]) => {
+    await body.fill("Primera\nSegunda\n\nTercera");
+    await body.evaluate((textarea: HTMLTextAreaElement) => textarea.select());
+    await immediate.getByRole("button", { name: `${button} — Constancia inmediata`, exact: true }).click();
+    await expect(body).toHaveValue(expected);
+    await expect.poll(() => body.evaluate((textarea: HTMLTextAreaElement) => [textarea.selectionStart, textarea.selectionEnd]))
+      .toEqual(expectedSelection);
+  };
+  await applyMultilineFormat("Negrita", "**Primera**\n**Segunda**\n\n**Tercera**", [2, 34]);
+  await applyMultilineFormat("Cursiva", "*Primera*\n*Segunda*\n\n*Tercera*", [1, 29]);
+  await applyMultilineFormat("Subrayado", "++Primera++\n++Segunda++\n\n++Tercera++", [2, 34]);
+  await body.fill("Texto");
+  await body.evaluate((textarea: HTMLTextAreaElement) => textarea.select());
+  await immediate.getByRole("button", { name: "Cita — Constancia inmediata", exact: true }).click();
+  await expect(body).toHaveValue("> Texto");
+  await immediate.getByRole("textbox", { name: "Asunto — Constancia inmediata", exact: true }).fill("Gracias por su entrega, {{donante}}");
+  await usTemplates.getByRole("button", { name: "Guardar plantillas de EE. UU." }).click();
+  await expect.poll(() => savedTemplates?.stripeAcknowledgment.subject ?? null)
+    .toBe("Gracias por su entrega, {{donante}}");
+  expect(savedTemplates?.stripeAcknowledgment.body).toBe("> Texto");
 });
 
 test("paginates every long preview table in Exportar without changing its data source", async ({ page }) => {
@@ -571,8 +650,116 @@ test("does not show the prior account Stripe status while the next account loads
   }
 });
 
+test("preloads and edits owner-visible U.S. organization settings while Stripe credentials stay write-only", async ({ page }) => {
+  const configuration = {
+    legalName: "Friends of Example Church, Inc.",
+    ein: "12-3456789",
+    timeZone: "America/New_York",
+    organizationPhone: "+1 (616) 555-0143",
+    organizationWebsite: "https://example.org",
+    organizationMailingAddress: "100 Example Avenue\nGrandville, MI 49418\nUnited States",
+    signerName: "Alex Example",
+    signerTitle: "Treasurer"
+  };
+  let submitted: Record<string, unknown> | null = null;
+  await installOwnerAdmin(page, async (route, url) => {
+    const request = route.request();
+    if (url.pathname === "/api/settings/emission-environment" && request.method() === "GET") {
+      await fulfillJson(route, {
+        emissionEnvironment: {
+          environment: "01",
+          source: "deployment_default",
+          appEnv: "production",
+          locked: true,
+          allowedEnvironments: ["01"]
+        }
+      });
+      return true;
+    }
+    if (url.pathname === "/api/credentials" && request.method() === "GET") {
+      await fulfillJson(route, {
+        credentials: {
+          target: { appEnv: "staging", scriptName: "staging-worker", writerConfigured: true, writerMissing: [] },
+          groups: {},
+          certificateExpiresAt: null,
+          stripeOperational: { appEnv: "staging", mode: "Pruebas", mockMode: false, localProxyConfigured: false }
+        }
+      });
+      return true;
+    }
+    if (url.pathname === "/api/settings/stripe" && request.method() === "GET") {
+      // Después del POST este GET sigue sirviendo la `configuration` previa: es el
+      // isolate que aún tiene el env anterior a la nueva versión del Worker.
+      await fulfillJson(route, {
+        stripe: {
+          credentials: { label: "Stripe EE. UU.", ready: true, items: [] },
+          operational: { appEnv: "staging", mode: "Pruebas", mockMode: false, localProxyConfigured: false },
+          configuration,
+          webhookHealth: { state: "none", label: "Sin eventos recibidos" }
+        }
+      });
+      return true;
+    }
+    if (url.pathname === "/api/settings/stripe" && request.method() === "POST") {
+      submitted = request.postDataJSON() as Record<string, unknown>;
+      await fulfillJson(route, { updated: ["STRIPE_US_PHONE", "STRIPE_US_TIME_ZONE"] });
+      return true;
+    }
+    return false;
+  });
+
+  await openView(page, "Configuración");
+  await page.getByRole("button", { name: /^Stripe EE\. UU\./ }).click();
+
+  await expect(page.getByLabel("Nombre legal")).toHaveValue(configuration.legalName);
+  await expect(page.getByLabel("EIN")).toHaveValue(configuration.ein);
+  await expect(page.getByLabel("Zona horaria")).toHaveValue(configuration.timeZone);
+  await expect(page.getByLabel("Zona horaria")).toHaveJSProperty("tagName", "SELECT");
+  await expect(page.getByLabel("Teléfono de la organización")).toHaveValue(configuration.organizationPhone);
+  await expect(page.getByLabel("Sitio web")).toHaveValue(configuration.organizationWebsite);
+  await expect(page.getByLabel("Dirección postal")).toHaveValue(configuration.organizationMailingAddress);
+  await expect(page.getByLabel("Nombre del firmante autorizado")).toHaveValue(configuration.signerName);
+  await expect(page.getByLabel("Cargo del firmante autorizado")).toHaveValue(configuration.signerTitle);
+  await expect(page.getByLabel("Clave restringida")).toHaveValue("");
+  await expect(page.getByLabel("Clave restringida")).toHaveAttribute("type", "password");
+
+  await page.getByLabel("Zona horaria").selectOption("America/Chicago");
+  await page.getByLabel("Teléfono de la organización").fill("+1 (312) 555-0100");
+  const staleRefresh = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === "/api/settings/stripe" && response.request().method() === "GET");
+  await page.getByRole("button", { name: "Guardar configuración de Stripe" }).click();
+
+  await expect.poll(() => submitted).toEqual({
+    restrictedKey: "",
+    publishableKey: "",
+    paymentMethodConfigurationId: "",
+    billingPortalConfigurationId: "",
+    timeZone: "America/Chicago",
+    organizationPhone: "+1 (312) 555-0100"
+  });
+  for (const untouchedField of [
+    "legalName",
+    "ein",
+    "organizationWebsite",
+    "organizationMailingAddress",
+    "signerName",
+    "signerTitle"
+  ]) {
+    expect(submitted!).not.toHaveProperty(untouchedField);
+  }
+
+  // El GET de refresco ya respondió con la `configuration` original. El formulario debe
+  // conservar los valores aceptados; si se rehidratara de esa lectura, el teléfono
+  // volvería al anterior y el siguiente guardado lo reescribiría encima del nuevo.
+  await staleRefresh;
+  await expect(page.getByLabel("Teléfono de la organización")).toHaveValue("+1 (312) 555-0100");
+  await expect(page.getByLabel("Zona horaria")).toHaveValue("America/Chicago");
+});
+
 test("clears Stripe write-only replacements after POST success even when status refresh fails", async ({ page }) => {
   let postSucceeded = false;
+  let submitted: Record<string, unknown> | null = null;
+  const legalName = "Friends of Durable Example, Inc.";
   await installOwnerAdmin(page, async (route, url) => {
     const request = route.request();
     if (url.pathname === "/api/credentials" && request.method() === "GET") {
@@ -591,12 +778,33 @@ test("clears Stripe write-only replacements after POST success even when status 
       return true;
     }
     if (url.pathname === "/api/settings/stripe" && request.method() === "POST") {
+      submitted = request.postDataJSON() as Record<string, unknown>;
       postSucceeded = true;
       await fulfillJson(route, { updated: ["STRIPE_RESTRICTED_KEY"] });
       return true;
     }
-    if (postSucceeded && url.pathname === "/api/settings/stripe" && request.method() === "GET") {
-      await fulfillJson(route, { error: "refresh_failed" }, 503);
+    if (url.pathname === "/api/settings/stripe" && request.method() === "GET") {
+      if (postSucceeded) {
+        await fulfillJson(route, { error: "refresh_failed" }, 503);
+      } else {
+        await fulfillJson(route, {
+          stripe: {
+            credentials: { label: "Stripe EE. UU.", ready: true, items: [] },
+            operational: { appEnv: "staging", mode: "Pruebas", mockMode: false, localProxyConfigured: false },
+            configuration: {
+              legalName,
+              ein: "12-3456789",
+              timeZone: "America/New_York",
+              organizationPhone: "+1 555 010 0100",
+              organizationWebsite: "https://example.org",
+              organizationMailingAddress: "100 Test Avenue\nNew York, NY 10001, USA",
+              signerName: "Test Signer",
+              signerTitle: "Treasurer"
+            },
+            webhookHealth: { state: "none", label: "Sin eventos recibidos" }
+          }
+        });
+      }
       return true;
     }
     return false;
@@ -604,12 +812,33 @@ test("clears Stripe write-only replacements after POST success even when status 
   await openView(page, "Configuración");
   await page.getByRole("button", { name: /^Stripe EE\. UU\./ }).click();
   const replacement = page.getByLabel("Clave restringida");
+  const visibleLegalName = page.getByLabel("Nombre legal");
+  await expect(visibleLegalName).toHaveValue(legalName);
   await replacement.fill("rk_test_write_only_fixture");
 
   await page.getByRole("button", { name: "Guardar configuración de Stripe" }).click();
 
   await expect.poll(() => postSucceeded).toBe(true);
+  expect(submitted).toEqual({
+    restrictedKey: "rk_test_write_only_fixture",
+    publishableKey: "",
+    paymentMethodConfigurationId: "",
+    billingPortalConfigurationId: ""
+  });
+  for (const organizationField of [
+    "legalName",
+    "ein",
+    "timeZone",
+    "organizationPhone",
+    "organizationWebsite",
+    "organizationMailingAddress",
+    "signerName",
+    "signerTitle"
+  ]) {
+    expect(submitted!).not.toHaveProperty(organizationField);
+  }
   await expect(replacement).toHaveValue("");
+  await expect(visibleLegalName).toHaveValue(legalName);
   await expect(page.getByRole("status")).toContainText(
     "Configuración de Stripe guardada, pero no se pudo actualizar el estado mostrado."
   );
@@ -619,6 +848,16 @@ test("keeps Stripe controls busy while an unrelated settings action finishes", a
   let stripePostStarted = false;
   let releaseStripePost!: () => void;
   const stripePostBarrier = new Promise<void>((resolve) => { releaseStripePost = resolve; });
+  const configuration = {
+    legalName: "Friends of Busy Example, Inc.",
+    ein: "12-3456789",
+    timeZone: "America/New_York",
+    organizationPhone: "+1 555 010 0100",
+    organizationWebsite: "https://example.org",
+    organizationMailingAddress: "100 Test Avenue\nNew York, NY 10001, USA",
+    signerName: "Test Signer",
+    signerTitle: "Treasurer"
+  };
   await installOwnerAdmin(page, async (route, url) => {
     const request = route.request();
     if (url.pathname === "/api/credentials" && request.method() === "GET") {
@@ -628,6 +867,17 @@ test("keeps Stripe controls busy while an unrelated settings action finishes", a
           groups: {},
           certificateExpiresAt: null,
           stripeOperational: { appEnv: "staging", mode: "Pruebas", mockMode: false, localProxyConfigured: false }
+        }
+      });
+      return true;
+    }
+    if (url.pathname === "/api/settings/stripe" && request.method() === "GET") {
+      await fulfillJson(route, {
+        stripe: {
+          credentials: { label: "Stripe EE. UU.", ready: true, items: [] },
+          operational: { appEnv: "staging", mode: "Pruebas", mockMode: false, localProxyConfigured: false },
+          configuration,
+          webhookHealth: { state: "none", label: "Sin eventos recibidos" }
         }
       });
       return true;
@@ -654,6 +904,8 @@ test("keeps Stripe controls busy while an unrelated settings action finishes", a
   try {
     await openView(page, "Configuración");
     await page.getByRole("button", { name: /^Stripe EE\. UU\./ }).click();
+    await expect(page.getByLabel("Nombre legal")).toHaveValue(configuration.legalName);
+    await page.getByLabel("Clave restringida").fill("rk_test_busy_fixture");
     const stripeSave = page.getByRole("button", { name: "Guardar configuración de Stripe" });
     await stripeSave.click();
     await expect.poll(() => stripePostStarted).toBe(true);

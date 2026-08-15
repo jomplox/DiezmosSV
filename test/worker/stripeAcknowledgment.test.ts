@@ -88,6 +88,71 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     expect(content.html).not.toContain("Ana <Ejemplo>");
   });
 
+  it("renders editable immediate and refund email wrappers with U.S. delivery values", () => {
+    const shared = {
+      donorName: "Ana <Ejemplo>",
+      amountCents: 5000,
+      frequency: "ONCE" as const,
+      giftType: "TITHE" as const,
+      settledAt: "2026-08-10T12:00:00.000Z",
+      timeZone: "America/New_York",
+      legalName: "Friends & Example",
+      ein: "12-3456789",
+      branding: { organizationName: "Organización Visible", logoUrl: null }
+    };
+    const immediate = stripeAcknowledgmentContent({
+      ...shared,
+      template: {
+        subject: "Gracias {{donante}} — {{monto}}",
+        body: "MENSAJE INMEDIATO\n{{nombreLegal}} · EIN {{ein}}\n{{fecha}} · {{tipoEntrega}} · {{frecuencia}}"
+      }
+    });
+    const refunded = stripeAcknowledgmentContent({
+      ...shared,
+      kind: "FULL_REFUND",
+      refundedAmountCents: 5000,
+      template: {
+        subject: "{{tipoConstancia}} — {{donante}}",
+        body: "MENSAJE DE REEMBOLSO\n{{detalleReembolso}}\nNeto: {{montoNeto}}"
+      }
+    });
+
+    expect(immediate.subject).toBe("Gracias Ana <Ejemplo> — $50.00 USD");
+    expect(immediate.text).toContain("MENSAJE INMEDIATO");
+    expect(immediate.text).toContain("Friends & Example · EIN 12-3456789");
+    expect(immediate.text).toContain("10 de agosto de 2026 · Diezmo · Única");
+    expect(immediate.html).toContain("Ana &lt;Ejemplo&gt;");
+    expect(refunded.subject).toBe("Constancia revocada — Ana <Ejemplo>");
+    expect(refunded.text).toContain("MENSAJE DE REEMBOLSO");
+    expect(refunded.text).toContain("Se registró un reembolso total de $50.00 USD");
+    expect(refunded.text).toContain("Neto: $0.00 USD");
+  });
+
+  it("does not interpret donor or organization values as operator formatting", () => {
+    const content = stripeAcknowledgmentContent({
+      donorName: "Ana **Estrella**",
+      amountCents: 5000,
+      frequency: "ONCE",
+      giftType: "TITHE",
+      settledAt: "2026-08-10T12:00:00.000Z",
+      timeZone: "America/New_York",
+      legalName: "Friends ++C++",
+      ein: "12-3456789",
+      branding: { organizationName: "Organización Visible", logoUrl: null },
+      template: {
+        subject: "Constancia",
+        body: "{{donante}}\n\n{{nombreLegal}}"
+      }
+    });
+
+    expect(content.text).toContain("Ana **Estrella**");
+    expect(content.text).toContain("Friends ++C++");
+    expect(content.html).toContain("Ana &#42;&#42;Estrella&#42;&#42;");
+    expect(content.html).toContain("Friends &#43;&#43;C&#43;&#43;");
+    expect(content.html).not.toContain("<strong>Estrella</strong>");
+    expect(content.html).not.toContain("<u>C</u>");
+  });
+
   it("formats the settled date in the configured U.S. timezone at the New Year boundary", () => {
     const content = stripeAcknowledgmentContent({
       donorName: "Ana",
@@ -338,6 +403,48 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     expect(attachment?.filename).toBe("constancia-donacion-eeuu-stripe_ack_fixture-r1.pdf");
     expect(attachment?.pdfBytes).toBeInstanceOf(Uint8Array);
     expect(await PDFDocument.load(attachment!.pdfBytes!)).toBeInstanceOf(PDFDocument);
+  });
+
+  it("dispatches the configured immediate email wrapper without changing the fixed receipt PDF", async () => {
+    database.prepare("INSERT INTO app_settings (key, value) VALUES (?, ?)").run(
+      "email_templates_json",
+      JSON.stringify({
+        stripeAcknowledgment: {
+          subject: "CORREO PERSONALIZADO {{donante}}",
+          body: "**CUERPO PERSONALIZADO** *{{monto}}*\n\n> ++{{nombreLegal}}++"
+        }
+      })
+    );
+    let sent: {
+      subject: string;
+      text: string;
+      html: string;
+      pdfBytes: Uint8Array;
+    } | undefined;
+    vi.spyOn(EmailService.prototype, "sendStripeAcknowledgment")
+      .mockImplementation(async (input, beforeProviderDispatch) => {
+        sent = input;
+        await beforeProviderDispatch?.();
+        return { providerResponse: {}, providerDeliveryId: `sha256:${"b".repeat(64)}` };
+      });
+
+    await expect(deliverNextStripeAcknowledgment(workerEnv, repo, {
+      now: "2026-08-10T12:01:00.000Z"
+    })).resolves.toMatchObject({ outcome: "SENT" });
+
+    expect(sent?.subject).toBe("CORREO PERSONALIZADO Ana Ejemplo");
+    expect(sent?.text).toBe("CUERPO PERSONALIZADO $50.00 USD\n\nNonprofit Test Fixture");
+    expect(sent?.html).toContain("<strong>CUERPO PERSONALIZADO</strong>");
+    expect(sent?.html).toContain("<em>$50.00 USD</em>");
+    expect(sent?.html).toContain("<u>Nonprofit Test Fixture</u>");
+    expect(sent?.html).toContain("<blockquote");
+    const directory = mkdtempSync(join(tmpdir(), "stripe-ack-template-boundary-"));
+    directories.push(directory);
+    const pdfPath = join(directory, "acknowledgment.pdf");
+    writeFileSync(pdfPath, sent!.pdfBytes);
+    const pdfText = execFileSync("pdftotext", ["-layout", pdfPath, "-"], { encoding: "utf8" });
+    expect(pdfText.replace(/\s+/g, " ")).toContain("No goods or services were provided in exchange for your contribution.");
+    expect(pdfText).not.toContain("CUERPO PERSONALIZADO");
   });
 
   it("wires durable fields into the attached Stripe acknowledgment PDF", async () => {
@@ -626,6 +733,15 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
   });
 
   it("preserves SENT evidence and sends idempotent partial and full refund corrections", async () => {
+    database.prepare("INSERT INTO app_settings (key, value) VALUES (?, ?)").run(
+      "email_templates_json",
+      JSON.stringify({
+        stripeRefund: {
+          subject: "AJUSTE {{tipoConstancia}} — {{donante}}",
+          body: "REEMBOLSO PERSONALIZADO {{montoReembolsado}} · {{montoNeto}}\n{{detalleReembolso}}"
+        }
+      })
+    );
     const messages: Array<{ subject: string; text: string }> = [];
     vi.spyOn(EmailService.prototype, "sendStripeAcknowledgment")
       .mockImplementation(async (input, beforeProviderDispatch) => {
@@ -650,7 +766,8 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     expect(await deliverNextStripeAcknowledgment(workerEnv, repo, {
       now: "2026-08-10T12:03:00.000Z"
     })).toMatchObject({ outcome: "SENT" });
-    expect(messages[1].subject).toContain("corregida");
+    expect(messages[1].subject).toBe("AJUSTE Constancia corregida — Ana Ejemplo");
+    expect(messages[1].text).toContain("REEMBOLSO PERSONALIZADO $10.00 USD · $40.00 USD");
     expect(messages[1].text).toContain("$10.00 USD");
     expect(messages[1].text).toContain("$40.00 USD");
 
@@ -667,7 +784,7 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     expect(await deliverNextStripeAcknowledgment(workerEnv, repo, {
       now: "2026-08-10T12:05:00.000Z"
     })).toMatchObject({ outcome: "SENT" });
-    expect(messages[2].subject).toContain("revocada");
+    expect(messages[2].subject).toBe("AJUSTE Constancia revocada — Ana Ejemplo");
     expect(messages[2].text).toContain("reembolso total");
     expect(database.prepare(
       "SELECT revision, kind, status FROM stripe_acknowledgment_deliveries ORDER BY revision"

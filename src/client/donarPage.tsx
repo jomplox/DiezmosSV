@@ -1,5 +1,6 @@
 import { markDonorBrandingSettled } from "./donorReady";
 import svFlag from "./assets/sv-flag.svg";
+import { GIVEBUTTER_ICON_DATA_URI } from "./assets/givebutterIcon";
 import { AlertCircle, CheckCircle2, ShieldCheck } from "lucide-react";
 import { type FormEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
@@ -44,6 +45,7 @@ import {
   DONAR_WIDGET_LOADING_MESSAGE,
   DONAR_WIDGET_VERIFYING_MESSAGE,
   DONAR_WOMPI_CHECKOUT_ORIGIN,
+  GIVEBUTTER_RENDER_TIMEOUT_MS,
   STRIPE_CANCELED_MESSAGE,
   STRIPE_CHECKOUT_PATH,
   STRIPE_FREQ_MONTHLY_LABEL,
@@ -64,6 +66,8 @@ import {
   donationStep2FieldErrors,
   firstDonationFieldError,
   doorFromSearch,
+  givebutterEmbedUrl,
+  givebutterHostedUrl,
   stripeCheckoutBody,
   stripeIntro,
   graciasDisplayFromSearch,
@@ -435,6 +439,13 @@ export function DonarPage() {
   // promise that initializes Stripe Embedded Checkout inside Paso 2.
   const [monthly, setMonthly] = useState(false);
   const [stripeGiftType, setStripeGiftType] = useState<StripeGiftType>("TITHE");
+  const [usProvider, setUsProvider] = useState<"stripe" | "givebutter">("stripe");
+  // Two independent facts about Givebutter's embed, deliberately not one status:
+  // "loaded" only says the frame fired onLoad (it hides the loading placeholder), and
+  // "delayed" says the render budget elapsed (it also hides that placeholder). Keeping
+  // them separate makes the budget authoritative even when an error document fires load.
+  const [givebutterFrameLoaded, setGivebutterFrameLoaded] = useState(false);
+  const [givebutterFrameDelayed, setGivebutterFrameDelayed] = useState(false);
   const stripeAttemptRef = useRef<{ fingerprint: string; requestId: string } | null>(null);
   const [stripeSessionAttempt, setStripeSessionAttempt] = useState<{
     fingerprint: string;
@@ -456,6 +467,12 @@ export function DonarPage() {
   // summary's Editar control on an embedded handoff step.
   const heroInputRef = useRef<HTMLInputElement | null>(null);
   const summaryEditRef = useRef<HTMLButtonElement | null>(null);
+  // The two US provider switches unmount the very button that was clicked, so focus
+  // has to be handed to the TOP of the surface that replaces it. The flag keeps the
+  // initial mount of Paso 2 alone — only a real switch moves focus.
+  const stripeIntroRef = useRef<HTMLParagraphElement | null>(null);
+  const stripeReturnRef = useRef<HTMLButtonElement | null>(null);
+  const usProviderSwitchedRef = useRef(false);
 
   // When to render the Stripe wizard instead of the SV fiscal steps: the EE.
   // UU. door, OR the país=US safety net on the SV form (harmless belt-and-braces).
@@ -471,6 +488,10 @@ export function DonarPage() {
       ? DONAR_GIFT_TYPE_LABEL[form.giftType]
       : "";
   const frequencyLabel = monthly ? STRIPE_FREQ_MONTHLY_LABEL : STRIPE_FREQ_ONCE_LABEL;
+  const givebutterInput = { amount: form.amount, monthly, giftType: stripeGiftType };
+  const givebutterFrameUrl = givebutterEmbedUrl(givebutterInput);
+  const givebutterHostedPageUrl = givebutterHostedUrl(givebutterInput);
+  const givebutterAvailable = givebutterFrameUrl !== null && givebutterHostedPageUrl !== null;
 
   // Choose a door: record it in ?ruta (composing with — never clobbering — any
   // existing query) so a refresh keeps the door, then swap the view. null returns
@@ -494,6 +515,7 @@ export function DonarPage() {
     setForm((current) => ({ ...current, foreignResident: false, pais: "" }));
     setMonthly(false);
     setStripeGiftType("TITHE");
+    setUsProvider("stripe");
     stripeAttemptRef.current = null;
     setStripeSessionAttempt(null);
     setStep(1);
@@ -605,6 +627,49 @@ export function DonarPage() {
     link.href = DONAR_WOMPI_CHECKOUT_ORIGIN;
     document.head.appendChild(link);
   }, [door, usDonation]);
+
+  // Givebutter's embed is mounted only after the donor explicitly selects it, and this
+  // timer is authoritative: the render budget clears the loading placeholder whether
+  // or not the frame reported load. A cross-origin iframe fires load for the
+  // browser's own error documents too (deleted campaign, blocked host, dropped
+  // network), so load is never proof that the embed rendered and must not suppress the
+  // stable hosted-page escape hatch. Switching back to Stripe cancels this timer and
+  // removes the iframe.
+  // Layout effect, not a passive one: the reset has to commit before paint, or a second
+  // entry (Givebutter → Stripe → Givebutter) paints one frame carrying the previous
+  // session's delayed class and no placeholder before resetting the loading state.
+  useLayoutEffect(() => {
+    if (!usDonation || step !== 2 || usProvider !== "givebutter" || !givebutterFrameUrl) {
+      return;
+    }
+    let cancelled = false;
+    setGivebutterFrameLoaded(false);
+    setGivebutterFrameDelayed(false);
+    const timeout = window.setTimeout(() => {
+      if (!cancelled) {
+        setGivebutterFrameDelayed(true);
+      }
+    }, GIVEBUTTER_RENDER_TIMEOUT_MS);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [givebutterFrameUrl, step, usDonation, usProvider]);
+
+  // A provider switch unmounts the button that was just activated; without this,
+  // focus falls to <body> and the donor loses their place mid-donation.
+  useEffect(() => {
+    if (!usProviderSwitchedRef.current) {
+      return;
+    }
+    usProviderSwitchedRef.current = false;
+    // Givebutter's surface opens on its own return control; Stripe's opens on the step
+    // intro that sits above its form. The Givebutter choice is NOT the Stripe landing:
+    // it lives below the form, so focusing it would scroll the donor past the very
+    // thing they asked for and hand a screen reader the Givebutter alternative first.
+    const target = usProvider === "givebutter" ? stripeReturnRef.current : stripeIntroRef.current;
+    target?.focus();
+  }, [usProvider]);
 
   // Listen for the thank-you page's postMessage (fired when it runs inside the
   // widget iframe modal) so we can swap to the thank-you state directly.
@@ -871,9 +936,11 @@ export function DonarPage() {
     // the donor could never reach the SV form again.
     if (door === "sv" && usDonation) {
       setMonthly(false);
+      setUsProvider("stripe");
       update({ pais: "" });
       return;
     }
+    setUsProvider("stripe");
     setStep(1);
   }
 
@@ -891,6 +958,7 @@ export function DonarPage() {
       setStripeSessionAttempt(null);
     }
     setStage("form");
+    setUsProvider("stripe");
     setStep(1);
   }
 
@@ -1216,6 +1284,7 @@ export function DonarPage() {
                       params.set(DONAR_ROUTE_PARAM, "eeuu");
                       window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
                       setStripeGiftType(form.giftType === "OFRENDA" ? "OFFERING" : "TITHE");
+                      setUsProvider("stripe");
                       stripeAttemptRef.current = null;
                       setStripeSessionAttempt(null);
                       update({ foreignResident: false, pais: "" });
@@ -1292,13 +1361,107 @@ export function DonarPage() {
           <div className="donar-stripe donar-step">
             {summary}
             <div className="donar-handoff">
-              <p className="donar-intro">{stripeIntro(organizationName)}</p>
-              {stripeSessionAttempt && (
-                <StripeDonationForm
-                  key={stripeSessionAttempt.sequence}
-                  session={stripeSessionAttempt.session}
-                  onRetry={retryStripeSession}
-                />
+              {/* tabIndex={-1} makes this programmatically focusable without adding a
+                  tab stop: it is the landing point when the donor returns to Stripe. */}
+              <p className="donar-intro" ref={stripeIntroRef} tabIndex={-1}>
+                {stripeIntro(organizationName)}
+              </p>
+              {/* One persistent live region for the whole step: the surface swap is
+                  silent otherwise, since each switch only unmounts and mounts markup. */}
+              <p className="donar-provider-announcement" role="status" aria-live="polite">
+                {usProvider === "givebutter"
+                  ? "Formulario de Givebutter, en inglés."
+                  : "Formulario de Stripe, en español."}
+              </p>
+              {usProvider === "stripe" && (
+                <>
+                  {stripeSessionAttempt && (
+                    <StripeDonationForm
+                      key={stripeSessionAttempt.sequence}
+                      session={stripeSessionAttempt.session}
+                      onRetry={retryStripeSession}
+                    />
+                  )}
+                  {/* The alternative sits BELOW the default form: Stripe carries the
+                      Spanish form and the tax receipt, so it owns the "understand → pay"
+                      reading flow. Givebutter is the way out of it, not the way in. */}
+                  {givebutterAvailable && (
+                    <button
+                      type="button"
+                      className="donar-provider-choice"
+                      onClick={() => {
+                        usProviderSwitchedRef.current = true;
+                        setUsProvider("givebutter");
+                      }}
+                    >
+                      <img
+                        src={GIVEBUTTER_ICON_DATA_URI}
+                        alt=""
+                        aria-hidden="true"
+                      />
+                      <span className="donar-provider-choice-copy">
+                        <strong>{stripeGiftType === "TITHE" ? "Diezmar con Givebutter" : "Ofrendar con Givebutter"}</strong>
+                        <small>(Con formulario en inglés)</small>
+                      </span>
+                      <span className="donar-provider-choice-arrow" aria-hidden="true">→</span>
+                    </button>
+                  )}
+                </>
+              )}
+              {usProvider === "givebutter" && givebutterFrameUrl && givebutterHostedPageUrl && (
+                <div className="donar-givebutter-surface">
+                  <button
+                    ref={stripeReturnRef}
+                    type="button"
+                    className="donar-provider-choice donar-provider-choice-stripe"
+                    onClick={() => {
+                      usProviderSwitchedRef.current = true;
+                      setUsProvider("stripe");
+                    }}
+                  >
+                    <span className="donar-provider-stripe-mark" aria-hidden="true" />
+                    <span className="donar-provider-choice-copy">
+                      <strong>Volver a Stripe</strong>
+                      <small>Formulario en español</small>
+                    </span>
+                    <span className="donar-provider-choice-arrow" aria-hidden="true">←</span>
+                  </button>
+                  <p className="donar-givebutter-confirmation">
+                    Confirme en Givebutter el tipo de entrega, el monto y la frecuencia antes de continuar; estos datos se envían solo como valores iniciales.
+                  </p>
+                  {/* The single escape hatch stays above the 760px frame: a donor staring
+                      at a blank embed must not have to scroll past it to find the way out.
+                      It uses the same quiet, single-line link treatment as Wompi. */}
+                  <a
+                    className={givebutterFrameDelayed ? "link-button donar-givebutter-hint donar-givebutter-fallback" : "link-button donar-givebutter-hint"}
+                    href={givebutterHostedPageUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    ¿Problemas con el formulario? Abrir Givebutter
+                  </a>
+                  {/* The placeholder is positioned against the frame's own box. It clears
+                      once the budget elapses so a frame whose host never answers does not
+                      keep saying "preparando" beside the explicit fallback link. */}
+                  <div className="donar-givebutter-frame-area">
+                    {!givebutterFrameLoaded && !givebutterFrameDelayed && (
+                      <p className="donar-givebutter-loading" aria-live="polite">
+                        {DONAR_WIDGET_LOADING_MESSAGE}
+                      </p>
+                    )}
+                    {/* `payment` sin origen equivale a `payment 'src'`: solo el embed de
+                        Givebutter recibe la Payment Request API, no cada origen del árbol
+                        de marcos. Sin referrerPolicy propio el marco hereda el
+                        Referrer-Policy: no-referrer del documento. */}
+                    <iframe
+                      className="donar-givebutter-frame"
+                      title="Formulario de donación Givebutter (en inglés)"
+                      src={givebutterFrameUrl}
+                      allow="payment; clipboard-write"
+                      onLoad={() => setGivebutterFrameLoaded(true)}
+                    />
+                  </div>
+                </div>
               )}
             </div>
           </div>

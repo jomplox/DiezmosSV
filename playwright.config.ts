@@ -19,6 +19,10 @@ const miniflareCacheDir = process.env.MINIFLARE_CACHE_DIR
   ?? (persistTo
     ? join(persistTo, "miniflare-cache")
     : join(homedir(), "Library", "Application Support", "DiezmosSV", "private", "cache", "miniflare"));
+const browserFixtureGivebutterFunds = {
+  VITE_GIVEBUTTER_TITHE_FUND_ID: "731902",
+  VITE_GIVEBUTTER_OFFERING_FUND_ID: "842013"
+};
 
 const migrateCommand = `npx wrangler d1 migrations apply diezmossv-local-db-example --local${persistFlag}`;
 const devCommand = `npm run dev:worker -- --port 8787 --ip 127.0.0.1${persistFlag}`;
@@ -48,7 +52,7 @@ export default defineConfig({
     url: "http://127.0.0.1:8787/",
     reuseExistingServer: !isCI,
     timeout: 180_000,
-    env: { MINIFLARE_CACHE_DIR: miniflareCacheDir },
+    env: { MINIFLARE_CACHE_DIR: miniflareCacheDir, ...browserFixtureGivebutterFunds },
     stdout: "pipe",
     stderr: "pipe"
   }

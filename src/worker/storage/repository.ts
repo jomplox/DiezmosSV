@@ -132,7 +132,11 @@ import {
   type OperationalAlertDeliveryClaim,
   type ReceiptEmailDeliveryState
 } from "./repository/deliveries";
-import { getSetting, setSetting } from "./repository/settings";
+import {
+  getSetting,
+  saveScopedEmailTemplates as saveScopedEmailTemplatesRepository,
+  setSetting
+} from "./repository/settings";
 import {
   earliestDteDocumentCreatedAt as earliestDteDocumentCreatedAtRepository,
   listDonationIntentsForAnalytics as listDonationIntentsForAnalyticsRepository,
@@ -269,6 +273,7 @@ export type {
 export { legacyIssuanceAttemptId } from "./repository/wompiIssuance";
 export { INTENT_EXPIRY_SWEEP_LIMIT } from "./repository/donationIntents";
 export { INTENT_RECONCILIATION_SWEEP_LIMIT } from "./repository/donationIntents";
+export { EmailTemplateSnapshotConflictError } from "./repository/settings";
 export {
   OwnerTargetProtectedError,
   UserMutationConflictError
@@ -331,6 +336,12 @@ export class Repository {
 
   async setSetting(key: string, value: string, updatedBy?: string | null): Promise<void> {
     return setSetting(this.db, key, value, updatedBy);
+  }
+
+  async saveScopedEmailTemplates(
+    input: Parameters<typeof saveScopedEmailTemplatesRepository>[2]
+  ): Promise<string> {
+    return saveScopedEmailTemplatesRepository(this.db, this.auditContext, input);
   }
 
   async reserveStripeCheckout(

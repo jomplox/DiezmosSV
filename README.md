@@ -88,7 +88,7 @@ auditable, and cheap to run.
 | 🔎 **Donor explorer** | The **Donantes** view resolves accepted CDEs into a donor register — identity, contact, location, gift count, lifetime total, and last gift — keyed by fiscal document, falling back to email, then to the document itself. Filter by document type/number, name, email, amount range, diezmo/ofrenda, and online/manual origin; export the filtered set as CSV. ADMIN and above; document numbers are masked in the table and revealed only in the detail panel. |
 | 🏷️ **White-label** | Rebrand the panel, donor pages, donor email, **the receipt PDF, and the annual certificate** with your church's display name, accent color, support address, and logos (stored in R2) from the **Marca** settings — no fork needed. An uploaded logo is fitted into the same reserved ink band as the built-in default, so the surrounding layout stays valid. |
 | 🛡️ **Secure access** | PBKDF2 password hashing, bearer-token sessions, role-based access control, self-service password reset, and D1-backed rate limiting on login, password reset, and public donation endpoints — with per-claim audit provenance. |
-| 📬 **Branded email** | All donor email (receipt, invalidation notice, annual certificate, password reset) is sent as branded HTML with configurable templates. |
+| 📬 **Branded email** | All donor email is sent as branded HTML. Owners can edit separate subject/body templates for Salvadoran CDE receipts and invalidations, and for U.S. Stripe immediate acknowledgments, refund corrections/revocations, and annual statements. The U.S. PDF attachments remain fixed legal documents. |
 | 🚨 **Operational alerting** | Alerts a configurable email address on emission failures, receipt-delivery failures, MH unavailability, stalled events, retention failures, and MH signer-certificate expiry. Each incident also emits a privacy-safe `operational_alert` Workers Logs event for independent Cloudflare Observability alerting and Notifications delivery. |
 | 🗃️ **Legal retention** | A monthly cron exports an immutable, hash-verified snapshot of all legal records to R2 for multi-year tax retention independent of D1. The **Respaldos mensuales** panel browses, verifies, and downloads each month as a ZIP. |
 
@@ -136,8 +136,10 @@ Only events with `ResultadoTransaccion = ExitosaAprobada` are issued. Everything
 Wompi, or the donor is recorded in D1 and the audit log.
 
 The public `/donar` page opens on a two-door landing: **El Salvador y el mundo** routes to the
-SV fiscal form (Wompi + CDE), and **EE. UU.** routes to Stripe's Spanish Embedded Checkout form on the US 501(c)(3)
-account for one-time or monthly gifts (`?ruta=sv` / `?ruta=eeuu` deep-links a door). The whole web UI (donor pages
+SV fiscal form (Wompi + CDE), and **EE. UU.** defaults to Stripe's Spanish Embedded Checkout form on the US 501(c)(3)
+account for one-time or monthly gifts. When the target build has an explicit Diezmo/Ofrenda fund mapping, the
+donor may unmount Stripe and use the existing English Givebutter form instead (`?ruta=sv` / `?ruta=eeuu`
+deep-links a door). The whole web UI (donor pages
 and admin) uses **Gotham**, self-hosted as latin-subset woff2 under `src/client/fonts/` — the
 licensed OTFs are never committed; only the generated woff2 subsets are.
 
@@ -200,7 +202,7 @@ DiezmosSV/
 │   ├── client/                 # React + Vite admin panel, /donar, fonts, assets
 │   └── shared/                 # Catalogs · DUI · NIT · legal windows · password policy
 │                               # fiscal corrections · checkout · money · email
-├── migrations/                 # D1 schema (incremental, append-only 0001…0040)
+├── migrations/                 # D1 schema (incremental, append-only 0001…0043)
 ├── DTE/svfe-json-schemas/      # MH-bundled JSON schemas for validation
 ├── docs/                       # Deploy/UAT · operator runbook · retention-restore
 │                               # fiscal-claim cutover/reconciliation · pre-CDE recovery
@@ -357,6 +359,10 @@ owner-owned `0600` files outside this repository, without symlinks:
 ```dotenv
 # /absolute/private/path/staging.env
 DIEZMOSSV_DEPLOY_TARGET=staging
+VITE_GIVEBUTTER_CAMPAIGN=example-campaign
+# Optional: replace both values with distinct real numeric Fund IDs, or omit both.
+# VITE_GIVEBUTTER_TITHE_FUND_ID=<real-tithe-fund-id>
+# VITE_GIVEBUTTER_OFFERING_FUND_ID=<real-offering-fund-id>
 DIEZMOSSV_APP_ORIGIN=https://staging.example.invalid
 DIEZMOSSV_DONOR_LOGO_FILE=/absolute/private/path/logo.png
 ```
@@ -366,6 +372,12 @@ match `--env`; the PNG/JPEG must be decodable by the same `pdf-lib` path used fo
 remote deploy, the branding preflight validates that raster locally, requires `/api/health` to report
 `appEnv=staging`, and compares the exact advertised remote raster. `cf:deploy:staging` runs the preflight and
 target-bound private build automatically; the same steps can be run independently without deploying:
+
+The Givebutter Fund mapping is optional but atomic. Omit both Fund IDs to hide the Givebutter alternative
+while keeping Stripe available, or set both to distinct real numeric IDs: Diezmo maps to
+`VITE_GIVEBUTTER_TITHE_FUND_ID` and Ofrenda maps to `VITE_GIVEBUTTER_OFFERING_FUND_ID`. The private build
+rejects an incomplete, blank, nonnumeric, placeholder-like, or duplicate pair. These are public routing
+identifiers compiled into the browser only after validation; never guess them from the campaign name.
 
 ```bash
 npm run cf:branding:check -- --env staging
@@ -430,7 +442,7 @@ Two deploy guards fail the command closed rather than shipping a broken deployme
 | Guard | Runs on | Blocks unless |
 |---|---|---|
 | `scripts/assert-fiscal-cutover.mjs` | `cf:migrate:prod`, `cf:deploy:prod`, `cf:cutover:staging` | `FISCAL_CUTOVER_QUIESCED=1` is set. Migrations 0020/0021 and the claim-aware Worker must land in **one quiesced maintenance window**: drain old Worker requests, pause queues/cron and mutating traffic, then acknowledge. |
-| `scripts/run-private-build.mjs` | `build:private`, and through it `cf:deploy:staging` and `cf:deploy:prod` | The selected target-bound owner-only deploy file, origin, and donor raster pass validation. Stripe values are runtime-only and are never injected into Vite. |
+| `scripts/run-private-build.mjs` | `build:private`, and through it `cf:deploy:staging` and `cf:deploy:prod` | The selected target-bound owner-only deploy file, Givebutter campaign slug, origin, and donor raster pass validation. Only the public campaign slug is injected into Vite; Stripe values remain runtime-only. |
 
 Store the smoke settings in that `0600` out-of-tree file. The runner uses this approved path by
 default, so `npm run smoke:staging` is sufficient unless you intentionally select another file.
@@ -574,7 +586,8 @@ selected private config and are duplicated per Wrangler environment:
 | `STRIPE_API_PROXY_URL` | Optional loopback-only HTTP bridge for local `workerd` environments without outbound HTTPS. Run `npm run dev:stripe-api-proxy`; staging, production, non-loopback hosts, credentials, and URL paths are rejected. |
 
 **Build-time boundary.** The target-bound `npm run build:private -- --env staging|production`
-wrapper validates the external release/branding file but injects no provider setting into Vite.
+wrapper validates the external release/branding file and injects only the public
+`VITE_GIVEBUTTER_CAMPAIGN` slug used by the donor-selected alternative.
 Stripe keys, configuration IDs, legal identity, and BNPL policy are Worker runtime configuration.
 Only the publishable key is returned to the browser, together with a created Embedded Checkout Session; the
 restricted key and webhook secret never leave the Worker. Putting any of them in a `VITE_*` value is
@@ -705,6 +718,13 @@ the page on the connected US 501(c)(3) account. The Worker creates one idempoten
 selection and verifies it again through signed Stripe webhooks; the result page reads durable D1 state instead
 of trusting a browser return. A US taxpayer needs a US acknowledgment, not a Salvadoran CDE, so this lane
 **never touches Wompi, `donation_intents`, or the CDE pipeline**.
+
+Stripe remains the default U.S. form. When both reviewed Givebutter Fund IDs are configured, a clearly
+labeled **Dar con Givebutter — Formulario en inglés** button unmounts Stripe Embedded Checkout and mounts
+the target-bound campaign. The selected Diezmo/Ofrenda maps to its explicit Fund ID; amount and
+one-time/monthly frequency are provider-supported prefills that the donor is asked to confirm on
+Givebutter. With no Fund pair the alternative is hidden. **Volver a Stripe — Formulario en español**
+reverses the choice and reuses the existing Stripe Session rather than creating another one.
 
 The SV wizard does not mint a Wompi link on Step 1, while the donor's residence is still unknown. If an
 SV-path donor later selects Estados Unidos, the safety route preserves the truthful amount and Diezmo/Ofrenda
@@ -985,7 +1005,7 @@ The safety model is the fiscal-claim model applied to a repair path:
 ## 🗄 Data model
 
 <details>
-<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0040)</strong></summary>
+<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0043)</strong></summary>
 
 <br/>
 

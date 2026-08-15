@@ -50,7 +50,7 @@ describe("remote deploy and migration scripts", () => {
     );
     expect(
       existsSync(resolve(import.meta.dirname, "../../scripts/assert-donation-lane-config.mjs"))
-    ).toBe(false);
+    ).toBe(true);
     expect(
       existsSync(resolve(import.meta.dirname, "../../scripts/run-private-build.mjs"))
     ).toBe(true);

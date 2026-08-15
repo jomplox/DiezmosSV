@@ -43,7 +43,7 @@ import {
   normalizeEmailSenderName,
   resolveEmailReplyToAddress
 } from "./services/emailSender";
-import { DEFAULT_EMAIL_TEMPLATES, EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateValidationError, emailTemplateResponse, normalizeEmailTemplateSettings, parseEmailTemplates } from "./services/emailTemplates";
+import { DEFAULT_EMAIL_TEMPLATES, EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateStoredStateError, EmailTemplateValidationError, emailTemplateResponse, normalizeEmailTemplateSettings, parseEmailTemplateScope, parseEmailTemplates, prepareScopedEmailTemplateUpdate } from "./services/emailTemplates";
 import { resolveDonationIntentBinding } from "./services/donationIntentBinding";
 import { issuanceFailureEvidence } from "./services/issuanceFailure";
 import { createStripeGateway, stripeWebhookSecretGeneration, StripeWebhookSignatureError } from "./services/stripeClient";
@@ -143,6 +143,7 @@ import {
   requiresFiscalReceptorCorrection
 } from "./services/fiscalCorrection";
 import {
+  EmailTemplateSnapshotConflictError,
   legacyIssuanceAttemptId,
   OwnerTargetProtectedError,
   Repository,
@@ -192,6 +193,7 @@ const STRIPE_RECOVERY_IP_LIMIT = 20;
 // oversized request is rejected before it can consume application resources.
 const PUBLIC_JSON_BODY_LIMIT_BYTES = 16 * 1024;
 const AUTHENTICATED_JSON_BODY_LIMIT_BYTES = 256 * 1024;
+const EMAIL_TEMPLATE_SAVE_MAX_ATTEMPTS = 3;
 const WOMPI_WEBHOOK_BODY_LIMIT_BYTES = 64 * 1024;
 const STRIPE_WEBHOOK_BODY_LIMIT_BYTES = 256 * 1024;
 const INVALIDATION_REQUEST_KEYS = new Set(["tipoAnulacion", "motivoAnulacion", "codigoGeneracionR"]);
@@ -3330,21 +3332,47 @@ async function handleEmailTemplates(ctx: ApiRouteContext): Promise<Response> {
     return methodNotAllowed();
   }
   const actor = ctx.actor!;
-  const body = (await readJsonObject(ctx.request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { templates?: unknown };
+  const body = (await readJsonObject(ctx.request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { templates?: unknown; scope?: unknown };
+  if (body.scope === undefined) {
+    return jsonResponse({
+      error: "email_templates_reload_required",
+      message: "Vuelva a cargar las plantillas antes de guardar."
+    }, { status: 409 });
+  }
   try {
-    const templates = normalizeEmailTemplateSettings(body.templates);
-    await ctx.repo.setSetting(EMAIL_TEMPLATES_SETTING_KEY, JSON.stringify(templates), actor.id);
-    await ctx.repo.createAudit({
-      actorType: "USER",
-      actorId: actor.id,
-      action: "EMAIL_TEMPLATES_UPDATED",
-      entityType: "app_setting",
-      entityId: EMAIL_TEMPLATES_SETTING_KEY,
-      summary: "Plantillas de correo actualizadas",
-      metadata: { types: Object.keys(templates) }
-    });
-    return jsonResponse({ ok: true, emailTemplates: emailTemplateResponse(templates) });
+    const scope = parseEmailTemplateScope(body.scope);
+    let expectedRaw = await ctx.repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY);
+    for (let attempt = 0; attempt < EMAIL_TEMPLATE_SAVE_MAX_ATTEMPTS; attempt += 1) {
+      const update = prepareScopedEmailTemplateUpdate(expectedRaw, body.templates, scope);
+      try {
+        const stored = await ctx.repo.saveScopedEmailTemplates({
+          key: EMAIL_TEMPLATES_SETTING_KEY,
+          scope,
+          patch: update.patch,
+          initialTemplates: update.templates,
+          actorId: actor.id,
+          expectedRaw
+        });
+        const templates = normalizeEmailTemplateSettings(JSON.parse(stored) as unknown);
+        return jsonResponse({ ok: true, emailTemplates: emailTemplateResponse(templates) });
+      } catch (error) {
+        if (!(error instanceof EmailTemplateSnapshotConflictError)) {
+          throw error;
+        }
+        expectedRaw = error.currentRaw;
+        if (attempt === EMAIL_TEMPLATE_SAVE_MAX_ATTEMPTS - 1) {
+          throw new EmailTemplateStoredStateError("Vuelva a cargar las plantillas antes de guardar.");
+        }
+      }
+    }
+    throw new EmailTemplateStoredStateError("Vuelva a cargar las plantillas antes de guardar.");
   } catch (error) {
+    if (error instanceof EmailTemplateStoredStateError) {
+      return jsonResponse({
+        error: "email_templates_reload_required",
+        message: error.message
+      }, { status: 409 });
+    }
     if (error instanceof EmailTemplateValidationError) {
       return jsonResponse({ error: "invalid_email_templates", message: error.message }, { status: 400 });
     }
@@ -3935,6 +3963,16 @@ async function handleStripeSettings(ctx: ApiRouteContext): Promise<Response> {
       stripe: {
         credentials: status.groups.stripe,
         operational: status.stripeOperational,
+        configuration: {
+          legalName: ctx.env.STRIPE_US_LEGAL_NAME?.trim() ?? "",
+          ein: ctx.env.STRIPE_US_EIN?.trim() ?? "",
+          timeZone: ctx.env.STRIPE_US_TIME_ZONE?.trim() ?? "",
+          organizationPhone: ctx.env.STRIPE_US_PHONE?.trim() ?? "",
+          organizationWebsite: ctx.env.STRIPE_US_WEBSITE?.trim() ?? "",
+          organizationMailingAddress: ctx.env.STRIPE_US_MAILING_ADDRESS?.trim() ?? "",
+          signerName: ctx.env.STRIPE_US_SIGNER_NAME?.trim() ?? "",
+          signerTitle: ctx.env.STRIPE_US_SIGNER_TITLE?.trim() ?? ""
+        },
         webhookHealth
       }
     });

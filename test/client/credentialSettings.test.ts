@@ -1,8 +1,18 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, test } from "vitest";
-import type { CredentialStatus } from "../../src/client/types";
-import { certificateExpiryStatus, credentialSectionState, credentialSettingsSections } from "../../src/client/credentialSettings";
+import type { CredentialStatus, EmailTemplateSettings, StripeSettingsState } from "../../src/client/types";
+import {
+  certificateExpiryStatus,
+  credentialSectionState,
+  credentialSettingsSections,
+  reconcileEmailTemplateDraft,
+  reconcileStripeOrganizationDraft,
+  resolveStripeOrganizationHydration,
+  stripeOrganizationDirtyPatch,
+  stripeOrganizationPendingWrite
+} from "../../src/client/credentialSettings";
+import { formatEmailTemplateSelection, scopedEmailTemplates } from "../../src/client/credentialsPanel";
 
 const credentialsPanelSource = readFileSync(resolve(import.meta.dirname, "../../src/client/credentialsPanel.tsx"), "utf8");
 const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
@@ -59,6 +69,80 @@ const status: CredentialStatus = {
     localProxyConfigured: false
   }
 };
+
+const stripeOrganization: StripeSettingsState["configuration"] = {
+  legalName: "Iglesia Elim USA",
+  ein: "12-3456789",
+  timeZone: "America/Chicago",
+  organizationPhone: "+1 555 0100",
+  organizationWebsite: "https://example.org",
+  organizationMailingAddress: "1 Main St\nDallas, TX 75001",
+  signerName: "Pastor",
+  signerTitle: "Tesorero"
+};
+
+describe("Stripe organization owner reconciliation", () => {
+  test("builds a trimmed patch containing only fields dirty from the authoritative baseline", () => {
+    expect(stripeOrganizationDirtyPatch({
+      ...stripeOrganization,
+      legalName: "  Iglesia Elim USA  ",
+      organizationPhone: "  +1 555 0199  "
+    }, stripeOrganization)).toEqual({
+      organizationPhone: "+1 555 0199"
+    });
+
+    expect(stripeOrganizationDirtyPatch(stripeOrganization, stripeOrganization)).toEqual({});
+  });
+
+  test("guards only dirty organization fields the server reports as updated", () => {
+    expect(stripeOrganizationPendingWrite(
+      {
+        legalName: "Iglesia Elim USA Nueva",
+        organizationPhone: "+1 555 0199"
+      },
+      ["STRIPE_RESTRICTED_KEY", "STRIPE_US_PHONE"],
+      1_770_000_000_000
+    )).toEqual({
+      values: { organizationPhone: "+1 555 0199" },
+      savedAt: 1_770_000_000_000
+    });
+
+    expect(stripeOrganizationPendingWrite(
+      { legalName: "Iglesia Elim USA Nueva" },
+      ["STRIPE_RESTRICTED_KEY"],
+      1_770_000_000_000
+    )).toBeNull();
+  });
+
+  test("expires partial pending values and replaces an untouched stale draft with the latest server value", () => {
+    const pending = {
+      values: { organizationPhone: "+1 555 0199" },
+      savedAt: 1_770_000_000_000
+    };
+    const server = { ...stripeOrganization, organizationPhone: "+1 555 0177" };
+    const current = { ...stripeOrganization, organizationPhone: "+1 555 0199" };
+    const baseline = { ...stripeOrganization, organizationPhone: "+1 555 0199" };
+
+    const resolved = resolveStripeOrganizationHydration(server, pending, 1_770_000_120_001);
+
+    expect(resolved).toEqual({ configuration: server, pendingWrite: null });
+    expect(reconcileStripeOrganizationDraft(current, baseline, resolved.configuration)).toEqual(server);
+  });
+
+  test("preserves a local edit made during refresh while accepting fresh untouched fields", () => {
+    const current = { ...stripeOrganization, signerTitle: "Director ejecutivo" };
+    const server = {
+      ...stripeOrganization,
+      organizationWebsite: "https://fresh.example.org",
+      signerTitle: "Cargo remoto"
+    };
+
+    expect(reconcileStripeOrganizationDraft(current, stripeOrganization, server)).toEqual({
+      ...server,
+      signerTitle: "Director ejecutivo"
+    });
+  });
+});
 
 describe("credentialSectionState", () => {
   test("combines Ministerio de Hacienda API and signer credentials into one navigation section", () => {
@@ -288,5 +372,260 @@ describe("Ambiente emission-environment save guard (source contract)", () => {
     expect(credentialsPanelSource).toContain("!emissionEnvironment?.allowedEnvironments.includes(environment)");
     expect(credentialsPanelSource).toContain('emissionEnvironment.environment === environment && emissionEnvironment.source === "setting"');
     expect(credentialsPanelSource).not.toContain("if (emissionBusy || runtimeEnvironment.environment === environment) return;");
+  });
+});
+
+describe("Plantillas country-scoped saving (source contract)", () => {
+  test("each country button gates on its own group and submits only that group's drafts", () => {
+    const editor = credentialsPanelSource.slice(
+      credentialsPanelSource.indexOf("function EmailTemplateEditor({"),
+      credentialsPanelSource.indexOf("export function isEmailTemplateScope(")
+    );
+
+    expect(editor).toContain("const groupComplete = (group: typeof definitions) => group.every(");
+    expect(editor).toContain('disabled={busy || !salvadoranComplete} onClick={() => void onSubmit("SV_CDE")}');
+    expect(editor).toContain('disabled={busy || !usComplete} onClick={() => void onSubmit("US_STRIPE")}');
+    // Una sola compuerta global dejaría que un cuerpo vacío de EE. UU. bloqueara el
+    // guardado salvadoreño sin explicar por qué.
+    expect(editor).not.toContain("disabled={busy || !complete}");
+  });
+
+  test("declares the country on the PUT and sends only that country's templates", () => {
+    // Rellenar el otro grupo con la copia cargada al abrir el panel revertía en silencio
+    // lo que otro propietario hubiera guardado mientras tanto; ahora fusiona el servidor.
+    const save = appSource.slice(
+      appSource.indexOf("async function updateEmailTemplates("),
+      appSource.indexOf("async function updateEmailSender(")
+    );
+
+    expect(save).toContain("const baseline = cloneEmailTemplates(emailTemplates?.templates ?? {});");
+    expect(save).toContain("const requestDraft = cloneEmailTemplates(emailTemplateDraft);");
+    expect(save).toContain("const submittedTemplates = scopedEmailTemplates(emailTemplates, requestDraft, scope);");
+    expect(save).toContain("body: { scope, templates: submittedTemplates }");
+    expect(save).toContain("setEmailTemplateDraft((current) => reconcileEmailTemplateDraft(");
+    expect(save).toContain("result.emailTemplates.templates");
+    expect(save).not.toContain("...(emailTemplates?.templates ?? {}),");
+    expect(save).not.toContain("body: { templates: emailTemplateDraft }");
+    // El editor y el envío deben particionar igual, o una plantilla visible en un grupo
+    // quedaría fuera del guardado de ese grupo.
+    expect(credentialsPanelSource).toContain('isEmailTemplateScope("SV_CDE", definition.scope)');
+    expect(credentialsPanelSource).toContain('isEmailTemplateScope("US_STRIPE", definition.scope)');
+    expect(credentialsPanelSource).toContain("isEmailTemplateScope(scope, definition.scope)");
+  });
+
+  test("each button's payload carries its own group and nothing from the other", () => {
+    const settings: EmailTemplateSettings = {
+      definitions: [
+        { type: "dteReceipt", scope: "SV_CDE", label: "", description: "", defaultSubject: "", defaultBody: "", placeholders: [] },
+        { type: "dteInvalidation", scope: "SV_CDE", label: "", description: "", defaultSubject: "", defaultBody: "", placeholders: [] },
+        { type: "stripeAcknowledgment", scope: "US_STRIPE", label: "", description: "", defaultSubject: "", defaultBody: "", placeholders: [] },
+        { type: "stripeRefund", scope: "US_STRIPE", label: "", description: "", defaultSubject: "", defaultBody: "", placeholders: [] },
+        { type: "stripeAnnualStatement", scope: "US_STRIPE", label: "", description: "", defaultSubject: "", defaultBody: "", placeholders: [] }
+      ],
+      placeholders: [],
+      templates: {}
+    };
+    const draft = Object.fromEntries(
+      ["dteReceipt", "dteInvalidation", "stripeAcknowledgment", "stripeRefund", "stripeAnnualStatement"]
+        .map((type) => [type, { subject: `${type} asunto`, body: `${type} cuerpo` }])
+    );
+
+    expect(Object.keys(scopedEmailTemplates(settings, draft, "SV_CDE"))).toEqual([
+      "dteReceipt",
+      "dteInvalidation"
+    ]);
+    expect(Object.keys(scopedEmailTemplates(settings, draft, "US_STRIPE"))).toEqual([
+      "stripeAcknowledgment",
+      "stripeRefund",
+      "stripeAnnualStatement"
+    ]);
+    expect(scopedEmailTemplates(settings, draft, "US_STRIPE").stripeRefund).toEqual({
+      subject: "stripeRefund asunto",
+      body: "stripeRefund cuerpo"
+    });
+  });
+
+  test("adopts server normalization and refreshes untouched opposite-scope fields", () => {
+    const requestDraft = {
+      dteReceipt: { subject: "  CDE actualizado  ", body: "  Cuerpo enviado  " },
+      stripeRefund: { subject: "Corrección anterior", body: "Cuerpo anterior" }
+    };
+    const server = {
+      dteReceipt: { subject: "CDE actualizado", body: "Cuerpo enviado" },
+      stripeRefund: { subject: "Corrección remota", body: "Cuerpo remoto" }
+    };
+
+    expect(reconcileEmailTemplateDraft(
+      structuredClone(requestDraft),
+      requestDraft,
+      server,
+      requestDraft,
+      ["dteReceipt"]
+    )).toEqual(server);
+  });
+
+  test("preserves field edits made while a scoped save is in flight", () => {
+    const requestDraft = {
+      dteReceipt: { subject: "  CDE actualizado  ", body: "Cuerpo enviado" },
+      stripeRefund: { subject: "Corrección anterior", body: "Cuerpo anterior" }
+    };
+    const current = {
+      dteReceipt: { subject: "  CDE actualizado  ", body: "Edición salvadoreña en vuelo" },
+      stripeRefund: { subject: "Edición de EE. UU. en vuelo", body: "Cuerpo anterior" }
+    };
+    const server = {
+      dteReceipt: { subject: "CDE actualizado", body: "Cuerpo enviado" },
+      stripeRefund: { subject: "Corrección remota", body: "Cuerpo remoto" }
+    };
+
+    expect(reconcileEmailTemplateDraft(
+      current,
+      requestDraft,
+      server,
+      requestDraft,
+      ["dteReceipt"]
+    )).toEqual({
+      dteReceipt: { subject: "CDE actualizado", body: "Edición salvadoreña en vuelo" },
+      stripeRefund: { subject: "Edición de EE. UU. en vuelo", body: "Cuerpo remoto" }
+    });
+  });
+
+  test("preserves opposite-scope fields that were already dirty when the save started", () => {
+    const baseline = {
+      dteReceipt: { subject: "CDE anterior", body: "Cuerpo anterior" },
+      stripeRefund: { subject: "Corrección anterior", body: "Cuerpo anterior" }
+    };
+    const requestDraft = {
+      dteReceipt: { subject: "  CDE actualizado  ", body: "Cuerpo enviado" },
+      stripeRefund: { subject: "Edición local pendiente", body: "Cuerpo anterior" }
+    };
+    const server = {
+      dteReceipt: { subject: "CDE actualizado", body: "Cuerpo enviado" },
+      stripeRefund: { subject: "Corrección remota", body: "Cuerpo remoto" }
+    };
+
+    expect(reconcileEmailTemplateDraft(
+      structuredClone(requestDraft),
+      requestDraft,
+      server,
+      baseline,
+      ["dteReceipt"]
+    )).toEqual({
+      dteReceipt: server.dteReceipt,
+      stripeRefund: { subject: "Edición local pendiente", body: "Cuerpo remoto" }
+    });
+  });
+});
+
+describe("Plantillas format toolbar roving tabindex (source contract)", () => {
+  test("resyncs the active index to whichever button actually holds focus", () => {
+    for (const index of [0, 1, 2, 3]) {
+      expect(credentialsPanelSource).toContain(
+        `tabIndex={activeFormatIndex === ${index} ? 0 : -1} onFocus={() => setActiveFormatIndex(${index})}`
+      );
+    }
+    expect(credentialsPanelSource).toContain('onMouseDown={(event) => event.preventDefault()}');
+  });
+});
+
+describe("email template line formatting", () => {
+  test.each([
+    {
+      label: "select all",
+      value: "Primera\r\nSegunda",
+      selectionStart: 0,
+      selectionEnd: 15,
+      format: "bold",
+      expected: {
+        value: "**Primera**\n**Segunda**",
+        selectionStart: 2,
+        selectionEnd: 21
+      }
+    },
+    {
+      label: "blank line",
+      value: "Primera\r\n\r\nSegunda",
+      selectionStart: 0,
+      selectionEnd: 16,
+      format: "underline",
+      expected: {
+        value: "++Primera++\n\n++Segunda++",
+        selectionStart: 2,
+        selectionEnd: 22
+      }
+    },
+    {
+      label: "partial lines after a CRLF",
+      value: "Antes\r\nPrimera\r\nDespues",
+      selectionStart: 9,
+      selectionEnd: 17,
+      format: "bold",
+      expected: {
+        value: "Antes\nPri**mera**\n**Des**pues",
+        selectionStart: 11,
+        selectionEnd: 23
+      }
+    },
+    {
+      label: "quote lines after a CRLF",
+      value: "Antes\r\nPrimera\r\nDespues",
+      selectionStart: 8,
+      selectionEnd: 17,
+      format: "quote",
+      expected: {
+        value: "Antes\n> Primera\n> Despues",
+        selectionStart: 6,
+        selectionEnd: 25
+      }
+    }
+  ] as const)("uses LF textarea offsets for a CRLF-backed $label selection", ({
+    value,
+    selectionStart,
+    selectionEnd,
+    format,
+    expected
+  }) => {
+    expect(formatEmailTemplateSelection(value, selectionStart, selectionEnd, format)).toEqual(expected);
+  });
+
+  test.each([
+    ["bold", "**Primera**\n**Segunda**\n\n**Tercera**", 2, 34],
+    ["italic", "*Primera*\n*Segunda*\n\n*Tercera*", 1, 29],
+    ["underline", "++Primera++\n++Segunda++\n\n++Tercera++", 2, 34]
+  ] as const)("wraps every nonempty selected line for %s and keeps the transformed selection active", (format, expectedValue, expectedStart, expectedEnd) => {
+    const value = "Primera\nSegunda\n\nTercera";
+
+    expect(formatEmailTemplateSelection(value, 0, value.length, format)).toEqual({
+      value: expectedValue,
+      selectionStart: expectedStart,
+      selectionEnd: expectedEnd
+    });
+  });
+
+  test("puts the caret between balanced markers when there is no selection", () => {
+    expect(formatEmailTemplateSelection("Hola mundo", 5, 5, "bold")).toEqual({
+      value: "Hola ****mundo",
+      selectionStart: 7,
+      selectionEnd: 7
+    });
+  });
+
+  test("preserves quote toggling over every touched line", () => {
+    const quoted = formatEmailTemplateSelection("Primera\nSegunda", 2, 10, "quote");
+    expect(quoted).toEqual({
+      value: "> Primera\n> Segunda",
+      selectionStart: 0,
+      selectionEnd: 19
+    });
+    expect(formatEmailTemplateSelection(
+      quoted.value,
+      quoted.selectionStart,
+      quoted.selectionEnd,
+      "quote"
+    )).toEqual({
+      value: "Primera\nSegunda",
+      selectionStart: 0,
+      selectionEnd: 15
+    });
   });
 });

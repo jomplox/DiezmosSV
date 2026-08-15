@@ -19,7 +19,15 @@ import {
   loadEmailBranding
 } from "./branding";
 import { classifyEmailDispatchError, EmailDispatchError, EmailService } from "./email";
-import { stripeAnnualStatementEmailHtml, type BrandingEmailOptions } from "./emailHtml";
+import { editableDonorEmailHtml, type BrandingEmailOptions } from "./emailHtml";
+import {
+  DEFAULT_EMAIL_TEMPLATES,
+  EMAIL_TEMPLATES_SETTING_KEY,
+  parseEmailTemplates,
+  renderEmailTemplateValue,
+  type EmailTemplateSettings,
+  type EmailTemplateValue
+} from "./emailTemplates";
 import { EMAIL_REPLY_TO_SETTING_KEY, EMAIL_SENDER_NAME_SETTING_KEY } from "./emailSender";
 import { pdfSafeText } from "./pdf";
 import { logWorkerError } from "./observability";
@@ -327,26 +335,31 @@ export function stripeAnnualStatementEmailContent(input: {
   netTotalCents: number;
   corrected: boolean;
   branding: BrandingEmailOptions;
+  template?: EmailTemplateValue;
 }): { subject: string; text: string; html: string } {
   const title = input.corrected ? "Constancia anual corregida de donaciones" : "Constancia anual de donaciones";
   const netTotalLabel = formatCents(input.netTotalCents);
   const correction = input.corrected
     ? " Esta versión corregida reemplaza la constancia anterior para el mismo año."
     : "";
+  const rendered = renderEmailTemplateValue(
+    input.template ?? DEFAULT_EMAIL_TEMPLATES.stripeAnnualStatement,
+    {
+      "{{donante}}": input.donorName,
+      "{{tipoConstancia}}": title,
+      "{{anio}}": String(input.year),
+      "{{descripcionDonaciones}}": `${input.count} ${input.count === 1 ? "donación" : "donaciones"}`,
+      "{{totalNeto}}": netTotalLabel,
+      "{{detalleCorreccion}}": correction
+    }
+  );
   return {
-    subject: `${title} ${input.year} — EE. UU.`,
-    text:
-      `Estimado(a) ${input.donorName}:\n\n` +
-      `Adjuntamos su constancia anual de donaciones de ${input.year}, con ${input.count} ${input.count === 1 ? "donación" : "donaciones"} y un total neto de ${netTotalLabel}.${correction}\n\n` +
-      `No se proporcionaron bienes ni servicios a cambio de estas donaciones.\n\n` +
-      `Conserve este documento con sus registros. Este mensaje no constituye asesoría fiscal.`,
-    html: stripeAnnualStatementEmailHtml({
-      donorName: input.donorName,
-      year: input.year,
-      count: input.count,
-      netTotalLabel,
-      corrected: input.corrected,
+    subject: rendered.subject,
+    text: rendered.text,
+    html: editableDonorEmailHtml({
       organizationName: input.branding.organizationName,
+      title: rendered.subject,
+      bodyText: rendered.formattedText,
       brandColor: input.branding.brandColor,
       supportEmail: input.branding.supportEmail,
       logoUrl: input.branding.logoUrl
@@ -418,6 +431,13 @@ export interface StripeAnnualStatementSendResult {
   review: number;
   hasMore: boolean;
   nextCursor: string | null;
+}
+
+interface StripeAnnualStatementEmailEvidenceV1 {
+  version: 1;
+  subject: string;
+  text: string;
+  html: string;
 }
 
 export async function sendStripeAnnualStatements(
@@ -500,17 +520,33 @@ export async function sendStripeAnnualStatements(
         result.skipped += 1;
         continue;
       }
+      const corrected = Boolean(delivery.supersedes_delivery_id);
+      const proposedEmailContent = stripeAnnualStatementEmailContent({
+        donorName: snapshot.donor.name,
+        year,
+        count: snapshot.totals.count,
+        netTotalCents: snapshot.totals.netAmountCents,
+        corrected,
+        branding: context.branding,
+        template: context.emailTemplates.stripeAnnualStatement
+      });
       claimId = newId("stripe_annual_statement_claim");
       const claim = await repo.claimStripeAnnualStatementDelivery({
         id: delivery.id,
         claimId,
+        emailContentJson: JSON.stringify({
+          version: 1,
+          subject: proposedEmailContent.subject,
+          text: proposedEmailContent.text,
+          html: proposedEmailContent.html
+        } satisfies StripeAnnualStatementEmailEvidenceV1),
         now: operationNow()
       });
       if (!claim) {
         result.skipped += 1;
         continue;
       }
-      const corrected = Boolean(claim.supersedes_delivery_id);
+      const emailContent = parseStripeAnnualStatementEmailEvidence(claim.email_content_json);
       const pdfBytes = await renderStripeAnnualStatementPdf({
         snapshot,
         issuedOn: claim.updated_at,
@@ -538,19 +574,11 @@ export async function sendStripeAnnualStatements(
         await auditStatementBestEffort(env, repo, actorId, claim.id, "FAILED", claim.revision, corrected);
         continue;
       }
-      const content = stripeAnnualStatementEmailContent({
-        donorName: rechecked.donor.name,
-        year,
-        count: rechecked.totals.count,
-        netTotalCents: rechecked.totals.netAmountCents,
-        corrected,
-        branding: finalContext.branding
-      });
       const sent = await new EmailService(env, undefined, finalContext.branding).sendStripeAnnualStatement({
         toEmail: rechecked.donor.email!,
-        subject: content.subject,
-        text: content.text,
-        html: content.html,
+        subject: emailContent.subject,
+        text: emailContent.text,
+        html: emailContent.html,
         pdfBytes,
         filename: `constancia-anual-donaciones-eeuu-${year}-r${claim.revision}.pdf`,
         idempotencyKey: `stripe-annual-statement:${claim.id}`
@@ -612,6 +640,31 @@ export async function sendStripeAnnualStatements(
   return result;
 }
 
+function parseStripeAnnualStatementEmailEvidence(
+  raw: string | null
+): StripeAnnualStatementEmailEvidenceV1 {
+  if (!raw) {
+    throw new Error("Stripe annual statement is missing immutable email evidence");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    throw new Error("Stripe annual statement has invalid immutable email evidence");
+  }
+  if (
+    typeof parsed !== "object"
+    || parsed === null
+    || (parsed as { version?: unknown }).version !== 1
+    || typeof (parsed as { subject?: unknown }).subject !== "string"
+    || typeof (parsed as { text?: unknown }).text !== "string"
+    || typeof (parsed as { html?: unknown }).html !== "string"
+  ) {
+    throw new Error("Stripe annual statement has invalid immutable email evidence");
+  }
+  return parsed as StripeAnnualStatementEmailEvidenceV1;
+}
+
 async function snapshotForTarget(
   repo: Repository,
   window: StripeUsYearWindow,
@@ -645,6 +698,7 @@ async function loadStripeAnnualStatementContext(
 ): Promise<{
   window: StripeUsYearWindow;
   branding: Awaited<ReturnType<typeof loadEmailBranding>>;
+  emailTemplates: EmailTemplateSettings;
   document: StripeAnnualStatementDocumentEvidence;
 }> {
   const window = stripeUsYearWindow(env, year);
@@ -652,13 +706,17 @@ async function loadStripeAnnualStatementContext(
   if (configuration.livemode !== livemode) {
     throw new StripeAnnualStatementConfigurationError("El ambiente solicitado no coincide con la configuración de Stripe.");
   }
-  const settings = await loadStripeAnnualStatementSettingEvidence(repo);
+  const [settings, emailTemplatesRaw] = await Promise.all([
+    loadStripeAnnualStatementSettingEvidence(repo),
+    repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY)
+  ]);
   const branding = await loadEmailBranding({
     getSetting: async (key) => settingEvidenceValue(settings, key)
   }, env);
   return {
     window,
     branding,
+    emailTemplates: parseEmailTemplates(emailTemplatesRaw),
     document: {
       rendererVersion: STRIPE_ANNUAL_STATEMENT_PDF_VERSION,
       legalName: configuration.legalName,

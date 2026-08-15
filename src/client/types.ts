@@ -212,6 +212,16 @@ export interface StripeOperationalStatus {
 export interface StripeSettingsState {
   credentials: CredentialStatusGroup;
   operational: StripeOperationalStatus;
+  configuration: {
+    legalName: string;
+    ein: string;
+    timeZone: string;
+    organizationPhone: string;
+    organizationWebsite: string;
+    organizationMailingAddress: string;
+    signerName: string;
+    signerTitle: string;
+  };
   webhookHealth: {
     state: "none" | "observed";
     label?: string;
@@ -282,12 +292,16 @@ export interface EmailTemplateValue {
   body: string;
 }
 
+export type EmailTemplateScope = "SV_CDE" | "US_STRIPE";
+
 interface EmailTemplateDefinition {
   type: string;
+  scope: EmailTemplateScope;
   label: string;
   description: string;
   defaultSubject: string;
   defaultBody: string;
+  placeholders: string[];
 }
 
 export interface EmailTemplateSettings {

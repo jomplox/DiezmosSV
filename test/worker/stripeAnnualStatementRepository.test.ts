@@ -255,6 +255,7 @@ describe("Stripe annual statement repository", () => {
     const claim = await claimStripeAnnualStatementDelivery(db, {
       id: first.id,
       claimId: "claim_a",
+      emailContentJson: repositoryEmailContentJson(),
       now: "2026-01-10T12:00:00.000Z"
     });
     expect(claim).toMatchObject({ status: "PROCESSING", attempt_count: 1 });
@@ -314,6 +315,7 @@ describe("Stripe annual statement repository", () => {
     expect(await claimStripeAnnualStatementDelivery(db, {
       id: row.id,
       claimId: "claim_review",
+      emailContentJson: repositoryEmailContentJson(),
       now: "2026-01-10T12:00:00.000Z"
     })).not.toBeNull();
     expect(await markStripeAnnualStatementDispatchStarted(
@@ -332,6 +334,7 @@ describe("Stripe annual statement repository", () => {
     expect(await claimStripeAnnualStatementDelivery(db, {
       id: row.id,
       claimId: "claim_again",
+      emailContentJson: repositoryEmailContentJson(),
       now: "2026-01-10T12:01:00.000Z"
     })).toBeNull();
     const same = await reserveStripeAnnualStatementDelivery(db, reservation({
@@ -390,6 +393,7 @@ describe("Stripe annual statement repository", () => {
     expect(await claimStripeAnnualStatementDelivery(db, {
       id: row.id,
       claimId: "claim_authorization",
+      emailContentJson: repositoryEmailContentJson(),
       now: "2026-01-10T12:00:00.000Z"
     })).not.toBeNull();
     database.prepare(
@@ -424,12 +428,14 @@ describe("Stripe annual statement repository", () => {
     expect(await claimStripeAnnualStatementDelivery(db, {
       id: row.id,
       claimId: "claim_interrupted_before_provider",
+      emailContentJson: repositoryEmailContentJson(),
       now: "2026-01-10T12:00:00.000Z"
     })).not.toBeNull();
 
     expect(await claimStripeAnnualStatementDelivery(db, {
       id: row.id,
       claimId: "claim_recovered",
+      emailContentJson: repositoryEmailContentJson(),
       now: "2026-01-10T12:06:00.000Z"
     })).toMatchObject({
       status: "PROCESSING",
@@ -467,6 +473,7 @@ describe("Stripe annual statement repository", () => {
     expect(await claimStripeAnnualStatementDelivery(db, {
       id: firstA.id,
       claimId: "claim_a_failed",
+      emailContentJson: repositoryEmailContentJson(),
       now: "2026-01-10T11:01:00.000Z"
     })).not.toBeNull();
     expect(await finalizeStripeAnnualStatementDelivery(db, {
@@ -486,6 +493,7 @@ describe("Stripe annual statement repository", () => {
     expect(await claimStripeAnnualStatementDelivery(db, {
       id: sentB.id,
       claimId: "claim_b_sent",
+      emailContentJson: repositoryEmailContentJson(),
       now: "2026-01-10T11:03:00.000Z"
     })).not.toBeNull();
     database.prepare(
@@ -523,6 +531,7 @@ describe("Stripe annual statement repository", () => {
     expect(await claimStripeAnnualStatementDelivery(db, {
       id: sentA.id,
       claimId: "claim_a_sent",
+      emailContentJson: repositoryEmailContentJson(),
       now: "2026-01-10T11:01:00.000Z"
     })).not.toBeNull();
     database.prepare(
@@ -551,6 +560,7 @@ describe("Stripe annual statement repository", () => {
     expect(await claimStripeAnnualStatementDelivery(db, {
       id: failedB.id,
       claimId: "claim_b_failed",
+      emailContentJson: repositoryEmailContentJson(),
       now: "2026-01-10T11:02:00.000Z"
     })).not.toBeNull();
     expect(await finalizeStripeAnnualStatementDelivery(db, {
@@ -616,6 +626,7 @@ describe("Stripe annual statement repository", () => {
       expect(await claimStripeAnnualStatementDelivery(db, {
         id: history.tailId,
         claimId: `claim_legacy_${tailStatus.toLowerCase()}`,
+        emailContentJson: repositoryEmailContentJson(),
         now: "2026-01-10T11:05:00.000Z"
       })).toBeNull();
       expect(database.prepare(
@@ -776,6 +787,15 @@ function dispatchAuthorization(
     donorKey: row.donor_key,
     now
   };
+}
+
+function repositoryEmailContentJson(): string {
+  return JSON.stringify({
+    version: 1,
+    subject: "Constancia anual",
+    text: "Cuerpo anual",
+    html: "<p>Cuerpo anual</p>"
+  });
 }
 
 function seedGift(

@@ -1,15 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
+import { Repository } from "../../src/worker/storage/repository";
 import { makeDocument } from "./fixtures";
 import {
   DEFAULT_EMAIL_TEMPLATES,
   EMAIL_TEMPLATE_DEFINITIONS,
+  escapeEmailTemplateFormattingValue,
   normalizeEmailTemplateSettings,
+  parseEmailTemplates,
+  prepareScopedEmailTemplateUpdate,
   renderEmailTemplate,
+  renderEmailTemplateValue,
   TRANSITORIO_RECEIPT_TEMPLATE
 } from "../../src/worker/services/emailTemplates";
 import { classifyEmailDispatchError, EmailService } from "../../src/worker/services/email";
 import { certificateEmailHtml, dteEmailHtml, passwordResetEmailHtml } from "../../src/worker/services/emailHtml";
 import type { DteDocumentRecord, Env } from "../../src/worker/types";
+import { migratedDatabase } from "./support/migratedDatabase";
+import { SqliteD1 } from "./support/sqliteD1";
 
 function fakeRecord(): DteDocumentRecord {
   return makeDocument({
@@ -124,6 +131,37 @@ describe("transitory (deferred) receipt template", () => {
 });
 
 describe("email template defaults", () => {
+  it("exposes three independently editable U.S. email wrappers alongside the Salvadoran templates", () => {
+    const usDefinitions = EMAIL_TEMPLATE_DEFINITIONS.filter(
+      (definition) => (definition as { scope?: string }).scope === "US_STRIPE"
+    );
+
+    expect(usDefinitions.map((definition) => definition.type)).toEqual([
+      "stripeAcknowledgment",
+      "stripeRefund",
+      "stripeAnnualStatement"
+    ]);
+    for (const definition of usDefinitions) {
+      expect(definition.defaultSubject.trim()).not.toBe("");
+      expect(definition.defaultBody.trim()).not.toBe("");
+      expect((DEFAULT_EMAIL_TEMPLATES as Record<string, { subject: string; body: string }>)[definition.type])
+        .toEqual({ subject: definition.defaultSubject, body: definition.defaultBody });
+    }
+  });
+
+  it("preserves existing Salvadoran settings while adding default U.S. templates", () => {
+    const parsed = parseEmailTemplates(JSON.stringify({
+      dteReceipt: { subject: "CDE existente", body: "Cuerpo existente" },
+      dteInvalidation: { subject: "Anulación existente", body: "Cuerpo de anulación" }
+    }));
+
+    expect(parsed.dteReceipt).toEqual({ subject: "CDE existente", body: "Cuerpo existente" });
+    expect(parsed.dteInvalidation).toEqual({ subject: "Anulación existente", body: "Cuerpo de anulación" });
+    expect(parsed.stripeAcknowledgment).toEqual(DEFAULT_EMAIL_TEMPLATES.stripeAcknowledgment);
+    expect(parsed.stripeRefund).toEqual(DEFAULT_EMAIL_TEMPLATES.stripeRefund);
+    expect(parsed.stripeAnnualStatement).toEqual(DEFAULT_EMAIL_TEMPLATES.stripeAnnualStatement);
+  });
+
   it("spells out the tax authority in donor-facing defaults", () => {
     const invalidation = EMAIL_TEMPLATE_DEFINITIONS.find((definition) => definition.type === "dteInvalidation");
 
@@ -142,6 +180,196 @@ describe("email template defaults", () => {
 
     expect(invalidation?.defaultBody).toContain("comprobante corregido, lo recibirá en un correo aparte");
     expect(invalidation?.defaultBody).toContain("Si no esperaba esta invalidación");
+  });
+});
+
+describe("email template placeholder boundaries", () => {
+  it.each([
+    [
+      "subject",
+      "stripeAcknowledgment",
+      "{{numeroControl}}",
+      "La plantilla Constancia inmediata contiene una variable no disponible: {{numeroControl}}."
+    ],
+    [
+      "body",
+      "dteReceipt",
+      "{{anio}}",
+      "La plantilla Envío de comprobante contiene una variable no disponible: {{anio}}."
+    ]
+  ] as const)("rejects a %s placeholder outside the selected template allowlist", (field, type, token, expectedMessage) => {
+    const candidate = structuredClone(DEFAULT_EMAIL_TEMPLATES);
+    candidate[type][field] = `Texto ${token}`;
+
+    expect(() => normalizeEmailTemplateSettings(candidate)).toThrow(expectedMessage);
+  });
+
+  it("falls back only the invalid stored template before it can reach a donor email", () => {
+    const parsed = parseEmailTemplates(JSON.stringify({
+      ...DEFAULT_EMAIL_TEMPLATES,
+      dteReceipt: { subject: "CDE personalizado", body: "Gracias, {{anio}}." },
+      dteInvalidation: { subject: "Invalidación personalizada", body: "Estado: {{estado}}." }
+    }));
+
+    expect(parsed.dteReceipt).toEqual(DEFAULT_EMAIL_TEMPLATES.dteReceipt);
+    expect(parsed.dteInvalidation).toEqual({
+      subject: "Invalidación personalizada",
+      body: "Estado: {{estado}}."
+    });
+    expect(renderEmailTemplate(parsed.dteReceipt, fakeRecord()).formattedText).not.toContain("{{anio}}");
+  });
+
+  it("substitutes against the original template without re-expanding placeholder-looking donor text", () => {
+    const rendered = renderEmailTemplateValue(
+      {
+        subject: "Constancia para {{donante}} — {{codigoGeneracion}}",
+        body: "Hola {{donante}}. Código: {{codigoGeneracion}}."
+      },
+      {
+        "{{donante}}": "{{codigoGeneracion}}",
+        "{{codigoGeneracion}}": "GENERATION-ORIGINAL"
+      }
+    );
+
+    expect(rendered.subject).toBe("Constancia para {{codigoGeneracion}} — GENERATION-ORIGINAL");
+    expect(rendered.formattedText).toBe("Hola {{codigoGeneracion}}. Código: GENERATION-ORIGINAL.");
+  });
+});
+
+describe("scoped email template persistence", () => {
+  it("rejects a stale validated snapshot when a legacy writer replaces it with a structurally invalid row", async () => {
+    const database = migratedDatabase();
+    try {
+      const original = {
+        ...DEFAULT_EMAIL_TEMPLATES,
+        stripeRefund: { subject: "Corrección personalizada", body: "Monto neto {{montoNeto}}." }
+      };
+      const originalRaw = JSON.stringify(original);
+      database.prepare(
+        `INSERT INTO app_settings (key, value, updated_by)
+         VALUES ('email_templates_json', ?, 'current_owner')`
+      ).run(originalRaw);
+      const patch = {
+        dteReceipt: { subject: "CDE {{numeroControl}} actualizado", body: "Entrega {{monto}}." },
+        dteInvalidation: { subject: "CDE {{numeroControl}} invalidado", body: "Estado {{estado}}." }
+      };
+      const update = prepareScopedEmailTemplateUpdate(originalRaw, patch, "SV_CDE");
+
+      const legacyRaw = JSON.stringify({
+        dteReceipt: DEFAULT_EMAIL_TEMPLATES.dteReceipt,
+        dteInvalidation: DEFAULT_EMAIL_TEMPLATES.dteInvalidation
+      });
+      database.prepare(
+        `UPDATE app_settings
+         SET value = ?, updated_by = 'legacy_worker'
+         WHERE key = 'email_templates_json'`
+      ).run(legacyRaw);
+      const repository = new Repository(new SqliteD1(database).database);
+      const saveInput = {
+        key: "email_templates_json",
+        scope: "SV_CDE" as const,
+        patch: update.patch,
+        initialTemplates: update.templates,
+        actorId: "user_operator",
+        expectedRaw: originalRaw
+      };
+
+      await expect(repository.saveScopedEmailTemplates(saveInput)).rejects.toThrow(/snapshot|changed/i);
+
+      expect(database.prepare(
+        "SELECT value, updated_by FROM app_settings WHERE key = 'email_templates_json'"
+      ).get()).toEqual({ value: legacyRaw, updated_by: "legacy_worker" });
+      expect(database.prepare(
+        "SELECT COUNT(*) AS count FROM audit_logs WHERE action = 'EMAIL_TEMPLATES_UPDATED'"
+      ).get()).toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("rejects a concurrent insert after a missing-row preflight without changing or auditing it", async () => {
+    const database = migratedDatabase();
+    try {
+      const patch = {
+        dteReceipt: { subject: "CDE {{numeroControl}} actualizado", body: "Entrega {{monto}}." },
+        dteInvalidation: { subject: "CDE {{numeroControl}} invalidado", body: "Estado {{estado}}." }
+      };
+      const update = prepareScopedEmailTemplateUpdate(null, patch, "SV_CDE");
+      const concurrent = {
+        ...DEFAULT_EMAIL_TEMPLATES,
+        stripeRefund: { subject: "Corrección concurrente", body: "Monto neto {{montoNeto}}." }
+      };
+      const concurrentRaw = JSON.stringify(concurrent);
+      database.prepare(
+        `INSERT INTO app_settings (key, value, updated_by)
+         VALUES ('email_templates_json', ?, 'concurrent_owner')`
+      ).run(concurrentRaw);
+      const repository = new Repository(new SqliteD1(database).database);
+
+      await expect(repository.saveScopedEmailTemplates({
+        key: "email_templates_json",
+        scope: "SV_CDE",
+        patch: update.patch,
+        initialTemplates: update.templates,
+        actorId: "user_operator",
+        expectedRaw: null
+      })).rejects.toThrow(/snapshot|changed/i);
+
+      expect(database.prepare(
+        "SELECT value, updated_by FROM app_settings WHERE key = 'email_templates_json'"
+      ).get()).toEqual({ value: concurrentRaw, updated_by: "concurrent_owner" });
+      expect(database.prepare(
+        "SELECT COUNT(*) AS count FROM audit_logs WHERE action = 'EMAIL_TEMPLATES_UPDATED'"
+      ).get()).toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("rolls back the SQLite settings mutation when the audit insert fails", async () => {
+    const database = migratedDatabase();
+    try {
+      const original = {
+        ...DEFAULT_EMAIL_TEMPLATES,
+        stripeRefund: { subject: "Corrección personalizada", body: "Monto neto {{montoNeto}}." }
+      };
+      const originalRaw = JSON.stringify(original);
+      database.prepare(
+        `INSERT INTO app_settings (key, value, updated_by)
+         VALUES ('email_templates_json', ?, 'previous_owner')`
+      ).run(originalRaw);
+      database.exec(
+        `CREATE TRIGGER fail_email_template_audit
+         BEFORE INSERT ON audit_logs
+         WHEN NEW.action = 'EMAIL_TEMPLATES_UPDATED'
+         BEGIN
+           SELECT RAISE(ABORT, 'injected email template audit failure');
+         END`
+      );
+      const repository = new Repository(new SqliteD1(database).database);
+      const patch = {
+        dteReceipt: { subject: "CDE {{numeroControl}} actualizado", body: "Entrega {{monto}}." },
+        dteInvalidation: { subject: "CDE {{numeroControl}} invalidado", body: "Estado {{estado}}." }
+      };
+
+      await expect(repository.saveScopedEmailTemplates({
+        key: "email_templates_json",
+        scope: "SV_CDE",
+        patch,
+        initialTemplates: { ...original, ...patch },
+        actorId: "user_operator",
+        expectedRaw: originalRaw
+      })).rejects.toThrow(/injected email template audit failure/);
+
+      expect(database.prepare(
+        "SELECT value, updated_by FROM app_settings WHERE key = 'email_templates_json'"
+      ).get()).toEqual({ value: originalRaw, updated_by: "previous_owner" });
+      expect(database.prepare(
+        "SELECT COUNT(*) AS count FROM audit_logs WHERE action = 'EMAIL_TEMPLATES_UPDATED'"
+      ).get()).toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
   });
 });
 
@@ -812,5 +1040,30 @@ describe("branding-aware email chrome", () => {
     expect(html).toContain("Iglesia Central");
     expect(html).toContain("#123abc");
     expect(html).not.toContain("ExamplePerson1");
+  });
+});
+
+describe("donor value escaping for the operator formatter", () => {
+  // Este escape es el único control que impide que el texto que aporta la persona
+  // donante se interprete como formato del operador en correos con valor fiscal.
+  it.each([
+    ["backslash", "C:\\ruta", "C:\\\\ruta"],
+    ["asterisco de cursiva y negrita", "Ana *Beatriz* **Carmen**", "Ana \\*Beatriz\\* \\*\\*Carmen\\*\\*"],
+    ["mas de subrayado", "Ana ++Beatriz++", "Ana \\+\\+Beatriz\\+\\+"],
+    ["cita al inicio de linea", "> Donacion falsa", "\\> Donacion falsa"],
+    ["cita sangrada", "  > Donacion falsa", "  \\> Donacion falsa"],
+    ["cita tras un salto CRLF", "Ana\r\n> Donacion falsa", "Ana\r\n\\> Donacion falsa"],
+    ["texto sin marcadores", "Ana Sofia", "Ana Sofia"]
+  ])("escapa %s", (_label, value, expected) => {
+    expect(escapeEmailTemplateFormattingValue(value)).toBe(expected);
+  });
+
+  it("escapa el valor del donante antes de interpolarlo en el cuerpo editable", () => {
+    const rendered = renderEmailTemplateValue(
+      { subject: "Constancia", body: "Estimado(a) {{donante}}:" },
+      { "{{donante}}": "*Ana*" }
+    );
+
+    expect(rendered.formattedText).toBe("Estimado(a) \\*Ana\\*:");
   });
 });

@@ -349,7 +349,7 @@ const allowedWranglerDocumentationCases = [
 describe("remote provisioning documentation", () => {
   it("mirrors the current Stripe migration range and non-archived ledgers in both READMEs", () => {
     for (const document of [readme, readmeEs]) {
-      expect(document).toContain("0001…0040");
+      expect(document).toContain("0001…0043");
       expect(document).toContain("stripe_retention_generations");
       expect(document).toContain("stripe_invoice_settlement_retention_generations");
       expect(document).toContain("Stripe");
@@ -387,9 +387,12 @@ describe("remote provisioning documentation", () => {
   );
 
   it.each(releaseSafetyReadmes)(
-    "keeps the removed client campaign configuration out of the %s",
+    "documents the target-bound Givebutter alternative in the %s",
     (_name, document) => {
-      expect(document).not.toMatch(/givebutter|VITE_GIVEBUTTER/i);
+      expect(document).toContain("Givebutter");
+      expect(document).toContain("VITE_GIVEBUTTER_CAMPAIGN");
+      expect(document).toContain("VITE_GIVEBUTTER_TITHE_FUND_ID");
+      expect(document).toContain("VITE_GIVEBUTTER_OFFERING_FUND_ID");
     }
   );
 

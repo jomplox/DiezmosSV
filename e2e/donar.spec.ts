@@ -1,5 +1,8 @@
 import { expect, test, type Locator } from "@playwright/test";
-import { DONAR_VERIFYING_NOTICE_DELAY_MS } from "../src/client/donation";
+import {
+  DONAR_VERIFYING_NOTICE_DELAY_MS,
+  GIVEBUTTER_RENDER_TIMEOUT_MS
+} from "../src/client/donation";
 
 /**
  * End-to-end test for the PUBLIC donor-checkout pages against a REAL local
@@ -104,7 +107,6 @@ test("uses neutral donor attribution when public branding has no configured name
   await page.getByLabel("Monto").fill("100.00");
   await page.getByRole("button", { name: "Continuar con su diezmo", exact: true }).click();
   await expect(page.locator(".donar-intro")).toContainText("apoya a esta iglesia en El Salvador");
-  await expect(page.locator(".donar-intro")).toContainText("una organización estadounidense 501(c)(3)");
   await expect(page.getByText(/ExamplePerson1|ExampleOrganization/)).toHaveCount(0);
 });
 
@@ -488,6 +490,15 @@ test("Paso 2 reports every invalid field at once and clears each error as it is 
 
 test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", async ({ page }) => {
   const checkoutBodies: Array<Record<string, unknown>> = [];
+  const givebutterRequests: string[] = [];
+  await page.route("https://givebutter.com/**", (route) => {
+    givebutterRequests.push(route.request().url());
+    return route.fulfill({
+      status: 200,
+      contentType: "text/html; charset=utf-8",
+      body: "<html lang=\"en\"><body>Givebutter test form</body></html>"
+    });
+  });
   await page.route("**/api/donations/stripe/checkout", async (route) => {
     checkoutBodies.push(route.request().postDataJSON() as Record<string, unknown>);
     if (checkoutBodies.length === 1) {
@@ -573,8 +584,9 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   await expect(page.getByText("Paso 2 de 2")).toBeVisible();
   await expect(page.getByText("Su entrega", { exact: true })).toBeVisible();
   await expect(page.getByText("Ofrenda · Mensual · $100.00")).toBeVisible();
-  await expect(page.locator(".donar-intro")).toContainText(`apoya a ${BRANDING_DISPLAY_NAME} en El Salvador`);
-  await expect(page.locator(".donar-intro")).toContainText("organización estadounidense 501(c)(3)");
+  await expect(page.locator(".donar-intro")).toHaveText(
+    `Su diezmo u ofrenda apoya a ${BRANDING_DISPLAY_NAME} en El Salvador. Se procesa en EE. UU. a través de Friends of ${BRANDING_DISPLAY_NAME} (501c3) y recibirá un recibo deducible de impuestos en EE. UU. por correo.`
+  );
   await expect(
     page.getByText("Stripe mostrará en español las opciones disponibles para usted de forma segura.")
   ).toHaveCount(0);
@@ -617,6 +629,96 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   await expect(page.getByRole("radio", { name: "Tarjeta" })).toHaveCount(0);
   await expect(page.getByRole("radio", { name: "Cuenta bancaria de EE. UU." })).toHaveCount(0);
 
+  // Givebutter is an explicit alternative. Selecting it removes Stripe's embedded
+  // tree entirely, preserves the amount/frequency prefill, and can return to the
+  // already-created Stripe Session without minting another one.
+  const givebutterChoice = page.getByRole("button", {
+    name: /^Ofrendar con Givebutter\s+\(Con formulario en inglés\)$/i
+  });
+  await expect(givebutterChoice).toBeVisible();
+  await expect(givebutterChoice.locator("img")).toBeVisible();
+  const givebutterChoiceBox = await givebutterChoice.boundingBox();
+  expect(givebutterChoiceBox).not.toBeNull();
+  expect(givebutterChoiceBox!.width).toBeLessThanOrEqual(440);
+  expect(givebutterChoiceBox!.height).toBeGreaterThanOrEqual(44);
+  expect(givebutterChoiceBox!.height).toBeLessThanOrEqual(54);
+  // Stripe is the default path — it carries the Spanish form and the tax receipt — so
+  // the alternative sits below it instead of interrupting the reading flow.
+  const defaultStripeBox = await page.locator(".donar-stripe-embedded").boundingBox();
+  expect(defaultStripeBox).not.toBeNull();
+  expect(givebutterChoiceBox!.y).toBeGreaterThanOrEqual(defaultStripeBox!.y + defaultStripeBox!.height);
+  // …and it is painted in the page's monochrome vocabulary, not as the loudest thing
+  // on screen: the Givebutter favicon is the only brand color the control spends.
+  // The pointer is parked off the control first, and the read polls: :hover repaints
+  // the border over a 140ms transition, so a single read can catch it mid-flight.
+  await page.mouse.move(0, 0);
+  await expect.poll(async () => await givebutterChoice.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { borderColor: style.borderTopColor, backgroundImage: style.backgroundImage };
+  })).toEqual({ borderColor: "rgb(216, 216, 216)", backgroundImage: "none" });
+  expect(givebutterRequests).toEqual([]);
+  await givebutterChoice.click();
+  await expect(page.locator(".donar-stripe-embedded")).toHaveCount(0);
+  const givebutterFrame = page.getByTitle("Formulario de donación Givebutter (en inglés)");
+  await expect(givebutterFrame).toBeVisible();
+  const givebutterEmbedRequest = new URL(givebutterRequests.at(0) ?? "");
+  expect(givebutterEmbedRequest.pathname).toBe("/embed/c/example-campaign");
+  expect(givebutterEmbedRequest.searchParams.get("amount")).toBe("100");
+  expect(givebutterEmbedRequest.searchParams.get("frequency")).toBe("monthly");
+  // Synthetic browser-build fixture: this proves the selected Ofrenda maps to the
+  // offering member of the pair without reading or printing any deployment value.
+  expect(givebutterEmbedRequest.searchParams.get("fund")).toBe("842013");
+  expect(givebutterEmbedRequest.searchParams.get("goalBar")).toBe("false");
+  await expect(page.getByText(
+    "Confirme en Givebutter el tipo de entrega, el monto y la frecuencia antes de continuar; estos datos se envían solo como valores iniciales."
+  )).toBeVisible();
+  // One escape hatch out of a non-rendering embed — never a hint and a button to the
+  // same hosted page — and it sits above the 760px frame, so a donor facing a blank
+  // box never has to scroll past it to find the way out. The delayed class records
+  // that the render budget elapsed without changing the donor-visible help text.
+  const givebutterHatch = page.locator(".donar-givebutter-hint");
+  await expect(givebutterHatch).toHaveCount(1);
+  await expect(page.locator('.donar-givebutter-surface a[href^="https://givebutter.com/"]')).toHaveCount(1);
+  const givebutterHostedPage = new URL(await givebutterHatch.getAttribute("href") ?? "");
+  expect(givebutterHostedPage.searchParams.get("amount")).toBe("100");
+  expect(givebutterHostedPage.searchParams.get("frequency")).toBe("monthly");
+  expect(givebutterHostedPage.searchParams.get("fund")).toBe(
+    givebutterEmbedRequest.searchParams.get("fund")
+  );
+  const hatchBox = await givebutterHatch.boundingBox();
+  const frameBox = await givebutterFrame.boundingBox();
+  expect(hatchBox).not.toBeNull();
+  expect(frameBox).not.toBeNull();
+  expect(hatchBox!.y).toBeLessThan(frameBox!.y);
+  const givebutterHelpText = "¿Problemas con el formulario? Abrir Givebutter";
+  await expect(givebutterHatch).toHaveText(givebutterHelpText);
+  await expect(givebutterHatch).toHaveClass(/\bdonar-givebutter-fallback\b/, {
+    timeout: GIVEBUTTER_RENDER_TIMEOUT_MS + 5_000
+  });
+  await expect(givebutterHatch).toHaveText(givebutterHelpText);
+  expect(await givebutterHatch.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      backgroundColor: style.backgroundColor,
+      borderWidth: style.borderTopWidth,
+      borderRadius: style.borderRadius,
+      textDecorationLine: style.textDecorationLine,
+      whiteSpace: style.whiteSpace
+    };
+  })).toEqual({
+    backgroundColor: "rgba(0, 0, 0, 0)",
+    borderWidth: "0px",
+    borderRadius: "0px",
+    textDecorationLine: "underline",
+    whiteSpace: "nowrap"
+  });
+  const stripeReturn = page.getByRole("button", { name: /Volver a Stripe.*Formulario en español/i });
+  await expect(stripeReturn.locator(".donar-provider-stripe-mark")).toBeVisible();
+  await stripeReturn.click();
+  await expect(givebutterFrame).toHaveCount(0);
+  await expect(page.locator(".donar-stripe-embedded")).toBeVisible();
+  await expect(page.locator(".donar-intro")).toContainText(`Friends of ${BRANDING_DISPLAY_NAME} (501c3)`);
+
   // Stripe reuses the Wompi handoff shell: the hosted surface is full-bleed on
   // mobile and aligns to the raised card edges on tablet/desktop. Only the
   // provider-owned content inside that boundary differs.
@@ -656,6 +758,42 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
     /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
   );
   await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8787\/(?:donar)?\?ruta=eeuu$/);
+});
+
+test("the Givebutter handoff verb follows the selected U.S. gift type", async ({ page }) => {
+  let checkoutSequence = 0;
+  await page.route("**/api/donations/stripe/checkout", async (route) => {
+    checkoutSequence += 1;
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessionId: `cs_test_givebutter_label_${checkoutSequence}`,
+        clientSecret: `cs_test_givebutter_label_${checkoutSequence}_secret_mock`,
+        publishableKey: "pk_test_mock",
+        mock: true
+      })
+    });
+  });
+
+  const titheHandoff = page.getByRole("button", {
+    name: /^Diezmar con Givebutter\s+\(Con formulario en inglés\)$/i
+  });
+  const offeringHandoff = page.getByRole("button", {
+    name: /^Ofrendar con Givebutter\s+\(Con formulario en inglés\)$/i
+  });
+
+  await page.goto("/donar?ruta=eeuu");
+  await page.getByRole("button", { name: "$50", exact: true }).click();
+  await page.getByRole("button", { name: "Continuar con su diezmo", exact: true }).click();
+  await expect(titheHandoff).toBeVisible();
+  await expect(offeringHandoff).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Editar", exact: true }).click();
+  await page.getByRole("radio", { name: "Ofrenda", exact: true }).check();
+  await page.getByRole("button", { name: "Continuar con su ofrenda", exact: true }).click();
+  await expect(offeringHandoff).toBeVisible();
+  await expect(titheHandoff).toHaveCount(0);
 });
 
 test("a terminal Stripe Session failure releases the current browser request identity", async ({ page }) => {
@@ -926,6 +1064,18 @@ test("chooser, SV, and mock US surfaces never load Stripe.js", async ({ page, co
     stripeJsRequests.push(route.request().url());
     await route.abort();
   });
+  await page.route("**/api/donations/stripe/checkout", (route) =>
+    route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessionId: "cs_test_no_stripe_js_fixture",
+        clientSecret: "cs_test_no_stripe_js_fixture_secret_mock",
+        publishableKey: "pk_test_mock",
+        mock: true
+      })
+    })
+  );
 
   await page.goto("/donar");
   await expect(page.getByRole("button", { name: /El Salvador y el mundo/ })).toBeVisible();

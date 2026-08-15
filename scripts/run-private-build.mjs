@@ -4,20 +4,30 @@ import { constants } from "node:os";
 import { pathToFileURL } from "node:url";
 import { loadPrivateDeployConfig } from "./private-deploy-config.mjs";
 
+const PUBLIC_VITE_VARIABLES = [
+  ["VITE_GIVEBUTTER_CAMPAIGN", (config) => config.campaign],
+  ["VITE_GIVEBUTTER_TITHE_FUND_ID", (config) => config.givebutterFunds?.tithe],
+  ["VITE_GIVEBUTTER_OFFERING_FUND_ID", (config) => config.givebutterFunds?.offering]
+];
+
 export async function runPrivateBuild({
   target,
   env = process.env,
   repositoryRoot = process.cwd(),
-  spawnImpl = spawn
+  spawnImpl = spawn,
+  platform = process.platform
 } = {}) {
-  // Validate the owner-only target, origin, and donor-logo contract before Vite
-  // starts. Stripe configuration is runtime-only and is never baked into the client.
-  loadPrivateDeployConfig({ target, env, repositoryRoot });
+  // Validate the owner-only target, campaign, origin, and donor-logo contract
+  // before Vite starts. Only validated public Givebutter routing values enter
+  // the client build; Stripe credentials remain runtime-only.
+  const config = loadPrivateDeployConfig({ target, env, repositoryRoot });
+  const buildEnv = createBuildEnvironment(env, config);
+  const invocation = buildInvocation(platform, buildEnv);
 
   return new Promise((resolve, reject) => {
-    const child = spawnImpl(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "build"], {
+    const child = spawnImpl(invocation.command, invocation.args, {
       cwd: repositoryRoot,
-      env,
+      env: buildEnv,
       stdio: "inherit"
     });
     child.once("error", reject);
@@ -25,6 +35,38 @@ export async function runPrivateBuild({
       resolve(signal ? 128 + (constants.signals[signal] ?? 1) : (status ?? 1));
     });
   });
+}
+
+function buildInvocation(platform, env) {
+  if (platform !== "win32") {
+    return { command: "npm", args: ["run", "build"] };
+  }
+  const commandInterpreter = Object.entries(env).find(
+    ([name, value]) => name.toLowerCase() === "comspec" && value?.trim()
+  )?.[1];
+  return {
+    command: commandInterpreter || "cmd.exe",
+    args: ["/d", "/c", "npm.cmd", "run", "build"]
+  };
+}
+
+function createBuildEnvironment(inheritedEnv, config) {
+  const buildEnv = {};
+  for (const [name, value] of Object.entries(inheritedEnv)) {
+    if (!name.toLowerCase().startsWith("vite_")) {
+      buildEnv[name] = value;
+    }
+  }
+  for (const [name, readConfig] of PUBLIC_VITE_VARIABLES) {
+    // Set every approved key so Vite cannot revive an absent optional value
+    // from a repository-local dotenv file after private validation succeeds.
+    buildEnv[name] = readConfig(config) ?? "";
+  }
+  // Vite otherwise reloads repository-local dotenv files after this allowlist
+  // has been constructed. The tracked Vite config turns those files off only
+  // for this validated private-build entrypoint.
+  buildEnv.DIEZMOSSV_PRIVATE_BUILD = "1";
+  return buildEnv;
 }
 
 async function runCli() {

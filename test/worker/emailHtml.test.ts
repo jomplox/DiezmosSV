@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { certificateEmailHtml, dteEmailHtml, operationalAlertHtml, passwordResetEmailHtml, stripeAnnualStatementEmailHtml } from "../../src/worker/services/emailHtml";
+import { certificateEmailHtml, dteEmailHtml, editableDonorEmailHtml, operationalAlertHtml, passwordResetEmailHtml } from "../../src/worker/services/emailHtml";
 import type { DteDocumentRecord } from "../../src/worker/types";
 
 const LOGO_URL = "https://iglesia.example.org/api/branding/logo?v=v9";
@@ -29,13 +29,10 @@ describe("HTML email rendering", () => {
         totalLabel: "$100.00",
         isTestEnvironment: false
       }),
-      stripeAnnualStatementEmailHtml({
+      editableDonorEmailHtml({
         organizationName: "Misión ExampleOrganization",
-        donorName: "María",
-        year: 2025,
-        count: 2,
-        netTotalLabel: "$75.00",
-        corrected: false
+        title: "Constancia anual de donaciones — EE. UU.",
+        bodyText: "Estimada María:\n\nAdjuntamos su constancia anual de 2025 por $75.00."
       })
     ];
 
@@ -58,13 +55,13 @@ describe("HTML email rendering", () => {
   });
 
   it("keeps the U.S. annual email materially separate from the SV fiscal dossier", () => {
-    const html = stripeAnnualStatementEmailHtml({
+    const html = editableDonorEmailHtml({
       organizationName: "Misión ExampleOrganization",
-      donorName: "María",
-      year: 2025,
-      count: 2,
-      netTotalLabel: "$75.00",
-      corrected: true
+      title: "Constancia anual corregida de donaciones — EE. UU.",
+      bodyText:
+        "Estimada María:\n\nAdjuntamos su constancia anual corregida de 2025 por $75.00.\n\n"
+        + "No se proporcionaron bienes ni servicios a cambio de estas donaciones.\n\n"
+        + "Conserve este documento con sus registros."
     });
 
     expect(html).toContain("Constancia anual corregida de donaciones — EE. UU.");
@@ -92,6 +89,51 @@ describe("HTML email rendering", () => {
     expect(html).not.toContain("Cuerpo con <b>");
     expect(html).toContain("&lt;script&gt;");
     expect(html).toContain("Iglesia &lt;XSS&gt;");
+  });
+
+  it("renders the supported formatting in an editable Salvadoran template body", () => {
+    const html = dteEmailHtml(
+      record(),
+      "**Negrita** y *cursiva* y ++subrayado++\n\n> Una cita\n> en dos líneas",
+      { organizationName: "Iglesia" }
+    );
+
+    expect(html).toContain("<strong>Negrita</strong>");
+    expect(html).toContain("<em>cursiva</em>");
+    expect(html).toContain("<u>subrayado</u>");
+    expect(html).toContain("<blockquote");
+    expect(html).toContain("Una cita<br />en dos líneas");
+  });
+
+  it.each([
+    ["bold", "**", "strong"],
+    ["italic", "*", "em"],
+    ["underline", "++", "u"]
+  ])("renders balanced per-line %s markers emitted by the template editor", (_format, marker, tag) => {
+    const html = editableDonorEmailHtml({
+      organizationName: "Iglesia",
+      title: "Constancia",
+      bodyText: `${marker}Primera${marker}\n${marker}Segunda${marker}\n\n${marker}Tercera${marker}`
+    });
+
+    expect(html).toContain(`<${tag}>Primera</${tag}><br /><${tag}>Segunda</${tag}>`);
+    expect(html).toContain(`<${tag}>Tercera</${tag}>`);
+    expect(html).not.toContain(`${marker}Primera`);
+  });
+
+  it("renders the supported formatting in an editable U.S. template without accepting raw HTML", () => {
+    const html = editableDonorEmailHtml({
+      organizationName: "Iglesia",
+      title: "Constancia",
+      bodyText: "**Negrita** *cursiva* ++subrayado++\n\n> Cita <script>alert(1)</script>"
+    });
+
+    expect(html).toContain("<strong>Negrita</strong>");
+    expect(html).toContain("<em>cursiva</em>");
+    expect(html).toContain("<u>subrayado</u>");
+    expect(html).toContain("<blockquote");
+    expect(html).not.toContain("<script>");
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
   });
 
   it("renders the password reset email with a button link and expiry", () => {

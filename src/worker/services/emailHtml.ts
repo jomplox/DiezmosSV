@@ -41,7 +41,7 @@ export function dteEmailHtml(record: DteDocumentRecord, bodyText: string, option
   const brandColor = options.brandColor ?? DEFAULT_BRAND_COLOR;
   return emailDocument(options.organizationName, "Comprobante de Donación Electrónico", brandColor, options.supportEmail, options.logoUrl, [
     banner,
-    paragraphs(bodyText),
+    emailTemplateBody(bodyText),
     details,
     testNote,
     footNote("Se adjuntan la representación gráfica en PDF y el documento electrónico en JSON.")
@@ -55,109 +55,34 @@ export interface BrandingEmailOptions {
   logoUrl?: string | null;
 }
 
-export interface StripeAcknowledgmentEmailInput {
-  donorName: string;
-  amountLabel: string;
-  settledDateLabel: string;
-  giftTypeLabel: string;
-  frequencyLabel: string;
-  legalName: string;
-  ein: string;
+export function editableDonorEmailHtml(input: {
   organizationName: string;
+  title: string;
+  bodyText: string;
   brandColor?: string;
   supportEmail?: string;
   logoUrl?: string | null;
-  kind?: "ORIGINAL" | "PARTIAL_REFUND" | "FULL_REFUND";
-  refundedAmountLabel?: string;
-  netAmountLabel?: string;
-}
-
-export function stripeAcknowledgmentEmailHtml(input: StripeAcknowledgmentEmailInput): string {
-  const kind = input.kind ?? "ORIGINAL";
-  const title = kind === "PARTIAL_REFUND"
-    ? "Constancia corregida de donación en EE. UU."
-    : kind === "FULL_REFUND"
-      ? "Constancia revocada de donación en EE. UU."
-      : "Constancia de donación en EE. UU.";
-  const correction = kind === "PARTIAL_REFUND"
-    ? note("Esta constancia corregida reemplaza la versión anterior para esta donación.")
-    : kind === "FULL_REFUND"
-      ? note("Se registró un reembolso total. La constancia anterior queda revocada.")
-      : "";
-  const amountRows: Array<[string, string]> = kind === "ORIGINAL"
-    ? [["Monto", input.amountLabel]]
-    : [
-        ["Monto original", input.amountLabel],
-        ["Reembolso acumulado", input.refundedAmountLabel ?? ""],
-        ["Monto neto reconocido", input.netAmountLabel ?? ""]
-      ];
+}): string {
   return emailDocument(
     input.organizationName,
-    title,
+    input.title,
     input.brandColor ?? DEFAULT_BRAND_COLOR,
     input.supportEmail,
     input.logoUrl,
-    [
-      paragraphs(
-        `Estimado(a) ${input.donorName}:\n\n` +
-        `Gracias por su donación voluntaria. Conserve este correo como constancia de su entrega.`
-      ),
-      correction,
-      detailsCard([
-        ["Organización legal", input.legalName],
-        ["EIN", input.ein],
-        ["Fecha", input.settledDateLabel],
-        ...amountRows,
-        ["Tipo", input.giftTypeLabel],
-        ["Frecuencia", input.frequencyLabel]
-      ]),
-      note("No se proporcionaron bienes ni servicios a cambio de esta donación."),
-      footNote("Conserve este correo con sus registros. Consulte con su asesor sobre la aplicación a su situación fiscal.")
-    ]
+    [emailTemplateBody(input.bodyText)]
   );
 }
 
-export interface StripeAnnualStatementEmailInput {
-  organizationName: string;
-  donorName: string;
-  year: number;
-  count: number;
-  netTotalLabel: string;
-  corrected: boolean;
-  brandColor?: string;
-  supportEmail?: string;
-  logoUrl?: string | null;
-}
-
-export function stripeAnnualStatementEmailHtml(input: StripeAnnualStatementEmailInput): string {
-  const title = input.corrected
-    ? "Constancia anual corregida de donaciones — EE. UU."
-    : "Constancia anual de donaciones — EE. UU.";
-  const correction = input.corrected
-    ? note("Esta versión corregida reemplaza la constancia anterior para el mismo año.")
-    : "";
-  return emailDocument(
-    input.organizationName,
-    title,
-    input.brandColor ?? DEFAULT_BRAND_COLOR,
-    input.supportEmail,
-    input.logoUrl,
-    [
-      paragraphs(
-        `Estimado(a) ${input.donorName}:\n\n` +
-        `Adjuntamos su constancia anual de donaciones correspondiente a ${input.year}. ` +
-        `El documento resume las donaciones registradas para sus archivos.`
-      ),
-      correction,
-      detailsCard([
-        ["Año", String(input.year)],
-        ["Donaciones", String(input.count)],
-        ["Total neto", input.netTotalLabel]
-      ]),
-      note("No se proporcionaron bienes ni servicios a cambio de estas donaciones."),
-      footNote("Conserve este documento con sus registros. Este mensaje no constituye asesoría fiscal.")
-    ]
-  );
+export function emailTemplatePlainText(bodyText: string): string {
+  return bodyText
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/^\s*>\s?/, ""))
+    .join("\n")
+    .replace(/(?<!\\)\*\*([^*\n]+)(?<!\\)\*\*/g, "$1")
+    .replace(/(?<!\\)\*([^*\n]+)(?<!\\)\*/g, "$1")
+    .replace(/(?<!\\)\+\+([^+\n]+)(?<!\\)\+\+/g, "$1")
+    .replace(/\\([\\*+>])/g, "$1");
 }
 
 export function passwordResetEmailHtml(
@@ -343,6 +268,54 @@ function paragraphs(bodyText: string): string {
     .split(/\n{2,}/)
     .map((block) => `<p style="margin:0 0 14px;">${escapeHtml(block.trim()).replaceAll("\n", "<br />")}</p>`)
     .join("\n");
+}
+
+function emailTemplateBody(bodyText: string): string {
+  const fragments: string[] = [];
+  let paragraphLines: string[] = [];
+  let quoteLines: string[] = [];
+  const flushParagraph = () => {
+    if (paragraphLines.length === 0) return;
+    fragments.push(`<p style="margin:0 0 14px;">${paragraphLines.map(formatEmailTemplateInline).join("<br />")}</p>`);
+    paragraphLines = [];
+  };
+  const flushQuote = () => {
+    if (quoteLines.length === 0) return;
+    fragments.push(
+      `<blockquote style="margin:0 0 14px;padding:10px 14px;border-left:3px solid ${BORDER_COLOR};background:${CARD_BACKGROUND};color:${MUTED_COLOR};">${quoteLines.map(formatEmailTemplateInline).join("<br />")}</blockquote>`
+    );
+    quoteLines = [];
+  };
+
+  for (const rawLine of bodyText.replace(/\r\n?/g, "\n").split("\n")) {
+    const quote = rawLine.match(/^\s*>\s?(.*)$/);
+    if (quote) {
+      flushParagraph();
+      quoteLines.push(quote[1]);
+      continue;
+    }
+    if (!rawLine.trim()) {
+      flushParagraph();
+      flushQuote();
+      continue;
+    }
+    flushQuote();
+    paragraphLines.push(rawLine.trim());
+  }
+  flushParagraph();
+  flushQuote();
+  return fragments.join("\n");
+}
+
+function formatEmailTemplateInline(value: string): string {
+  return escapeHtml(value)
+    .replace(/\\\\/g, "&#92;")
+    .replace(/\\\*/g, "&#42;")
+    .replace(/\\\+/g, "&#43;")
+    .replace(/\\&gt;/g, "&gt;")
+    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*([^*\n]+)\*/g, "<em>$1</em>")
+    .replace(/\+\+([^+\n]+)\+\+/g, "<u>$1</u>");
 }
 
 function detailsCard(rows: Array<[string, string]>): string {

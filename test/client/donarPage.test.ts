@@ -27,6 +27,7 @@ import {
   DONAR_VERIFYING_NOTICE_DELAY_MS,
   DONAR_WIDGET_VERIFYING_MESSAGE,
   DONAR_WOMPI_CHECKOUT_ORIGIN,
+  GIVEBUTTER_RENDER_TIMEOUT_MS,
   STRIPE_FREQ_MONTHLY_LABEL,
   STRIPE_FREQ_ONCE_LABEL,
   STRIPE_MONTHLY_LABEL,
@@ -1099,6 +1100,15 @@ describe("donar wizard styles contract", () => {
     expect(stylesSource).toContain(".donar-step");
     expect(stylesSource).toMatch(/prefers-reduced-motion[\s\S]{0,800}\.donar-step/);
   });
+
+  it("removes provider-switch transitions and transforms for reduced-motion donors", () => {
+    expect(stylesSource).toMatch(
+      /prefers-reduced-motion[\s\S]{0,1400}\.donar-provider-choice\s*\{[^}]*transition:\s*none;/
+    );
+    expect(stylesSource).toMatch(
+      /prefers-reduced-motion[\s\S]{0,1800}\.donar-provider-choice:hover,[\s\S]{0,180}\.donar-provider-choice:focus-visible,[\s\S]{0,180}\.donar-provider-choice:active\s*\{[^}]*transform:\s*none;/
+    );
+  });
 });
 
 describe("donar responsive donor layout", () => {
@@ -1206,10 +1216,10 @@ describe("Stripe donar page source contract", () => {
     expect(STRIPE_MONTHLY_LABEL).toBe("Frecuencia de la entrega");
   });
 
-  it("shows the 501(c)(3) explanation and mounts the Stripe form in place", () => {
+  it("shows the production 501c3 explanation and mounts the Stripe form in place", () => {
     const intro = stripeIntro("Iglesia Ejemplo Central");
     expect(donarSource).toContain("stripeIntro(organizationName)");
-    expect(intro).toContain("501(c)(3)");
+    expect(intro).toContain("Friends of Iglesia Ejemplo Central (501c3)");
     // The US door funds the SAME church — the intro says so, never implying a
     // different beneficiary.
     expect(intro).toContain("apoya a Iglesia Ejemplo Central en El Salvador");
@@ -1219,7 +1229,7 @@ describe("Stripe donar page source contract", () => {
 
   it("uses neutral donor copy when public branding has no configured organization", () => {
     expect(stripeIntro(null)).toContain("apoya a esta iglesia en El Salvador");
-    expect(stripeIntro("   ")).toContain("una organización estadounidense 501(c)(3)");
+    expect(stripeIntro("   ")).toContain("una organización estadounidense 501c3");
     expect(stripeIntro(null)).not.toMatch(/ExampleOrganization|ExamplePerson1/);
   });
 
@@ -1228,9 +1238,127 @@ describe("Stripe donar page source contract", () => {
       pageSource.indexOf("{/* US Stripe step"),
       pageSource.indexOf("{/* Paso 3", pageSource.indexOf("{/* US Stripe step"))
     );
-    expect(stripeBlock).not.toContain("<iframe");
+    expect(stripeBlock).toContain('title="Formulario de donación Givebutter (en inglés)"');
+    expect(stripeBlock).not.toContain("payment_method_types");
     expect(stripeBlock).toContain("<StripeDonationForm");
     expect(stripeBlock).not.toContain("donar-stripe-assurance");
+  });
+
+  it("delegates payment only to the Givebutter embed and leaks no referrer to it", () => {
+    const frame = pageSource.slice(
+      pageSource.indexOf('className="donar-givebutter-frame"'),
+      pageSource.indexOf("/>", pageSource.indexOf('className="donar-givebutter-frame"'))
+    );
+
+    // `payment` sin origen equivale a `payment 'src'`; `payment *` delegaría la Payment
+    // Request API a todos los orígenes del árbol de marcos.
+    expect(frame).toContain('allow="payment; clipboard-write"');
+    expect(frame).not.toContain("payment *");
+    // Sin referrerPolicy propio el marco hereda el Referrer-Policy: no-referrer del
+    // documento, así que el origen de la página de donación no viaja a Givebutter.
+    expect(frame).not.toContain("referrerPolicy");
+  });
+
+  it("renders the Givebutter alternative below the default Stripe form", () => {
+    const branchStart = pageSource.indexOf('{usProvider === "stripe" && (');
+    expect(branchStart).toBeGreaterThan(-1);
+    const branch = pageSource.slice(
+      branchStart,
+      pageSource.indexOf('{usProvider === "givebutter" && (', branchStart)
+    );
+    // Stripe carries the Spanish form and the tax receipt, so it owns the
+    // "understand → pay" flow; the alternative follows it in DOM order.
+    const stripeForm = branch.indexOf("<StripeDonationForm");
+    const givebutterChoice = branch.indexOf("Ofrendar con Givebutter");
+    expect(stripeForm).toBeGreaterThan(-1);
+    expect(givebutterChoice).toBeGreaterThan(stripeForm);
+    // The move changes nothing about the form's guard or its per-attempt key.
+    expect(branch).toContain("{stripeSessionAttempt && (");
+    expect(branch).toContain("key={stripeSessionAttempt.sequence}");
+  });
+
+  it("keeps both US provider controls inside the page's monochrome vocabulary", () => {
+    // Anchored to the line start and counted: a later rule whose selector merely ends
+    // in .donar-provider-choice must not silently become what these assertions read.
+    const choiceRules = [...stylesSource.matchAll(/^\.donar-provider-choice\s*\{[^}]*\}/gm)];
+    expect(choiceRules).toHaveLength(1);
+    const choiceRule = choiceRules[0][0];
+    // The provider switch controls share the frame's 440px column.
+    expect(choiceRule).toContain("width: min(100%, 440px);");
+    expect(choiceRule).toContain("min-height: 50px;");
+    expect(choiceRule).toContain("border: 1px solid #d8d8d8;");
+    expect(choiceRule).toContain("background: #ffffff;");
+    // The saturated card is gone: no amber border, no gradient, no modifier class.
+    expect(`${donarSource}\n${stylesSource}`).not.toContain("donar-provider-choice-givebutter");
+    expect(stylesSource).not.toContain("#e5ad0f");
+    // The bundled favicon keeps its brand swatch — that mark IS the recognition.
+    expect(stylesSource).toMatch(/\.donar-provider-choice img\s*\{[^}]*background:\s*#febf10;/);
+    expect(donarSource).toContain("GIVEBUTTER_ICON_DATA_URI");
+    // Both provider controls carry a recognizable bundled provider mark.
+    expect(donarSource).toContain("donar-provider-stripe-mark");
+    expect(stylesSource).toMatch(/\.donar-provider-stripe-mark\s*\{[^}]*background:\s*#635bff;/);
+  });
+
+  it("puts one Givebutter escape hatch above the frame instead of two below it", () => {
+    const surfaceStart = pageSource.indexOf(
+      '{usProvider === "givebutter" && givebutterFrameUrl && givebutterHostedPageUrl && ('
+    );
+    expect(surfaceStart).toBeGreaterThan(-1);
+    const surface = pageSource.slice(surfaceStart, pageSource.indexOf("{/* Paso 3", surfaceStart));
+    // A donor staring at a blank 760px embed must not scroll past it to find the way
+    // out: the anchor precedes the iframe in DOM order.
+    const hatch = surface.indexOf("donar-givebutter-hint");
+    const frame = surface.indexOf("<iframe");
+    expect(hatch).toBeGreaterThan(-1);
+    expect(frame).toBeGreaterThan(-1);
+    expect(hatch).toBeLessThan(frame);
+    // One anchor spans both loading states; the rendered browser test owns the
+    // donor-visible copy contract before and after the timeout.
+    expect(surface.match(/href=\{givebutterHostedPageUrl\}/g)).toHaveLength(1);
+    expect(surface).toContain('"link-button donar-givebutter-hint');
+    // The escape hatch never spends the page's strongest CTA style.
+    expect(surface).not.toContain('className="primary');
+    // The 760px void gets the shared loading copy until the frame loads — or until the
+    // budget elapses, after which the stable hosted-page link is the only signal.
+    expect(surface).toContain("{!givebutterFrameLoaded && !givebutterFrameDelayed && (");
+    expect(surface).toContain("DONAR_WIDGET_LOADING_MESSAGE");
+  });
+
+  it("keeps the render budget independent after the frame fires load", () => {
+    // A cross-origin iframe fires load for the browser's own error documents, so load
+    // must only clear the placeholder — it can neither set nor suppress "delayed".
+    expect(donarSource).toContain("onLoad={() => setGivebutterFrameLoaded(true)}");
+    expect(donarSource).not.toContain("givebutterFrameStatus");
+    const effectStart = donarSource.indexOf("const timeout = window.setTimeout");
+    const timerCallback = donarSource.slice(effectStart, donarSource.indexOf("GIVEBUTTER_RENDER_TIMEOUT_MS", effectStart));
+    expect(timerCallback).toContain("setGivebutterFrameDelayed(true)");
+    expect(timerCallback).not.toContain("givebutterFrameLoaded");
+    expect(GIVEBUTTER_RENDER_TIMEOUT_MS).toBe(4_000);
+  });
+
+  it("keeps focus and screen-reader context across both US provider switches", () => {
+    expect(pageSource).toContain("usProviderSwitchedRef.current = true;");
+    // Each switch lands on the TOP of the surface it opened. Givebutter's own return
+    // control is that top; Stripe's is the step intro above its form — never the
+    // Givebutter choice, which now sits BELOW the form the donor just came back to.
+    expect(pageSource).toContain(
+      'const target = usProvider === "givebutter" ? stripeReturnRef.current : stripeIntroRef.current;'
+    );
+    expect(pageSource).toContain('<p className="donar-intro" ref={stripeIntroRef} tabIndex={-1}>');
+    expect(pageSource).toContain("ref={stripeReturnRef}");
+    // The retired ref leaves no dead wiring behind.
+    expect(donarSource).not.toContain("givebutterChoiceRef");
+    // Exactly one active-form announcement in the whole US step, in whatever markup it
+    // takes — role="status" text OR a bare aria-live on the surface container. The only
+    // other live region here is the Givebutter loading placeholder, so remove it and
+    // count what is left: two announcements would double-speak every provider switch.
+    const usBlockStart = pageSource.indexOf("{/* US Stripe step");
+    const usBlock = pageSource.slice(usBlockStart, pageSource.indexOf("{/* Paso 3", usBlockStart));
+    const placeholder = '<p className="donar-givebutter-loading" aria-live="polite">';
+    expect(usBlock).toContain(placeholder);
+    expect(usBlock.replace(placeholder, "").match(/aria-live=/g)).toHaveLength(1);
+    expect(usBlock).toContain("Formulario de Givebutter, en inglés.");
+    expect(usBlock).toContain("Formulario de Stripe, en español.");
   });
 
   it("no longer offers the US-path escape hatch back to the SV fiscal form", () => {
