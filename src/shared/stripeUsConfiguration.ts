@@ -4,6 +4,16 @@ export const STRIPE_US_SIGNER_TITLE_MAX_LENGTH = 60;
 export const STRIPE_US_WEBSITE_MAX_LENGTH = 100;
 export const STRIPE_US_MAILING_ADDRESS_LINE_MAX_LENGTH = 80;
 
+const FMCE_LEGAL_NAME_DISPLAY = "Friends of Misión Cristiana Elim";
+const FMCE_LEGAL_NAME_DISPLAY_VARIANTS = new Set([
+  "FRIENDS OF MISION CRISTIANA ELIM",
+  "FRIENDS OF MISIÓN CRISTIANA ELIM"
+]);
+
+export function stripeUsLegalNameForDisplay(value: string): string {
+  return FMCE_LEGAL_NAME_DISPLAY_VARIANTS.has(value) ? FMCE_LEGAL_NAME_DISPLAY : value;
+}
+
 export const STRIPE_US_TIME_ZONE_OPTIONS = [
   { value: "America/New_York", label: "Hora del Este — America/New_York" },
   { value: "America/Chicago", label: "Hora Central — America/Chicago" },

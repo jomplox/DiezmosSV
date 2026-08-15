@@ -4,7 +4,8 @@ import {
   STRIPE_US_MAILING_ADDRESS_LINE_MAX_LENGTH,
   STRIPE_US_SIGNER_NAME_MAX_LENGTH,
   STRIPE_US_SIGNER_TITLE_MAX_LENGTH,
-  STRIPE_US_WEBSITE_MAX_LENGTH
+  STRIPE_US_WEBSITE_MAX_LENGTH,
+  stripeUsLegalNameForDisplay
 } from "../../shared/stripeUsConfiguration";
 import type { StripeGiftFrequency, StripeGiftType } from "../storage/repository/stripeDonations";
 import { sha256Hex, utf8Bytes } from "../utils/encoding";
@@ -287,10 +288,11 @@ export function resolveStripeConfiguration(
   if (!billingPortalConfigurationId.startsWith("bpc_")) {
     throw new StripeConfigurationError("invalid_billing_portal_configuration");
   }
-  const legalName = requiredValue(env.STRIPE_US_LEGAL_NAME, "missing_legal_name");
-  if (legalName.length > STRIPE_US_LEGAL_NAME_MAX_LENGTH) {
+  const configuredLegalName = requiredValue(env.STRIPE_US_LEGAL_NAME, "missing_legal_name");
+  if (configuredLegalName.length > STRIPE_US_LEGAL_NAME_MAX_LENGTH) {
     throw new StripeConfigurationError("invalid_legal_name");
   }
+  const legalName = stripeUsLegalNameForDisplay(configuredLegalName);
   const ein = requiredValue(env.STRIPE_US_EIN, "missing_ein");
   if (!EIN_PATTERN.test(ein) || ein === "00-0000000") {
     throw new StripeConfigurationError("invalid_ein");

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { stripeUsLegalNameForDisplay } from "../../src/shared/stripeUsConfiguration";
 import {
   StripeConfigurationError,
   StripeDonationValidationError,
@@ -11,6 +12,23 @@ import {
 const requestId = "0c2e2165-edb7-4e4b-bc50-95a7fa3cdfe5";
 
 describe("Stripe Checkout donation contract", () => {
+  it("normalizes only the two known FMCE legal-name display variants", () => {
+    expect(stripeUsLegalNameForDisplay("FRIENDS OF MISION CRISTIANA ELIM"))
+      .toBe("Friends of Misión Cristiana Elim");
+    expect(stripeUsLegalNameForDisplay("FRIENDS OF MISIÓN CRISTIANA ELIM"))
+      .toBe("Friends of Misión Cristiana Elim");
+
+    for (const unchanged of [
+      "FRIENDS OF MISION CRISTIANA ELIM, INC.",
+      "FRIENDS OF MISIÓN CRISTIANA ÉLIM",
+      "Friends of Mision Cristiana Elim",
+      "OTRA ORGANIZACIÓN, INC.",
+      " FRIENDS OF MISION CRISTIANA ELIM "
+    ]) {
+      expect(stripeUsLegalNameForDisplay(unchanged)).toBe(unchanged);
+    }
+  });
+
   it("validates one-time and monthly USD gifts using the established amount bounds", () => {
     expect(validateStripeCheckoutInput({
       requestId,
@@ -182,6 +200,11 @@ describe("Stripe Checkout donation contract", () => {
       livemode: false,
       mock: false
     });
+    expect(resolveStripeConfiguration({
+      ...valid,
+      STRIPE_US_LEGAL_NAME: "FRIENDS OF MISIÓN CRISTIANA ELIM"
+    }).legalName).toBe("Friends of Misión Cristiana Elim");
+    expect(valid.STRIPE_US_LEGAL_NAME).toBe("Example Nonprofit");
 
     expect(resolveStripeConfiguration({
       ...valid,

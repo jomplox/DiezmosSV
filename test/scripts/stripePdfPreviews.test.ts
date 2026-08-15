@@ -44,6 +44,8 @@ describe("Stripe U.S. PDF preview command", () => {
     }
 
     const receiptText = execFileSync("pdftotext", ["-layout", previews.receiptPath, "-"], { encoding: "utf8" });
+    expect(execFileSync("pdfinfo", [previews.receiptPath], { encoding: "utf8" }))
+      .toContain("Producer:        stripe-acknowledgment-pdf:v7");
     const normalizedReceiptText = receiptText.replace(/\s+/gu, " ");
     expect(receiptText).toContain("SAMPLE PREVIEW DONOR");
     expect(receiptText).toContain("pi_sample_receipt_2025_0413");

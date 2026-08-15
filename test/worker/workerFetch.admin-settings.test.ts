@@ -167,6 +167,57 @@ describe("credential administration", () => {
 });
 
 describe("Stripe owner settings", () => {
+  it("displays the live-shaped FMCE legal name without rewriting the stored secret on an unchanged save", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const configuredEnv = env(db, {
+      APP_ENV: "staging",
+      CLOUDFLARE_ACCOUNT_ID: "account",
+      CLOUDFLARE_API_TOKEN: "writer-token",
+      CLOUDFLARE_SCRIPT_NAME: "worker",
+      STRIPE_US_LEGAL_NAME: "FRIENDS OF MISION CRISTIANA ELIM",
+      STRIPE_US_EIN: "82-0889012",
+      STRIPE_US_TIME_ZONE: "America/New_York",
+      STRIPE_US_PHONE: "+1 (786) 505-8446",
+      STRIPE_US_WEBSITE: "https://www.elim.click",
+      STRIPE_US_MAILING_ADDRESS: "2885 Sanford Ave SW, PMB 41357\nGrandville, MI 49418, USA",
+      STRIPE_US_SIGNER_NAME: "Mathieu Guély",
+      STRIPE_US_SIGNER_TITLE: "Treasurer"
+    });
+    try {
+      const read = await worker.fetch(
+        new Request("https://example.org/api/settings/stripe", {
+          headers: { Authorization: "Bearer test-token" }
+        }),
+        configuredEnv
+      );
+      expect(read.status).toBe(200);
+      const body = await read.json() as {
+        stripe: { configuration: Record<string, string> };
+      };
+      expect(body.stripe.configuration.legalName).toBe("Friends of Misión Cristiana Elim");
+
+      const unchangedSave = await worker.fetch(
+        new Request("https://example.org/api/settings/stripe", {
+          method: "POST",
+          headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+          body: JSON.stringify(body.stripe.configuration)
+        }),
+        configuredEnv
+      );
+      expect(unchangedSave.status).toBe(400);
+      await expect(unchangedSave.json()).resolves.toMatchObject({
+        error: "no_stripe_credentials_supplied"
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(configuredEnv.STRIPE_US_LEGAL_NAME).toBe("FRIENDS OF MISION CRISTIANA ELIM");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("returns owner-visible organization configuration while keeping provider credentials private", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };

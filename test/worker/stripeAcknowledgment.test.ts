@@ -9,6 +9,7 @@ import { EmailService } from "../../src/worker/services/email";
 import {
   deliverNextStripeAcknowledgment,
   renderStripeAcknowledgmentPdf,
+  snapshotStripeAcknowledgmentEvidence,
   stripeAcknowledgmentContent
 } from "../../src/worker/services/stripeAcknowledgment";
 import * as stripePdfAssets from "../../src/worker/services/stripePdfAssets";
@@ -170,6 +171,37 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     expect(content.text).not.toContain("Fecha: 1 de enero de 2026");
   });
 
+  it("snapshots the exact FMCE display name for immediate email and PDF evidence", async () => {
+    const configuredEnv: Env = {
+      ...workerEnv,
+      STRIPE_MOCK_MODE: undefined,
+      STRIPE_RESTRICTED_KEY: "rk_test_legal_name_display",
+      STRIPE_PUBLISHABLE_KEY: "pk_test_legal_name_display",
+      STRIPE_WEBHOOK_SECRET: "whsec_legal_name_display",
+      STRIPE_PAYMENT_METHOD_CONFIGURATION_ID: "pmc_legal_name_display",
+      STRIPE_BILLING_PORTAL_CONFIGURATION_ID: "bpc_legal_name_display",
+      STRIPE_US_LEGAL_NAME: "FRIENDS OF MISION CRISTIANA ELIM",
+      STRIPE_US_EIN: "82-0889012",
+      STRIPE_US_TIME_ZONE: "America/New_York",
+      STRIPE_US_PHONE: "+1 (786) 505-8446",
+      STRIPE_US_WEBSITE: "https://www.elim.click",
+      STRIPE_US_MAILING_ADDRESS: "2885 Sanford Ave SW, PMB 41357\nGrandville, MI 49418, USA",
+      STRIPE_US_SIGNER_NAME: "Mathieu Guély",
+      STRIPE_US_SIGNER_TITLE: "Treasurer"
+    };
+
+    const evidence = await snapshotStripeAcknowledgmentEvidence(
+      configuredEnv,
+      repo,
+      "stripe_ack_fixture"
+    );
+
+    expect(evidence.legalName).toBe("Friends of Misión Cristiana Elim");
+    expect(evidence.content.text).toContain("Friends of Misión Cristiana Elim");
+    expect(evidence.pdf?.legalName).toBe("Friends of Misión Cristiana Elim");
+    expect(configuredEnv.STRIPE_US_LEGAL_NAME).toBe("FRIENDS OF MISION CRISTIANA ELIM");
+  });
+
   it("renders the approved logo at readable scale on a U.S. Letter charitable receipt", async () => {
     const drawImage = vi.spyOn(PDFPage.prototype, "drawImage");
     const drawRectangle = vi.spyOn(PDFPage.prototype, "drawRectangle");
@@ -205,7 +237,7 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     const metadataPath = join(metadataDirectory, "receipt.pdf");
     writeFileSync(metadataPath, bytes);
     expect(execFileSync("pdfinfo", [metadataPath], { encoding: "utf8" }))
-      .toContain("Producer:        stripe-acknowledgment-pdf:v6");
+      .toContain("Producer:        stripe-acknowledgment-pdf:v7");
     expect(pdf.getPage(0).getMediaBox()).toEqual({ x: 0, y: 0, width: 612, height: 792 });
 
     expect(drawImage).toHaveBeenCalledTimes(1);
@@ -223,6 +255,7 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     const pdfPath = join(directory, "receipt.pdf");
     writeFileSync(pdfPath, bytes);
     const text = execFileSync("pdftotext", ["-layout", pdfPath, "-"], { encoding: "utf8" });
+    const bbox = execFileSync("pdftotext", ["-bbox-layout", pdfPath, "-"], { encoding: "utf8" });
     const normalizedText = text.replace(/\s+/g, " ");
     expect(text).toContain("Dear Edith Anaya,");
     expect(text).toContain("Receipt of Charitable Donation:");
@@ -252,7 +285,24 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     expect(normalizedText).toContain("incorporada en Washington, D.C.");
     expect(normalizedText).toContain("Misión Cristiana Elim en El Salvador");
     expect(text).not.toContain("https://www.elim.click");
-    for (const contact of ["fmce@example.org • +1 (786) 505-8446"]) {
+    const leftLegalBounds = renderedLineBounds(bbox, "82-0889012");
+    const rightLegalBounds = renderedLineBounds(bbox, "evangelio.");
+    const contactBounds = [
+      renderedLineBounds(bbox, "fmce@example.org"),
+      renderedLineBounds(bbox, "2885 Sanford")
+    ];
+    const closestRenderedGap = Math.min(...contactBounds.map((bounds) => bounds.yMin))
+      - Math.max(leftLegalBounds.yMax, rightLegalBounds.yMax);
+    expect(closestRenderedGap).toBeGreaterThanOrEqual(12);
+    for (const bounds of contactBounds) {
+      expect(Math.abs((bounds.xMin + bounds.xMax) / 2 - 306)).toBeLessThanOrEqual(1.5);
+    }
+    expect(Math.max(...contactBounds.map((bounds) => bounds.yMax)))
+      .toBeLessThan(renderedLineBounds(bbox, "Traigan").yMin);
+    for (const contact of [
+      "fmce@example.org • +1 (786) 505-8446",
+      "2885 Sanford Ave SW, PMB 41357 Grandville, MI 49418, USA"
+    ]) {
       const contactCall = drawText.mock.calls.find(([drawn]) => drawn === contact);
       if (!contactCall?.[1]?.font || typeof contactCall[1].x !== "number") {
         throw new Error(`Centered receipt contact line missing: ${contact}`);
@@ -271,6 +321,11 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     )).toBe(false);
     const salutation = drawText.mock.calls.find(([text]) => text === "Dear Edith Anaya,");
     expect(logoOptions.y).toBeGreaterThan((salutation?.[1]?.y ?? Number.POSITIVE_INFINITY) + 24);
+    expectReceiptReservedBandGeometry(drawText.mock.calls, {
+      legalMarker: "Friends of Misión Cristiana Elim",
+      signerMarker: "Mathieu Guély",
+      titleMarker: "Treasurer"
+    });
   });
 
   it("preserves maximum renderer-safe names, contacts, and all four address lines", async () => {
@@ -374,7 +429,7 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
       && options.y <= 232
       && options.x !== 292.1
     );
-    expect(contactCalls.length).toBeGreaterThanOrEqual(8);
+    expect(contactCalls.length).toBeGreaterThanOrEqual(5);
     for (const [drawn, options] of contactCalls) {
       if (!options?.font || typeof options.x !== "number") throw new Error("Contact draw geometry missing");
       expect(options.y, String(drawn)).toBeGreaterThanOrEqual(177);
@@ -650,6 +705,53 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
       now: "2026-08-10T12:06:00.000Z"
     })).toMatchObject({ processed: true, outcome: "SENT" });
     expect(send).toHaveBeenCalledTimes(2);
+    expect(database.prepare(
+      "SELECT status, processing_claim_id FROM stripe_acknowledgment_deliveries"
+    ).get()).toEqual({ status: "SENT", processing_claim_id: null });
+    expect(retryAttachment).toBeInstanceOf(Uint8Array);
+    expect(await PDFDocument.load(retryAttachment!)).toBeInstanceOf(PDFDocument);
+  });
+
+  it("accepts and finalizes frozen v6 immediate-receipt evidence through the legacy path", async () => {
+    let retryAttachment: Uint8Array | undefined;
+    const saveSnapshot = repo.saveStripeAcknowledgmentSnapshot.bind(repo);
+    vi.spyOn(repo, "saveStripeAcknowledgmentSnapshot").mockImplementationOnce(async (input) => {
+      const evidence = JSON.parse(input.snapshotJson) as {
+        pdf: { rendererVersion: string };
+      };
+      expect(evidence.pdf.rendererVersion).toBe("stripe-acknowledgment-pdf:v7");
+      evidence.pdf.rendererVersion = "stripe-acknowledgment-pdf:v6";
+      const snapshotJson = JSON.stringify(evidence);
+      return saveSnapshot({
+        ...input,
+        snapshotJson,
+        snapshotHash: createHash("sha256").update(snapshotJson).digest("hex")
+      });
+    });
+    const send = vi.spyOn(EmailService.prototype, "sendStripeAcknowledgment")
+      .mockRejectedValueOnce(new Error("failed before provider dispatch"))
+      .mockImplementationOnce(async (input, beforeProviderDispatch) => {
+        retryAttachment = input.pdfBytes;
+        await beforeProviderDispatch?.();
+        return { providerResponse: {}, providerDeliveryId: "sha256:" + "6".repeat(64) };
+      });
+
+    expect(await deliverNextStripeAcknowledgment(workerEnv, repo, {
+      now: "2026-08-10T12:01:00.000Z"
+    })).toMatchObject({ processed: true, outcome: "FAILED" });
+    expect(JSON.parse((database.prepare(
+      "SELECT snapshot_json FROM stripe_acknowledgment_deliveries"
+    ).get() as { snapshot_json: string }).snapshot_json)).toMatchObject({
+      pdf: { rendererVersion: "stripe-acknowledgment-pdf:v6" }
+    });
+
+    expect(await deliverNextStripeAcknowledgment(workerEnv, repo, {
+      now: "2026-08-10T12:06:00.000Z"
+    })).toMatchObject({ processed: true, outcome: "SENT" });
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(database.prepare(
+      "SELECT status, processing_claim_id FROM stripe_acknowledgment_deliveries"
+    ).get()).toEqual({ status: "SENT", processing_claim_id: null });
     expect(retryAttachment).toBeInstanceOf(Uint8Array);
     expect(await PDFDocument.load(retryAttachment!)).toBeInstanceOf(PDFDocument);
   });
@@ -849,7 +951,13 @@ function expectReceiptReservedBandGeometry(
   };
   const top = (call: DrawTextCall): number => {
     const value = options(call);
-    return value.y + value.font.heightAtSize(value.size ?? 12);
+    return value.y + value.font.heightAtSize(value.size ?? 12, { descender: false });
+  };
+  const bottom = (call: DrawTextCall): number => {
+    const value = options(call);
+    const size = value.size ?? 12;
+    const descender = value.font.heightAtSize(size) - value.font.heightAtSize(size, { descender: false });
+    return value.y - descender;
   };
   const right = (call: DrawTextCall): number => {
     const value = options(call);
@@ -913,23 +1021,46 @@ function expectReceiptReservedBandGeometry(
   );
   expect(contactCalls.length).toBeGreaterThan(0);
   expect(options(calls[einIndex]!).y)
-    .toBeGreaterThanOrEqual(Math.max(...contactCalls.map(top)) + 1.5);
-  expect(Math.min(...rightLegalCalls.map((call) => options(call).y)))
-    .toBeGreaterThanOrEqual(Math.max(...contactCalls.map(top)) + 1.5);
+    .toBeGreaterThan(Math.max(...contactCalls.map(top)));
+  const contactGlyphTop = Math.max(...contactCalls.map(top));
+  expect(Math.min(...[calls[einIndex]!, ...rightLegalCalls].map(bottom)) - contactGlyphTop)
+    .toBeGreaterThanOrEqual(12);
   for (const call of rightLegalCalls) {
     expect(options(call).x, text(call)).toBeGreaterThanOrEqual(292.1);
     expect(right(call), text(call)).toBeLessThanOrEqual(495.2);
   }
   for (const call of contactCalls) {
-    expect(options(call).x, text(call)).toBeGreaterThanOrEqual(45);
-    expect(options(call).y, text(call)).toBeGreaterThanOrEqual(177);
+    const value = options(call);
+    expect(value.x, text(call)).toBeGreaterThanOrEqual(45);
+    expect(bottom(call), text(call)).toBeGreaterThanOrEqual(169);
     expect(right(call), text(call)).toBeLessThanOrEqual(567);
+    expect(value.x + value.font.widthOfTextAtSize(text(call), value.size ?? 12) / 2)
+      .toBeCloseTo(306, 1);
   }
 }
 
 function pngDimensions(bytes: Uint8Array): { width: number; height: number } {
   const buffer = Buffer.from(bytes);
   return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+}
+
+function renderedLineBounds(
+  bboxHtml: string,
+  textFragment: string
+): { xMin: number; yMin: number; xMax: number; yMax: number } {
+  for (const match of bboxHtml.matchAll(
+    /<line xMin="([\d.]+)" yMin="([\d.]+)" xMax="([\d.]+)" yMax="([\d.]+)">([\s\S]*?)<\/line>/gu
+  )) {
+    const renderedText = match[5]?.replace(/<[^>]+>/gu, " ").replace(/\s+/gu, " ") ?? "";
+    if (!renderedText.includes(textFragment)) continue;
+    return {
+      xMin: Number(match[1]),
+      yMin: Number(match[2]),
+      xMax: Number(match[3]),
+      yMax: Number(match[4])
+    };
+  }
+  throw new Error(`Rendered PDF line missing: ${textFragment}`);
 }
 
 async function seedGift(repo: Repository): Promise<void> {

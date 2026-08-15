@@ -26,7 +26,8 @@ import { pdfSafeText } from "./pdf";
 import { STRIPE_RECEIPT_ELIM_LOGO_BYTES } from "./stripePdfAssets";
 import { stripePaymentMethodLabel } from "./stripePaymentMethod";
 
-export const STRIPE_ACKNOWLEDGMENT_PDF_VERSION = "stripe-acknowledgment-pdf:v6" as const;
+export const STRIPE_ACKNOWLEDGMENT_PDF_VERSION = "stripe-acknowledgment-pdf:v7" as const;
+const LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V6 = "stripe-acknowledgment-pdf:v6" as const;
 const LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V5 = "stripe-acknowledgment-pdf:v5" as const;
 const LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V4 = "stripe-acknowledgment-pdf:v4" as const;
 const LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V3 = "stripe-acknowledgment-pdf:v3" as const;
@@ -249,6 +250,7 @@ export async function renderStripeAcknowledgmentPdf(
   const contactLeft = 45;
   const contactRight = 567;
   const contactWidth = contactRight - contactLeft;
+  const contactStartY = 216;
   const contactLines = [
     [input.supportEmail, input.organizationPhone].filter(Boolean).join(" • "),
     input.organizationMailingAddress.join(" ")
@@ -256,14 +258,17 @@ export async function renderStripeAcknowledgmentPdf(
   const contactTypography = fitReceiptContactTypography(
     contactLines,
     bold,
-    contactWidth
+    contactWidth,
+    contactStartY
   );
-  const contactTop = 232 + bold.heightAtSize(contactTypography.size);
+  const minimumLegalGlyphBottom = contactStartY
+    + bold.heightAtSize(contactTypography.size, { descender: false })
+    + 12;
   const legalTypography = fitReceiptLegalTypography(
     input.legalName,
     bold,
     italic,
-    contactTop,
+    minimumLegalGlyphBottom,
     171
   );
   drawPdfWrapped(page, input.legalName, {
@@ -294,7 +299,7 @@ export async function renderStripeAcknowledgmentPdf(
     regular,
     203.1,
     297.8,
-    contactTop + 1.5,
+    minimumLegalGlyphBottom,
     { size: 9.2, lineHeight: 12 }
   );
   drawPdfWrapped(
@@ -310,7 +315,7 @@ export async function renderStripeAcknowledgmentPdf(
     }
   );
 
-  let contactY = 232;
+  let contactY = contactStartY;
   for (const line of contactLines) {
     contactY = drawPdfWrappedCentered(page, line, {
       left: contactLeft,
@@ -476,7 +481,7 @@ function fitReceiptLegalTypography(
   legalName: string,
   legalFont: PDFFont,
   charityFont: PDFFont,
-  contactTop: number,
+  minimumGlyphBottom: number,
   maxWidth: number
 ): { size: number; lineHeight: number; charityY: number; einY: number } {
   const startY = 294.1;
@@ -486,7 +491,9 @@ function fitReceiptLegalTypography(
     const finalLegalBaseline = startY - (lineCount - 1) * lineHeight;
     const charityY = Math.min(275, finalLegalBaseline - charityFont.heightAtSize(10) - 2);
     const einY = Math.min(254.7, charityY - legalFont.heightAtSize(10) - 2);
-    if (einY >= contactTop + 1.5) return { size, lineHeight, charityY, einY };
+    if (pdfGlyphBottom(legalFont, einY, 10) >= minimumGlyphBottom) {
+      return { size, lineHeight, charityY, einY };
+    }
   }
   throw new Error("Stripe acknowledgment legal identity does not fit its reserved band");
 }
@@ -496,14 +503,15 @@ function fitReceiptWrappedTypography(
   font: PDFFont,
   maxWidth: number,
   startY: number,
-  minimumBaseline: number,
+  minimumGlyphBottom: number,
   preferred: { size: number; lineHeight: number }
 ): { size: number; lineHeight: number } {
   const lineHeightOffset = preferred.lineHeight - preferred.size;
   for (let size = preferred.size; size >= 3.6; size -= 0.2) {
     const lineHeight = size + lineHeightOffset;
     const lineCount = wrapStripePdfText(text, font, size, maxWidth).length;
-    if (startY - (lineCount - 1) * lineHeight >= minimumBaseline) {
+    const finalBaseline = startY - (lineCount - 1) * lineHeight;
+    if (pdfGlyphBottom(font, finalBaseline, size) >= minimumGlyphBottom) {
       return { size, lineHeight };
     }
   }
@@ -513,9 +521,10 @@ function fitReceiptWrappedTypography(
 function fitReceiptContactTypography(
   lines: string[],
   font: PDFFont,
-  maxWidth: number
+  maxWidth: number,
+  startY: number
 ): { size: number; lineHeight: number } {
-  const availableBaselineDrop = 232 - 177;
+  const availableBaselineDrop = startY - 177;
   for (let size = 7.2; size >= 3.6; size -= 0.2) {
     const lineHeight = size + 0.5;
     const lineCount = lines.reduce(
@@ -527,6 +536,10 @@ function fitReceiptContactTypography(
     }
   }
   return { size: 3.6, lineHeight: 4.1 };
+}
+
+function pdfGlyphBottom(font: PDFFont, baseline: number, size: number): number {
+  return baseline - (font.heightAtSize(size) - font.heightAtSize(size, { descender: false }));
 }
 
 function formatEnglishDate(iso: string, timeZone: string): string {
@@ -559,6 +572,7 @@ type StripeAcknowledgmentPdfEvidence = Omit<
 > & {
   rendererVersion:
     | typeof STRIPE_ACKNOWLEDGMENT_PDF_VERSION
+    | typeof LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V6
     | typeof LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V5
     | typeof LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V4
     | typeof LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V3
@@ -811,6 +825,7 @@ export async function deliverNextStripeAcknowledgment(
 function validStripeAcknowledgmentPdfEvidence(value: unknown): value is StripeAcknowledgmentPdfEvidence {
   if (!isRecord(value)) return false;
   return (value.rendererVersion === STRIPE_ACKNOWLEDGMENT_PDF_VERSION
+      || value.rendererVersion === LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V6
       || value.rendererVersion === LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V5
       || value.rendererVersion === LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V4
       || value.rendererVersion === LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V3
