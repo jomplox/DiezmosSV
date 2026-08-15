@@ -25,7 +25,7 @@ Stripe Embedded Checkout, Vitest, Playwright, pdf-lib, Wrangler.
 ## Global Constraints
 
 - Work only in the isolated worktree
-  `/Users/josevega/Documents/CCRTV/DiezmosSV/.worktrees/payment-ux-refinement`
+  `.worktrees/payment-ux-refinement`
   on `codex/refine-donor-payment-ux`; preserve the user's primary checkout and its
   untracked `output/` directory.
 - Begin from reviewed production base
