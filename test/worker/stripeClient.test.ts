@@ -338,7 +338,7 @@ describe("Stripe SDK boundary", () => {
     for (const params of [oneTime, monthly]) {
       await gateway.createCheckoutSession(params, `stripe-checkout:${params.client_reference_id}`);
     }
-    expect(serializedBodies).toHaveLength(2);
+    expect(serializedBodies.length).toBe(2);
     expect(serializedBodies.every((body) => body.trim().length > 0)).toBe(true);
     expect(serializedBodies.map((body) => new URLSearchParams(body).get("mode")))
       .toEqual(["payment", "subscription"]);
