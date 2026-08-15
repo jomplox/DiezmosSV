@@ -13,6 +13,22 @@ const publicWrangler = read("wrangler.toml");
 const annualCertificateRaces = read("e2e/annualCertificateRaces.spec.ts");
 const adminUiCoverage = read("e2e/adminUiCoverage.spec.ts");
 
+function boundedReceiptBoundary(
+  document: string,
+  file: string,
+  startSentinel: string,
+  endSentinel: string
+): string {
+  const start = document.indexOf(startSentinel);
+  if (start < 0) throw new Error(`${file}: receipt-email boundary start sentinel is missing`);
+
+  const end = document.indexOf(endSentinel);
+  if (end < 0) throw new Error(`${file}: receipt-email boundary end sentinel is missing`);
+  if (end <= start) throw new Error(`${file}: receipt-email boundary sentinels are out of order`);
+
+  return document.slice(start, end);
+}
+
 const requiredRuntimeNames = [
   "STRIPE_RESTRICTED_KEY",
   "STRIPE_PUBLISHABLE_KEY",
@@ -66,9 +82,11 @@ describe("Stripe US giving provisioning documentation", () => {
     expect(runbook).toMatch(/subscription service emails|correos.*servicio.*suscripci/i);
     expect(runbook).toMatch(/exactly one Elim-branded acknowledgment|exactamente un acuse.*Elim/is);
 
-    const englishBoundary = english.slice(
-      english.indexOf("**Stripe receipt-email boundary."),
-      english.indexOf("The pure Stripe.js loader")
+    const englishBoundary = boundedReceiptBoundary(
+      english,
+      "README.md",
+      "**Stripe receipt-email boundary.",
+      "The pure Stripe.js loader"
     );
     expect(englishBoundary).toMatch(/receipt_email.*customer_details\.email.*separate/is);
     expect(englishBoundary).toMatch(/Dashboard\s*→\s*Settings\s*→\s*Business\s*→\s*Customer emails\s*→\s*Payments\s*→\s*disable `Successful payments`/is);
@@ -77,9 +95,11 @@ describe("Stripe US giving provisioning documentation", () => {
     expect(englishBoundary).toMatch(/subscription service emails.*distinct from successful-payment receipts.*separately approved/is);
     expect(englishBoundary).toMatch(/one controlled donation.*exactly one\s+Elim-branded acknowledgment/is);
 
-    const spanishBoundary = spanish.slice(
-      spanish.indexOf("**Frontera de correo de recibo Stripe."),
-      spanish.indexOf("El cargador puro de Stripe.js")
+    const spanishBoundary = boundedReceiptBoundary(
+      spanish,
+      "README.es.md",
+      "**Frontera de correo de recibo Stripe.",
+      "El cargador puro de Stripe.js"
     );
     expect(spanishBoundary).toMatch(/receipt_email.*customer_details\.email.*distinto/is);
     expect(spanishBoundary).toMatch(/Dashboard\s*→\s*Settings\s*→\s*Business\s*→\s*Customer emails\s*→\s*Payments\s*→\s*disable `Successful payments`/is);
