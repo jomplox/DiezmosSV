@@ -203,6 +203,40 @@ test("keeps the donor logo space neutral when a configured logo cannot decode", 
   }
 });
 
+test("settles configured donor support without a stock mark when image decoding stalls", async ({ page }) => {
+  for (const path of ["/donar", "/donar/stripe/resultado"]) {
+    await recordDonorLogoNodes(page);
+    await page.addInitScript(() => {
+      const decode = HTMLImageElement.prototype.decode;
+      HTMLImageElement.prototype.decode = function() {
+        return this.src.includes("/api/branding/donor-logo")
+          ? new Promise<void>(() => {})
+          : decode.call(this);
+      };
+    });
+    await page.route("**/api/branding", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          displayName: BRANDING_DISPLAY_NAME,
+          accentColor: "#000000",
+          supportEmail: BRANDING_SUPPORT_EMAIL,
+          logoVersion: null,
+          donorLogoVersion: "stalled-logo"
+        })
+      })
+    );
+    await page.goto(path, { waitUntil: "domcontentloaded" });
+    await expect(page.locator("#root")).toHaveCSS("visibility", "visible", { timeout: 4_000 });
+    await expect(page.getByRole("link", { name: BRANDING_SUPPORT_EMAIL })).toHaveAttribute("href", `mailto:${BRANDING_SUPPORT_EMAIL}`);
+    await expect(page.locator(".donar-logo-placeholder")).toBeVisible();
+    await expect(page.locator(".donar-logo")).toHaveCount(0);
+    expect(await recordedDonorLogoNodes(page)).toEqual([]);
+    await page.unroute("**/api/branding");
+  }
+});
+
 test("keeps the ceremonial browser title across every donor entry route", async ({ page }) => {
   for (const path of ["/", "/donar", "/donar?ruta=sv"]) {
     await page.goto(path);

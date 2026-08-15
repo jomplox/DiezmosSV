@@ -109,10 +109,30 @@ function configuredOrganizationName(data: unknown): string | null {
   return typeof record.displayName === "string" && record.displayName.trim() ? record.displayName.trim() : null;
 }
 
+const DONOR_LOGO_DECODE_TIMEOUT_MS = 1_500;
+
 async function decodeDonorLogo(src: string): Promise<void> {
   const image = new Image();
   image.src = src;
   await image.decode();
+}
+
+function decodeDonorLogoWithinBudget(src: string, decode: (src: string) => Promise<void>): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("Donor logo decode timed out.")), DONOR_LOGO_DECODE_TIMEOUT_MS);
+    void Promise.resolve()
+      .then(() => decode(src))
+      .then(
+        () => {
+          clearTimeout(timeout);
+          resolve();
+        },
+        (error: unknown) => {
+          clearTimeout(timeout);
+          reject(error);
+        }
+      );
+  });
 }
 
 export async function resolveDonorBranding(
@@ -126,7 +146,7 @@ export async function resolveDonorBranding(
     return { kind: "fallback", organizationName, supportEmail: branding.supportEmail, showStockLogo: true };
   }
   try {
-    await decode(src);
+    await decodeDonorLogoWithinBudget(src, decode);
     return {
       kind: "configured",
       organizationName,
