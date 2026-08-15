@@ -19,14 +19,25 @@ function boundedReceiptBoundary(
   startSentinel: string,
   endSentinel: string
 ): string {
-  const start = document.indexOf(startSentinel);
-  if (start < 0) throw new Error(`${file}: receipt-email boundary start sentinel is missing`);
-
-  const end = document.indexOf(endSentinel);
-  if (end < 0) throw new Error(`${file}: receipt-email boundary end sentinel is missing`);
+  const start = uniqueSentinelIndex(document, file, "start", startSentinel);
+  const end = uniqueSentinelIndex(document, file, "end", endSentinel);
   if (end <= start) throw new Error(`${file}: receipt-email boundary sentinels are out of order`);
 
   return document.slice(start, end);
+}
+
+function uniqueSentinelIndex(
+  document: string,
+  file: string,
+  boundary: "start" | "end",
+  sentinel: string
+): number {
+  const first = document.indexOf(sentinel);
+  if (first < 0) throw new Error(`${file}: receipt-email boundary ${boundary} sentinel is missing`);
+  if (document.indexOf(sentinel, first + sentinel.length) >= 0) {
+    throw new Error(`${file}: receipt-email boundary ${boundary} sentinel is duplicated`);
+  }
+  return first;
 }
 
 const requiredRuntimeNames = [
@@ -47,6 +58,24 @@ const requiredRuntimeNames = [
 ] as const;
 
 describe("Stripe US giving provisioning documentation", () => {
+  it("fails closed when a receipt-boundary sentinel is missing, reversed, or duplicated", () => {
+    const start = "<receipt-start>";
+    const end = "<receipt-end>";
+    const file = "README.fixture.md";
+    const cases = [
+      { document: `before ${end}`, expected: `${file}: receipt-email boundary start sentinel is missing` },
+      { document: `${start} after`, expected: `${file}: receipt-email boundary end sentinel is missing` },
+      { document: `${end} before ${start}`, expected: `${file}: receipt-email boundary sentinels are out of order` },
+      { document: `${start} earlier ${start} body ${end}`, expected: `${file}: receipt-email boundary start sentinel is duplicated` },
+      { document: `${start} body ${end} later ${end}`, expected: `${file}: receipt-email boundary end sentinel is duplicated` }
+    ];
+
+    for (const { document, expected } of cases) {
+      expect(() => boundedReceiptBoundary(document, file, start, end)).toThrow(expected);
+    }
+    expect(boundedReceiptBoundary(`before ${start} body ${end} after`, file, start, end)).toBe(`${start} body `);
+  });
+
   it("mirrors the Stripe runtime and Givebutter build configuration contracts in both canonical READMEs", () => {
     for (const document of [english, spanish]) {
       for (const name of requiredRuntimeNames) expect(document).toContain(name);
