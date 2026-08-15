@@ -177,9 +177,7 @@ describe("Stripe donor page source contract", () => {
     );
   });
 
-  it("shows Givebutter only behind a mapped handoff and asks the donor to confirm every prefill", () => {
-    expect(donarSource).toContain("Dar con Givebutter");
-    expect(donarSource).toContain("Formulario en inglés");
+  it("gates Givebutter behind a mapped handoff and asks the donor to confirm every prefill", () => {
     expect(donarSource).toContain("giftType: stripeGiftType");
     expect(donarSource).toContain("givebutterFrameUrl && givebutterHostedPageUrl");
     expect(donarSource).toContain(

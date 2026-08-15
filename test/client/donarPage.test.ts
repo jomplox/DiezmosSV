@@ -1275,7 +1275,6 @@ describe("Stripe donar page source contract", () => {
     // The move changes nothing about the form's guard or its per-attempt key.
     expect(branch).toContain("{stripeSessionAttempt && (");
     expect(branch).toContain("key={stripeSessionAttempt.sequence}");
-    expect(branch).toContain("Formulario en inglés");
   });
 
   it("keeps both US provider controls inside the page's monochrome vocabulary", () => {
@@ -1313,22 +1312,19 @@ describe("Stripe donar page source contract", () => {
     expect(hatch).toBeGreaterThan(-1);
     expect(frame).toBeGreaterThan(-1);
     expect(hatch).toBeLessThan(frame);
-    // One anchor, two states — the delayed copy is a class + copy swap on that same
-    // element, never a second link to the same href.
+    // One anchor spans both loading states; the rendered browser test owns the
+    // donor-visible copy contract before and after the timeout.
     expect(surface.match(/href=\{givebutterHostedPageUrl\}/g)).toHaveLength(1);
-    expect(surface).toContain("¿Problemas con el formulario? Abrir Givebutter");
-    expect(surface).toContain("Abrir Givebutter en otra pestaña");
     expect(surface).toContain('"link-button donar-givebutter-hint');
     // The escape hatch never spends the page's strongest CTA style.
     expect(surface).not.toContain('className="primary');
     // The 760px void gets the shared loading copy until the frame loads — or until the
-    // budget elapses, after which the explicit fallback link is the only signal. A host that
-    // never answers must not show "preparando" and "the embed failed" at once.
+    // budget elapses, after which the stable hosted-page link is the only signal.
     expect(surface).toContain("{!givebutterFrameLoaded && !givebutterFrameDelayed && (");
     expect(surface).toContain("DONAR_WIDGET_LOADING_MESSAGE");
   });
 
-  it("lets the render budget update the escape hatch even after the frame fires load", () => {
+  it("keeps the render budget independent after the frame fires load", () => {
     // A cross-origin iframe fires load for the browser's own error documents, so load
     // must only clear the placeholder — it can neither set nor suppress "delayed".
     expect(donarSource).toContain("onLoad={() => setGivebutterFrameLoaded(true)}");
@@ -1337,8 +1333,6 @@ describe("Stripe donar page source contract", () => {
     const timerCallback = donarSource.slice(effectStart, donarSource.indexOf("GIVEBUTTER_RENDER_TIMEOUT_MS", effectStart));
     expect(timerCallback).toContain("setGivebutterFrameDelayed(true)");
     expect(timerCallback).not.toContain("givebutterFrameLoaded");
-    // The delayed flag alone gates the copy change, on the render budget the plan pins.
-    expect(donarSource).toContain("givebutterFrameDelayed ?");
     expect(GIVEBUTTER_RENDER_TIMEOUT_MS).toBe(4_000);
   });
 

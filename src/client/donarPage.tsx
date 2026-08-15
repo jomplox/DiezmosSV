@@ -442,8 +442,8 @@ export function DonarPage() {
   const [usProvider, setUsProvider] = useState<"stripe" | "givebutter">("stripe");
   // Two independent facts about Givebutter's embed, deliberately not one status:
   // "loaded" only says the frame fired onLoad (it hides the loading placeholder), and
-  // "delayed" says the render budget elapsed (it promotes the escape hatch). Folding
-  // them together let a load event suppress the escape hatch — see the timer effect.
+  // "delayed" says the render budget elapsed (it also hides that placeholder). Keeping
+  // them separate makes the budget authoritative even when an error document fires load.
   const [givebutterFrameLoaded, setGivebutterFrameLoaded] = useState(false);
   const [givebutterFrameDelayed, setGivebutterFrameDelayed] = useState(false);
   const stripeAttemptRef = useRef<{ fingerprint: string; requestId: string } | null>(null);
@@ -629,14 +629,15 @@ export function DonarPage() {
   }, [door, usDonation]);
 
   // Givebutter's embed is mounted only after the donor explicitly selects it, and this
-  // timer is authoritative: the render budget promotes the hosted-page escape hatch
-  // whether or not the frame reported load. A cross-origin iframe fires load for the
+  // timer is authoritative: the render budget clears the loading placeholder whether
+  // or not the frame reported load. A cross-origin iframe fires load for the
   // browser's own error documents too (deleted campaign, blocked host, dropped
   // network), so load is never proof that the embed rendered and must not suppress the
-  // way out. Switching back to Stripe cancels this timer and removes the iframe.
+  // stable hosted-page escape hatch. Switching back to Stripe cancels this timer and
+  // removes the iframe.
   // Layout effect, not a passive one: the reset has to commit before paint, or a second
   // entry (Givebutter → Stripe → Givebutter) paints one frame carrying the previous
-  // session's delayed copy and no placeholder before collapsing to the quiet hint.
+  // session's delayed class and no placeholder before resetting the loading state.
   useLayoutEffect(() => {
     if (!usDonation || step !== 2 || usProvider !== "givebutter" || !givebutterFrameUrl) {
       return;
@@ -665,7 +666,7 @@ export function DonarPage() {
     // Givebutter's surface opens on its own return control; Stripe's opens on the step
     // intro that sits above its form. The Givebutter choice is NOT the Stripe landing:
     // it lives below the form, so focusing it would scroll the donor past the very
-    // thing they asked for and hand a screen reader "Dar con Givebutter" first.
+    // thing they asked for and hand a screen reader the Givebutter alternative first.
     const target = usProvider === "givebutter" ? stripeReturnRef.current : stripeIntroRef.current;
     target?.focus();
   }, [usProvider]);
@@ -1400,7 +1401,7 @@ export function DonarPage() {
                       />
                       <span className="donar-provider-choice-copy">
                         <strong>{stripeGiftType === "TITHE" ? "Diezmar con Givebutter" : "Ofrendar con Givebutter"}</strong>
-                        <small>Formulario en inglés</small>
+                        <small>(Con formulario en inglés)</small>
                       </span>
                       <span className="donar-provider-choice-arrow" aria-hidden="true">→</span>
                     </button>
@@ -1437,9 +1438,7 @@ export function DonarPage() {
                     target="_blank"
                     rel="noopener noreferrer"
                   >
-                    {givebutterFrameDelayed
-                      ? "Abrir Givebutter en otra pestaña"
-                      : "¿Problemas con el formulario? Abrir Givebutter"}
+                    ¿Problemas con el formulario? Abrir Givebutter
                   </a>
                   {/* The placeholder is positioned against the frame's own box. It clears
                       once the budget elapses so a frame whose host never answers does not
