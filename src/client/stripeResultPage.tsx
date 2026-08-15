@@ -21,9 +21,9 @@ import { markDonorBrandingSettled } from "./donorReady";
 import { userFacingErrorMessage } from "./displayText";
 import { formatCents } from "../shared/money";
 
-type StripeResultStatus = "OPEN" | "PENDING" | "PAID" | "FAILED" | "EXPIRED";
+export type StripeResultStatus = "OPEN" | "PENDING" | "PAID" | "FAILED" | "EXPIRED";
 
-interface StripeResultSnapshot {
+export interface StripeResultSnapshot {
   status: StripeResultStatus;
   frequency: "ONCE" | "MONTHLY";
   amountCents: number;
@@ -32,7 +32,7 @@ interface StripeResultSnapshot {
   recurringStatus: "ACTIVE" | "PAST_DUE" | "CANCELED" | null;
 }
 
-type StripeResultView =
+export type StripeResultView =
   | { kind: "checking" }
   | { kind: "invalid" }
   | { kind: "delayed" }
@@ -69,6 +69,17 @@ function isStripeResultSnapshot(value: unknown): value is StripeResultSnapshot {
 
 function isPendingStatus(status: StripeResultStatus): boolean {
   return status === "OPEN" || status === "PENDING";
+}
+
+export function nextStripeResultView(
+  current: StripeResultView,
+  snapshot: StripeResultSnapshot
+): StripeResultView {
+  return isPendingStatus(snapshot.status) ? current : { kind: "snapshot", value: snapshot };
+}
+
+export function stripeResultViewAfterTimeout(current: StripeResultView): StripeResultView {
+  return current.kind === "checking" ? { kind: "delayed" } : current;
 }
 
 function ResultIcon({ view }: { view: StripeResultView }) {
@@ -117,14 +128,16 @@ export function StripeResultPage() {
         if (!isStripeResultSnapshot(snapshot)) {
           throw new Error("No pudimos interpretar la confirmación de esta entrega.");
         }
-        setView({ kind: "snapshot", value: snapshot });
-        if (!isPendingStatus(snapshot.status)) return;
+        if (!isPendingStatus(snapshot.status)) {
+          setView((current) => nextStripeResultView(current, snapshot));
+          return;
+        }
       } catch {
         if (cancelled) return;
       }
 
       if (Date.now() - startedAt >= STRIPE_RESULT_POLL_TIMEOUT_MS) {
-        setView({ kind: "delayed" });
+        setView(stripeResultViewAfterTimeout);
         return;
       }
       timer = window.setTimeout(() => void refresh(), STRIPE_RESULT_POLL_INTERVAL_MS);

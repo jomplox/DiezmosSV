@@ -17,9 +17,6 @@ export const DONAR_POLL_INTERVAL_MS = 5_000;
 // Matches the window the Worker sets on the Wompi link, so the page never gives up
 // while Wompi still has the donor mid-challenge. See src/shared/checkout.ts.
 export const DONAR_POLL_TIMEOUT_MS = CHECKOUT_WINDOW_MS;
-// If the embedded checkout iframe has not loaded within this window, surface the
-// hosted-checkout CTA (the iframe keeps loading underneath — never a redirect).
-export const DONAR_SCRIPT_TIMEOUT_MS = 4_000;
 // Wompi posts { message: "close" } at the 3DS HAND-OFF, not at payment, so that signal
 // alone must never put "Verificando su entrega…" on screen: the donor is still inside
 // the bank challenge, and a spinner claiming to verify an entrega they have not made
@@ -113,6 +110,12 @@ export const GIVEBUTTER_CAMPAIGN =
 export const GIVEBUTTER_EMBED_BASE_URL =
   `https://givebutter.com/embed/c/${GIVEBUTTER_CAMPAIGN}`;
 export const GIVEBUTTER_RENDER_TIMEOUT_MS = 4_000;
+export const GIVEBUTTER_LOADING_MESSAGE = "Preparando su formulario seguro con Givebutter…";
+export const US_PROVIDER_PRECONNECT_ORIGINS = [
+  "https://js.stripe.com",
+  "https://checkout.stripe.com",
+  "https://givebutter.com"
+] as const;
 export type GivebutterFundIds = Readonly<{ tithe: string; offering: string }>;
 
 function validGivebutterFundId(value: string): boolean {
@@ -300,16 +303,12 @@ export const DONAR_THANK_YOU_BODY =
 export const DONAR_FALLBACK_MESSAGE =
   "Si completó su entrega, recibirá su comprobante de donación por correo electrónico. Puede cerrar esta página.";
 
-// Paso 3 handoff states: spinner copy while the embedded checkout prepares, and the
-// manual hosted-checkout CTA when it takes longer than the render budget. Leaving the
-// page is always donor-initiated — never an automatic redirect. Wording rule for every
+// Paso 3 handoff states: spinner copy while the embedded checkout prepares. The quiet
+// hosted-page escape hatch remains donor-initiated — never an automatic redirect. Wording rule for every
 // donor-facing string: these are diezmos y ofrendas — an ENTREGA, never a "pago"
 // (Wompi is still named where it builds trust in the secure card step).
 export const DONAR_WIDGET_LOADING_MESSAGE = "Preparando su entrega segura…";
 export const DONAR_WIDGET_VERIFYING_MESSAGE = "Verificando su entrega…";
-export const DONAR_WIDGET_DELAYED_MESSAGE =
-  "Esto está tardando más de lo esperado. Puede continuar su entrega en la página segura de Wompi:";
-export const DONAR_WIDGET_FALLBACK_CTA = "Continuar en Wompi";
 
 // Preconnect target for the Paso 3 embed: DNS + TLS are warmed only after the donor
 // chooses the SV/Wompi path, so chooser-only visits do not contact Wompi.

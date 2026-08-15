@@ -2,6 +2,12 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  nextStripeResultView,
+  stripeResultViewAfterTimeout,
+  type StripeResultSnapshot,
+  type StripeResultView
+} from "../../src/client/stripeResultPage";
+import {
   GIVEBUTTER_CAMPAIGN,
   STRIPE_CHECKOUT_PATH,
   STRIPE_FREQ_MONTHLY_LABEL,
@@ -148,6 +154,39 @@ describe("Stripe donor browser contract", () => {
   });
 });
 
+describe("Stripe result visible transitions", () => {
+  const pendingSnapshot = (status: "OPEN" | "PENDING"): StripeResultSnapshot => ({
+    status,
+    frequency: "ONCE",
+    amountCents: 5000,
+    currency: "usd",
+    canManageRecurring: false,
+    recurringStatus: null
+  });
+
+  it("keeps the exact checking view for repeated OPEN and PENDING snapshots", () => {
+    const checking: StripeResultView = { kind: "checking" };
+
+    expect(nextStripeResultView(checking, pendingSnapshot("OPEN"))).toBe(checking);
+    expect(nextStripeResultView(checking, pendingSnapshot("PENDING"))).toBe(checking);
+  });
+
+  it.each(["PAID", "FAILED", "EXPIRED"] as const)(
+    "commits the meaningful %s terminal transition",
+    (status) => {
+      const checking: StripeResultView = { kind: "checking" };
+      const snapshot = { ...pendingSnapshot("PENDING"), status };
+
+      expect(nextStripeResultView(checking, snapshot)).toEqual({ kind: "snapshot", value: snapshot });
+    }
+  );
+
+  it("changes checking to delayed only when the polling budget expires", () => {
+    const checking: StripeResultView = { kind: "checking" };
+    expect(stripeResultViewAfterTimeout(checking)).toEqual({ kind: "delayed" });
+  });
+});
+
 describe("Stripe donor page source contract", () => {
   it("creates one embedded Checkout Session per amount/frequency attempt and mounts Stripe's form", () => {
     expect(donarSource).toContain("STRIPE_CHECKOUT_PATH");
@@ -167,7 +206,7 @@ describe("Stripe donor page source contract", () => {
     expect(usBlock).toContain('title="Formulario de donación Givebutter (en inglés)"');
     expect(usBlock).not.toContain("payment_method_types");
     expect(stripeFormSource).toContain("<EmbeddedCheckoutProvider");
-    expect(stripeFormSource).toContain("<EmbeddedCheckout />");
+    expect(stripeFormSource).toContain('<EmbeddedCheckout className="donar-stripe-frame-mount" />');
     expect(stripeFormSource).not.toContain("ExpressCheckoutElement");
     expect(stripeFormSource).not.toContain("ContactDetailsElement");
     expect(stripeFormSource).not.toContain("BillingAddressElement");

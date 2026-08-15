@@ -32,7 +32,6 @@ import {
   DONAR_POLL_TIMEOUT_MS,
   DONAR_VERIFYING_NOTICE_DELAY_MS,
   DONAR_ROUTE_PARAM,
-  DONAR_SCRIPT_TIMEOUT_MS,
   DONAR_STEP_COUNT_SV,
   DONAR_STEP_TITLE_DATOS,
   DONAR_STEP_TITLE_ENTREGA,
@@ -40,11 +39,10 @@ import {
   DONAR_STEP_COUNT_US,
   DONAR_THANK_YOU_BODY,
   DONAR_THANK_YOU_TITLE,
-  DONAR_WIDGET_DELAYED_MESSAGE,
-  DONAR_WIDGET_FALLBACK_CTA,
   DONAR_WIDGET_LOADING_MESSAGE,
   DONAR_WIDGET_VERIFYING_MESSAGE,
   DONAR_WOMPI_CHECKOUT_ORIGIN,
+  GIVEBUTTER_LOADING_MESSAGE,
   GIVEBUTTER_RENDER_TIMEOUT_MS,
   STRIPE_CANCELED_MESSAGE,
   STRIPE_CHECKOUT_PATH,
@@ -54,6 +52,7 @@ import {
   STRIPE_GIFT_TYPE_OFFERING_LABEL,
   STRIPE_GIFT_TYPE_TITHE_LABEL,
   STRIPE_MONTHLY_LABEL,
+  US_PROVIDER_PRECONNECT_ORIGINS,
   DONATION_STEP1_FIELD_ORDER,
   DONATION_STEP2_FIELD_ORDER,
   clearDonationFieldErrors,
@@ -464,11 +463,9 @@ export function DonarPage() {
   } | null>(null);
   const stripeSessionSequenceRef = useRef(0);
   const stripeRejectedSessionSequenceRef = useRef<number | null>(null);
-  // Paso 3 widget lifecycle: "loading" from entry until Wompi renders its button
-  // (spinner), "ready" once it has, "delayed" when the render budget elapses first
-  // (manual hosted-checkout CTA appears; the poll keeps watching, so a late widget
-  // still flips to "ready").
-  const [handoff, setHandoff] = useState<"loading" | "ready" | "delayed" | "verifying">("loading");
+  // Paso 3 widget lifecycle: one stable loader from entry until Wompi's iframe loads,
+  // while the quiet hosted-page escape hatch remains available throughout.
+  const [handoff, setHandoff] = useState<"loading" | "ready" | "verifying">("loading");
   // Height reported by Wompi's checkout via sizeUpdate; null keeps the CSS fallback
   // (min(78vh, 820px)) until the first message. Tablet/desktop can then track the full
   // content height; mobile CSS caps the frame and keeps Wompi's own scrolling available.
@@ -612,6 +609,25 @@ export function DonarPage() {
     document.head.appendChild(link);
   }, [door, usDonation]);
 
+  // Warm only the U.S. providers' connection setup once that lane is selected. This
+  // performs no API request and creates no Stripe/Givebutter object or Session.
+  useEffect(() => {
+    if (door !== "eeuu") {
+      return;
+    }
+    const created = US_PROVIDER_PRECONNECT_ORIGINS.flatMap((origin) => {
+      if (document.querySelector(`link[rel="preconnect"][href="${origin}"]`)) {
+        return [];
+      }
+      const link = document.createElement("link");
+      link.rel = "preconnect";
+      link.href = origin;
+      document.head.appendChild(link);
+      return [link];
+    });
+    return () => created.forEach((link) => link.remove());
+  }, [door]);
+
   // Givebutter's embed is mounted only after the donor explicitly selects it, and this
   // timer is authoritative: the render budget clears the loading placeholder whether
   // or not the frame reported load. A cross-origin iframe fires load for the
@@ -674,23 +690,14 @@ export function DonarPage() {
   }, []);
 
   // Once an intent exists, Paso 3 embeds the checkout directly (iframe below). This
-  // effect only drives the waiting UI: spinner from entry, and if the iframe has not
-  // fired onLoad within the render budget, the manual hosted-checkout CTA appears —
-  // never a redirect. The iframe keeps loading underneath; its onLoad flips a
-  // loading/delayed handoff to "ready" whenever it lands, but cannot cancel a
-  // Wompi-close verification already in progress.
+  // effect resets the stable waiting UI. The iframe's onLoad flips it to ready but
+  // cannot cancel a Wompi-close verification already in progress.
   useEffect(() => {
     if (stage !== "widget" || !intent) {
       return;
     }
     setHandoff("loading");
     setEmbedHeight(null);
-    const slow = window.setTimeout(() => {
-      setHandoff((current) => (current === "loading" ? "delayed" : current));
-    }, DONAR_SCRIPT_TIMEOUT_MS);
-    return () => {
-      window.clearTimeout(slow);
-    };
   }, [stage, intent]);
 
   // Wompi's checkout posts JSON messages to its parent — the same channel its own
@@ -1348,7 +1355,7 @@ export function DonarPage() {
               </p>
               {/* One persistent live region for the whole step: the surface swap is
                   silent otherwise, since each switch only unmounts and mounts markup. */}
-              <p className="donar-provider-announcement" role="status" aria-live="polite">
+              <p className="donar-provider-announcement" aria-live="polite" aria-atomic="true">
                 {usProvider === "givebutter"
                   ? "Formulario de Givebutter, en inglés."
                   : "Formulario de Stripe, en español."}
@@ -1425,9 +1432,10 @@ export function DonarPage() {
                       keep saying "preparando" beside the explicit fallback link. */}
                   <div className="donar-givebutter-frame-area">
                     {!givebutterFrameLoaded && !givebutterFrameDelayed && (
-                      <p className="donar-givebutter-loading" aria-live="polite">
-                        {DONAR_WIDGET_LOADING_MESSAGE}
-                      </p>
+                      <div className="donar-givebutter-loading" role="status">
+                        <span className="donar-spinner" aria-hidden="true" />
+                        <span>{GIVEBUTTER_LOADING_MESSAGE}</span>
+                      </div>
                     )}
                     {/* `payment` sin origen equivale a `payment 'src'`: solo el embed de
                         Givebutter recibe la Payment Request API, no cada origen del árbol
@@ -1475,14 +1483,6 @@ export function DonarPage() {
                     {DONAR_WIDGET_LOADING_MESSAGE}
                   </div>
                 )}
-                {handoff === "delayed" && (
-                  <div className="donar-widget-delayed">
-                    <p>{DONAR_WIDGET_DELAYED_MESSAGE}</p>
-                    <a className="primary donar-widget-fallback" href={intent.urlEnlace}>
-                      {DONAR_WIDGET_FALLBACK_CTA}
-                    </a>
-                  </div>
-                )}
                 <iframe
                   className="donar-hosted-surface donar-embed"
                   src={widgetUrlFrom(intent.urlEnlaceLargo)}
@@ -1490,9 +1490,9 @@ export function DonarPage() {
                   style={embedHeight ? { height: embedHeight } : undefined}
                   onLoad={() => setHandoff((current) => (current === "verifying" ? current : "ready"))}
                 />
-                <button type="button" className="link-button" onClick={() => (window.location.href = intent.urlEnlace)}>
+                <a className="link-button donar-wompi-hint" href={intent.urlEnlace}>
                   ¿Problemas con el formulario? Continúe aquí
-                </button>
+                </a>
               </div>
             )}
 

@@ -1,6 +1,6 @@
 import { EmbeddedCheckout, EmbeddedCheckoutProvider } from "@stripe/react-stripe-js";
 import { loadStripe } from "@stripe/stripe-js/pure";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 export interface StripeCheckoutClientConfig {
   sessionId: string;
@@ -20,13 +20,17 @@ type StripeFormView =
   | { kind: "ready"; config: StripeCheckoutClientConfig };
 
 const STRIPE_FORM_ERROR = "No pudimos preparar su entrega con Stripe. Inténtelo de nuevo.";
+const STRIPE_FORM_LOADING = "Preparando su formulario seguro con Stripe…";
 
 export function StripeDonationForm({ session, onRetry }: StripeDonationFormProps) {
   const [view, setView] = useState<StripeFormView>({ kind: "loading" });
+  const [embeddedReady, setEmbeddedReady] = useState(false);
+  const markEmbeddedReady = useCallback(() => setEmbeddedReady(true), []);
 
   useEffect(() => {
     let active = true;
     setView({ kind: "loading" });
+    setEmbeddedReady(false);
     void session.then((config) => {
       if (!active) return;
       setView(isStripeCheckoutClientConfig(config)
@@ -44,15 +48,6 @@ export function StripeDonationForm({ session, onRetry }: StripeDonationFormProps
     };
   }, [session]);
 
-  if (view.kind === "loading") {
-    return (
-      <div className="donar-hosted-surface donar-stripe-embedded donar-stripe-loading" role="status">
-        <span className="donar-spinner" aria-hidden="true" />
-        Preparando su formulario seguro con Stripe…
-      </div>
-    );
-  }
-
   if (view.kind === "error") {
     return (
       <div className="donar-hosted-surface donar-stripe-embedded donar-stripe-load-error">
@@ -62,25 +57,63 @@ export function StripeDonationForm({ session, onRetry }: StripeDonationFormProps
     );
   }
 
-  return view.config.mock
-    ? <MockStripeDonationForm />
-    : <LiveStripeDonationForm config={view.config} />;
-}
-
-function LiveStripeDonationForm({ config }: { config: StripeCheckoutClientConfig }) {
-  const stripePromise = useMemo(() => loadStripe(config.publishableKey), [config.publishableKey]);
-  const options = useMemo(() => ({ clientSecret: config.clientSecret }), [config.clientSecret]);
-
   return (
     <div className="donar-hosted-surface donar-stripe-embedded">
+      {!embeddedReady && (
+        <div className="donar-stripe-loading" role="status">
+          <span className="donar-spinner" aria-hidden="true" />
+          {STRIPE_FORM_LOADING}
+        </div>
+      )}
+      {view.kind === "ready" && (view.config.mock
+        ? <MockStripeDonationForm onReady={markEmbeddedReady} />
+        : <LiveStripeDonationForm config={view.config} onReady={markEmbeddedReady} />)}
+    </div>
+  );
+}
+
+function LiveStripeDonationForm({
+  config,
+  onReady
+}: {
+  config: StripeCheckoutClientConfig;
+  onReady: () => void;
+}) {
+  const stripePromise = useMemo(() => loadStripe(config.publishableKey), [config.publishableKey]);
+  const options = useMemo(() => ({ clientSecret: config.clientSecret }), [config.clientSecret]);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const observedFrames = new Set<HTMLIFrameElement>();
+    const watchFrames = () => {
+      root.querySelectorAll<HTMLIFrameElement>(".donar-stripe-frame-mount iframe").forEach((frame) => {
+        if (observedFrames.has(frame)) return;
+        observedFrames.add(frame);
+        frame.addEventListener("load", onReady, { once: true });
+      });
+    };
+    const observer = new MutationObserver(watchFrames);
+    observer.observe(root, { childList: true, subtree: true });
+    watchFrames();
+    return () => {
+      observer.disconnect();
+      observedFrames.forEach((frame) => frame.removeEventListener("load", onReady));
+    };
+  }, [onReady]);
+
+  return (
+    <div ref={rootRef} className="donar-stripe-live">
       <EmbeddedCheckoutProvider stripe={stripePromise} options={options}>
-        <EmbeddedCheckout />
+        <EmbeddedCheckout className="donar-stripe-frame-mount" />
       </EmbeddedCheckoutProvider>
     </div>
   );
 }
 
-function MockStripeDonationForm() {
+function MockStripeDonationForm({ onReady }: { onReady: () => void }) {
+  useLayoutEffect(onReady, [onReady]);
   return (
     <>
       <p className="donar-stripe-mock-banner" role="status">
@@ -88,7 +121,7 @@ function MockStripeDonationForm() {
         <span>El formulario simulado no envía datos a Stripe.</span>
       </p>
 
-      <div className="donar-hosted-surface donar-stripe-embedded donar-stripe-embedded-mock">
+      <div className="donar-stripe-embedded-mock">
         <section className="donar-stripe-hosted-preview" aria-labelledby="stripe-hosted-preview-title">
           <div className="donar-stripe-hosted-brand" aria-hidden="true">
             <span>stripe</span>

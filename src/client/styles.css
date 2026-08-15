@@ -4186,6 +4186,11 @@ pre {
   transform: translateX(-50%);
   margin: 0;
   padding: 0 16px;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
   color: #5d5d5d;
   font-size: 14px;
   text-align: center;
@@ -4197,6 +4202,12 @@ pre {
   font-size: 12px;
   text-align: center;
   text-underline-offset: 3px;
+  white-space: nowrap;
+}
+
+.donar-wompi-hint {
+  justify-self: center;
+  font-size: 12px;
   white-space: nowrap;
 }
 
@@ -4259,8 +4270,7 @@ pre {
   }
 }
 
-/* Paso 3 handoff states: monochrome spinner while the embedded checkout loads,
-   manual hosted-checkout CTA when the render budget elapses. */
+/* Paso 3 handoff state: one monochrome spinner while the embedded checkout loads. */
 .donar-widget-loading {
   display: flex;
   align-items: center;
@@ -4284,24 +4294,6 @@ pre {
   to {
     transform: rotate(360deg);
   }
-}
-
-.donar-widget-delayed {
-  display: grid;
-  gap: 10px;
-  justify-items: center;
-  text-align: center;
-}
-
-.donar-widget-delayed p {
-  margin: 0;
-  color: #595959;
-  font-size: 15px;
-}
-
-.donar-widget-fallback {
-  text-align: center;
-  text-decoration: none;
 }
 
 /* ── Two-door landing: the chooser shown before any form. ─────────────────── */

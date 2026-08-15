@@ -1,4 +1,4 @@
-import { expect, test, type Locator } from "@playwright/test";
+import { expect, test, type Locator, type Page, type Route } from "@playwright/test";
 import {
   DONAR_VERIFYING_NOTICE_DELAY_MS,
   GIVEBUTTER_RENDER_TIMEOUT_MS
@@ -36,6 +36,86 @@ const DONOR = {
 const BRANDING_DISPLAY_NAME = "Iglesia Ejemplo Central";
 const BRANDING_SUPPORT_EMAIL = "support@example.org";
 const CONFIGURED_DONOR_LOGO = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12"><rect width="12" height="12" fill="#111"/></svg>`;
+
+interface RouteDelay {
+  held: Promise<void>;
+  release: () => void;
+}
+
+async function delayRoute(
+  page: Page,
+  url: string,
+  fulfill: Parameters<Route["fulfill"]>[0]
+): Promise<RouteDelay> {
+  let markHeld!: () => void;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { markHeld = resolve; });
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  page.once("close", release);
+  await page.route(url, async (route) => {
+    markHeld();
+    await released;
+    await route.fulfill(fulfill).catch(() => {
+      // A RED assertion may close the page before releasing a held provider request.
+    });
+  });
+  return { held, release };
+}
+
+async function enterWompiHandoff(page: Page): Promise<void> {
+  await page.goto("/donar?ruta=sv");
+  await page.getByLabel("Monto").fill(DONOR.amount);
+  await page.getByRole("button", { name: "Continuar", exact: true }).click();
+  await page.getByLabel("Número de documento").fill(DONOR.dui);
+  await page.getByLabel("Departamento").selectOption({ label: "San Salvador" });
+  await page.getByLabel("Municipio").selectOption({ index: 1 });
+  await page.getByLabel("Distrito").selectOption({ index: 1 });
+  await page.getByRole("button", { name: "Continuar con su diezmo" }).click();
+}
+
+async function enterStripeHandoff(page: Page): Promise<void> {
+  await page.goto("/donar?ruta=eeuu");
+  await page.getByRole("button", { name: "$50", exact: true }).click();
+  await page.getByRole("button", { name: "Continuar con su diezmo", exact: true }).click();
+}
+
+async function rememberNode(locator: Locator, key: string): Promise<void> {
+  await locator.evaluate((element, storageKey) => {
+    (window as Window & { __providerNodes?: Record<string, Element> }).__providerNodes ??= {};
+    (window as Window & { __providerNodes: Record<string, Element> }).__providerNodes[storageKey] = element;
+  }, key);
+}
+
+async function isRememberedNode(locator: Locator, key: string): Promise<boolean> {
+  return locator.evaluate((element, storageKey) => (
+    (window as Window & { __providerNodes?: Record<string, Element> }).__providerNodes?.[storageKey] === element
+  ), key);
+}
+
+const MOCK_STRIPE_JS = `
+window.Stripe = function () {
+  let mountedFrame = null;
+  return {
+    elements: function () { return {}; },
+    createToken: function () {},
+    createPaymentMethod: function () {},
+    confirmCardPayment: function () {},
+    _registerWrapper: function () {},
+    registerAppInfo: function () {},
+    createEmbeddedCheckoutPage: function () {
+      return Promise.resolve({
+        mount: function (node) {
+          mountedFrame = document.createElement("iframe");
+          mountedFrame.title = "Formulario seguro de Stripe";
+          mountedFrame.src = "https://checkout.stripe.test/embedded-delayed";
+          node.appendChild(mountedFrame);
+        },
+        unmount: function () { if (mountedFrame) mountedFrame.remove(); },
+        destroy: function () { if (mountedFrame) mountedFrame.remove(); }
+      });
+    }
+  };
+};`;
 
 async function recordDonorLogoNodes(page: import("@playwright/test").Page): Promise<void> {
   await page.addInitScript(() => {
@@ -540,8 +620,54 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   expect(desktopEmbedBox!.height).toBeCloseTo(745, 1);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(desktopViewport.width);
 
-  await expect(page.getByRole("button", { name: "¿Problemas con el formulario? Continúe aquí" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "¿Problemas con el formulario? Continúe aquí" })).toBeVisible();
   expect(new URL(page.url()).pathname).toBe("/");
+});
+
+test("a delayed Wompi frame keeps one stable loader and only the quiet escape hatch", async ({ page }) => {
+  const wompiDelay = await delayRoute(page, "https://mock.wompi.sv/**", {
+    status: 200,
+    contentType: "text/html",
+    body: "<html><body>mock wompi delayed flow</body></html>"
+  });
+
+  await enterWompiHandoff(page);
+  await wompiDelay.held;
+
+  const loader = page.locator('.donar-widget-loading[role="status"]');
+  await expect(loader).toHaveCount(1);
+  await expect(loader).toContainText("Preparando su entrega segura…");
+  await rememberNode(loader, "wompi-loader");
+  await expect(loader.locator(".donar-spinner")).toHaveCSS("animation-name", "donar-spin");
+
+  const escapeHatch = page.getByRole("link", {
+    name: "¿Problemas con el formulario? Continúe aquí",
+    exact: true
+  });
+  await expect(escapeHatch).toHaveCount(1);
+  await expect(page.getByText("Continuar en Wompi", { exact: true })).toHaveCount(0);
+  await page.waitForTimeout(4_500);
+  await expect(loader).toHaveCount(1);
+  expect(await isRememberedNode(loader, "wompi-loader")).toBe(true);
+  await expect(page.getByText("Continuar en Wompi", { exact: true })).toHaveCount(0);
+  expect(await escapeHatch.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      textDecorationLine: style.textDecorationLine,
+      whiteSpace: style.whiteSpace,
+      backgroundColor: style.backgroundColor,
+      borderWidth: style.borderTopWidth
+    };
+  })).toEqual({
+    textDecorationLine: "underline",
+    whiteSpace: "nowrap",
+    backgroundColor: "rgba(0, 0, 0, 0)",
+    borderWidth: "0px"
+  });
+
+  wompiDelay.release();
+  await expect(page.frameLocator("iframe.donar-embed").getByText("mock wompi delayed flow")).toBeVisible();
+  await expect(loader).toHaveCount(0);
 });
 
 test("keeps checking the same intent when Wompi closes before its webhook is visible", async ({ page }) => {
@@ -923,6 +1049,111 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8787\/(?:donar)?\?ruta=eeuu$/);
 });
 
+test("provider preconnects begin only after the U.S. lane is selected", async ({ page }) => {
+  let stripeSessionRequests = 0;
+  await page.route("**/api/donations/stripe/checkout", async (route) => {
+    stripeSessionRequests += 1;
+    await route.abort();
+  });
+
+  const providerPreconnects = page.locator('link[rel="preconnect"][href^="https://js.stripe.com"], link[rel="preconnect"][href^="https://checkout.stripe.com"], link[rel="preconnect"][href^="https://givebutter.com"]');
+  await page.goto("/donar");
+  await expect(providerPreconnects).toHaveCount(0);
+  await expect(page.locator("iframe.donar-givebutter-frame, .donar-stripe-embedded")).toHaveCount(0);
+  expect(stripeSessionRequests).toBe(0);
+
+  await page.getByRole("button", { name: "EE. UU." }).click();
+  await expect(page.locator('link[rel="preconnect"][href="https://js.stripe.com"]')).toHaveCount(1);
+  await expect(page.locator('link[rel="preconnect"][href="https://checkout.stripe.com"]')).toHaveCount(1);
+  await expect(page.locator('link[rel="preconnect"][href="https://givebutter.com"]')).toHaveCount(1);
+  expect(stripeSessionRequests).toBe(0);
+});
+
+test("Stripe keeps one loader from the Session request through delayed iframe readiness", async ({ page }) => {
+  const sessionDelay = await delayRoute(page, "**/api/donations/stripe/checkout", {
+    status: 201,
+    contentType: "application/json",
+    body: JSON.stringify({
+      sessionId: "cs_test_delayed_embedded_fixture",
+      clientSecret: "cs_test_delayed_embedded_fixture_secret_mock",
+      publishableKey: "pk_test_mock",
+      mock: false
+    })
+  });
+  await page.route("https://js.stripe.com/**", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/javascript",
+    body: MOCK_STRIPE_JS
+  }));
+  const frameDelay = await delayRoute(page, "https://checkout.stripe.test/embedded-delayed", {
+    status: 200,
+    contentType: "text/html; charset=utf-8",
+    body: "<html lang=\"es\"><body>Formulario demorado de Stripe</body></html>"
+  });
+
+  await enterStripeHandoff(page);
+  await sessionDelay.held;
+  const loader = page.locator('.donar-stripe-loading[role="status"]');
+  await expect(loader).toHaveCount(1);
+  await expect(loader).toHaveText("Preparando su formulario seguro con Stripe…");
+  await expect(page.getByRole("status")).toHaveCount(1);
+  await rememberNode(loader, "stripe-loader");
+
+  sessionDelay.release();
+  await frameDelay.held;
+  await expect(page.getByTitle("Formulario seguro de Stripe")).toHaveCount(1);
+  await expect(loader).toBeVisible();
+  expect(await isRememberedNode(loader, "stripe-loader")).toBe(true);
+
+  frameDelay.release();
+  await expect(page.frameLocator('iframe[title="Formulario seguro de Stripe"]')
+    .getByText("Formulario demorado de Stripe")).toBeVisible();
+  await expect(loader).toHaveCount(0);
+});
+
+test("Givebutter keeps a truthful reduced-motion loader until its bounded escape hatch", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.route("**/api/donations/stripe/checkout", (route) => route.fulfill({
+    status: 201,
+    contentType: "application/json",
+    body: JSON.stringify({
+      sessionId: "cs_test_givebutter_delayed_fixture",
+      clientSecret: "cs_test_givebutter_delayed_fixture_secret_mock",
+      publishableKey: "pk_test_mock",
+      mock: true
+    })
+  }));
+  const givebutterDelay = await delayRoute(page, "https://givebutter.com/**", {
+    status: 200,
+    contentType: "text/html; charset=utf-8",
+    body: "<html lang=\"en\"><body>Delayed Givebutter form</body></html>"
+  });
+
+  await enterStripeHandoff(page);
+  await page.getByRole("button", {
+    name: /^Diezmar con Givebutter\s+\(Con formulario en inglés\)$/i
+  }).click();
+  await givebutterDelay.held;
+
+  const loader = page.locator('.donar-givebutter-loading[role="status"]');
+  await expect(loader).toHaveCount(1);
+  await expect(loader).toContainText("Preparando su formulario seguro con Givebutter…");
+  await expect(page.getByRole("status")).toHaveCount(1);
+  await rememberNode(loader, "givebutter-loader");
+  await expect(loader.locator(".donar-spinner")).toHaveCSS("animation-name", "none");
+  await page.waitForTimeout(500);
+  expect(await isRememberedNode(loader, "givebutter-loader")).toBe(true);
+
+  const escapeHatch = page.locator(".donar-givebutter-hint");
+  await expect(escapeHatch).toHaveClass(/\bdonar-givebutter-fallback\b/, {
+    timeout: GIVEBUTTER_RENDER_TIMEOUT_MS + 5_000
+  });
+  await expect(loader).toHaveCount(0);
+  await expect(escapeHatch).toHaveText("¿Problemas con el formulario? Abrir Givebutter");
+
+  givebutterDelay.release();
+});
+
 test("the Givebutter handoff verb follows the selected U.S. gift type", async ({ page }) => {
   let checkoutSequence = 0;
   await page.route("**/api/donations/stripe/checkout", async (route) => {
@@ -1150,6 +1381,40 @@ test("the Stripe result waits for durable confirmation and opens Spanish recurri
   ]);
   expect(portalBody).toEqual({ sessionId });
   await expect(page.getByText("Administración mensual simulada")).toBeVisible();
+});
+
+test("repeated OPEN and PENDING result polls keep the same checking status node", async ({ page }) => {
+  const sessionId = "cs_test_repeated_pending_fixture";
+  let statusReads = 0;
+  await page.route("**/api/donations/stripe/session/**", (route) => {
+    statusReads += 1;
+    const status = statusReads === 1 ? "OPEN" : statusReads === 2 ? "PENDING" : "PAID";
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        status,
+        frequency: "ONCE",
+        amountCents: 5000,
+        currency: "usd",
+        canManageRecurring: false,
+        recurringStatus: null
+      })
+    });
+  });
+
+  await page.goto(`/donar/stripe/resultado?session_id=${sessionId}`);
+  const checking = page.locator('.donar-result-checking[role="status"]');
+  await expect(checking).toHaveCount(1);
+  await rememberNode(checking, "stripe-result-checking");
+  await expect.poll(() => statusReads, { timeout: 8_000 }).toBeGreaterThanOrEqual(2);
+  await expect(checking).toHaveCount(1);
+  expect(await isRememberedNode(checking, "stripe-result-checking")).toBe(true);
+  await expect(page.getByRole("heading", { name: "Confirmando su entrega…" })).toBeVisible();
+
+  await expect(page.getByRole("heading", { name: "Dios le bendiga. Su aportación fue recibida." }))
+    .toBeVisible({ timeout: 8_000 });
+  await expect(checking).toHaveCount(0);
 });
 
 test("the Stripe result narrates a canceled monthly gift without implying future deliveries", async ({ page }) => {

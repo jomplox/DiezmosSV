@@ -15,15 +15,11 @@ import {
   DONAR_INTENT_PATH,
   DONAR_POLL_INTERVAL_MS,
   DONAR_POLL_TIMEOUT_MS,
-  DONAR_SCRIPT_TIMEOUT_MS,
   DONAR_STEP_COUNT_SV,
   DONAR_SUPPORT_EMAIL,
   DONAR_STEP_COUNT_US,
   DONAR_THANK_YOU_BODY,
   DONAR_THANK_YOU_TITLE,
-  DONAR_WIDGET_DELAYED_MESSAGE,
-  DONAR_WIDGET_FALLBACK_CTA,
-  DONAR_WIDGET_LOADING_MESSAGE,
   DONAR_VERIFYING_NOTICE_DELAY_MS,
   DONAR_WIDGET_VERIFYING_MESSAGE,
   DONAR_WOMPI_CHECKOUT_ORIGIN,
@@ -546,8 +542,6 @@ describe("donar widget handoff", () => {
     expect(DONAR_POLL_INTERVAL_MS).toBe(5_000);
     expect(DONAR_POLL_TIMEOUT_MS).toBe(CHECKOUT_WINDOW_MS);
     expect(DONAR_POLL_TIMEOUT_MS).toBe(CHECKOUT_WINDOW_MINUTES * 60_000);
-    // Script/widget-render fallback timeout is short.
-    expect(DONAR_SCRIPT_TIMEOUT_MS).toBeLessThanOrEqual(6_000);
   });
 
   it("flips to thanks on payment (result.paid) OR the legacy COMPLETED status", () => {
@@ -896,44 +890,6 @@ describe("donar wizard source contract", () => {
     expect(donarSource).not.toContain("wompi_button_widget");
     expect(donarSource).not.toContain("DONAR_WOMPI_SCRIPT_URL");
     expect(donarSource).not.toContain("autoClickedRef");
-  });
-
-  it("never auto-redirects away from Paso 3 — leaving is always donor-initiated", () => {
-    // Exactly one window.location.href assignment exists in the wizard: the manual
-    // "Continúe aquí" backup button under the embed.
-    const assignments = donarSource.match(/window\.location\.href\s*=/g) ?? [];
-    expect(assignments).toHaveLength(1);
-    const at = donarSource.indexOf("window.location.href =");
-    expect(donarSource.slice(at, at + 260)).toContain("¿Problemas con el formulario? Continúe aquí");
-    // The slow path renders a prominent hosted-checkout anchor, not a redirect.
-    expect(donarSource).toContain("DONAR_WIDGET_FALLBACK_CTA");
-    expect(donarSource).toContain("donar-widget-fallback");
-    expect(DONAR_WIDGET_FALLBACK_CTA).toBe("Continuar en Wompi");
-  });
-
-  it("shows a loading indicator until the embedded checkout loads", () => {
-    // handoff: "loading" (spinner) → "ready" via the iframe's onLoad; if the render
-    // budget (DONAR_SCRIPT_TIMEOUT_MS) elapses first, "delayed" adds the hosted CTA
-    // while the iframe keeps loading underneath.
-    expect(donarSource).toContain("DONAR_WIDGET_LOADING_MESSAGE");
-    expect(donarSource).toContain("DONAR_WIDGET_DELAYED_MESSAGE");
-    expect(donarSource).toContain("onLoad");
-    expect(donarSource).toContain("DONAR_SCRIPT_TIMEOUT_MS");
-    expect(DONAR_WIDGET_LOADING_MESSAGE).toContain("Preparando su entrega");
-    expect(DONAR_WIDGET_DELAYED_MESSAGE).toContain("Wompi");
-    // Spinner is announced to assistive tech and styled monochrome in CSS.
-    expect(donarSource).toContain('role="status"');
-    expect(stylesSource).toContain(".donar-spinner");
-    const spinnerRule = stylesSource.match(/\.donar-spinner\s*\{[^}]*\}/)?.[0] ?? "";
-    expect(spinnerRule).toContain("width: 24px;");
-    expect(spinnerRule).toContain("height: 24px;");
-    expect(spinnerRule).toContain("border: 3px solid #d9d9d9;");
-    expect(spinnerRule).toContain("border-top-color: #000000;");
-    expect(spinnerRule).toContain("animation: donar-spin 800ms linear infinite;");
-    // Reduced-motion users get a static indicator, not a spinning ring.
-    const reducedMotion = stylesSource.indexOf("prefers-reduced-motion");
-    expect(reducedMotion).toBeGreaterThan(-1);
-    expect(stylesSource.slice(reducedMotion)).toContain(".donar-spinner");
   });
 
   it("preconnects to the checkout host only after the SV/Wompi path is chosen", () => {
@@ -1287,31 +1243,6 @@ describe("Stripe donar page source contract", () => {
     expect(stylesSource).toMatch(/\.donar-provider-stripe-mark\s*\{[^}]*background:\s*#635bff;/);
   });
 
-  it("puts one Givebutter escape hatch above the frame instead of two below it", () => {
-    const surfaceStart = pageSource.indexOf(
-      '{usProvider === "givebutter" && givebutterFrameUrl && givebutterHostedPageUrl && ('
-    );
-    expect(surfaceStart).toBeGreaterThan(-1);
-    const surface = pageSource.slice(surfaceStart, pageSource.indexOf("{/* Paso 3", surfaceStart));
-    // A donor staring at a blank 760px embed must not scroll past it to find the way
-    // out: the anchor precedes the iframe in DOM order.
-    const hatch = surface.indexOf("donar-givebutter-hint");
-    const frame = surface.indexOf("<iframe");
-    expect(hatch).toBeGreaterThan(-1);
-    expect(frame).toBeGreaterThan(-1);
-    expect(hatch).toBeLessThan(frame);
-    // One anchor spans both loading states; the rendered browser test owns the
-    // donor-visible copy contract before and after the timeout.
-    expect(surface.match(/href=\{givebutterHostedPageUrl\}/g)).toHaveLength(1);
-    expect(surface).toContain('"link-button donar-givebutter-hint');
-    // The escape hatch never spends the page's strongest CTA style.
-    expect(surface).not.toContain('className="primary');
-    // The 760px void gets the shared loading copy until the frame loads — or until the
-    // budget elapses, after which the stable hosted-page link is the only signal.
-    expect(surface).toContain("{!givebutterFrameLoaded && !givebutterFrameDelayed && (");
-    expect(surface).toContain("DONAR_WIDGET_LOADING_MESSAGE");
-  });
-
   it("keeps the render budget independent after the frame fires load", () => {
     // A cross-origin iframe fires load for the browser's own error documents, so load
     // must only clear the placeholder — it can neither set nor suppress "delayed".
@@ -1336,15 +1267,11 @@ describe("Stripe donar page source contract", () => {
     expect(pageSource).toContain("ref={stripeReturnRef}");
     // The retired ref leaves no dead wiring behind.
     expect(donarSource).not.toContain("givebutterChoiceRef");
-    // Exactly one active-form announcement in the whole US step, in whatever markup it
-    // takes — role="status" text OR a bare aria-live on the surface container. The only
-    // other live region here is the Givebutter loading placeholder, so remove it and
-    // count what is left: two announcements would double-speak every provider switch.
+    // The provider-switch announcement is a bare live region, leaving role=status to
+    // the active provider's one visible loader.
     const usBlockStart = pageSource.indexOf("{/* US Stripe step");
     const usBlock = pageSource.slice(usBlockStart, pageSource.indexOf("{/* Paso 3", usBlockStart));
-    const placeholder = '<p className="donar-givebutter-loading" aria-live="polite">';
-    expect(usBlock).toContain(placeholder);
-    expect(usBlock.replace(placeholder, "").match(/aria-live=/g)).toHaveLength(1);
+    expect(usBlock.match(/aria-live=/g)).toHaveLength(1);
     expect(usBlock).toContain("Formulario de Givebutter, en inglés.");
     expect(usBlock).toContain("Formulario de Stripe, en español.");
   });
