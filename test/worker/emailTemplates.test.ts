@@ -237,6 +237,28 @@ describe("email template placeholder boundaries", () => {
 });
 
 describe("scoped email template persistence", () => {
+  it("completes only absent legacy templates while retaining valid U.S. customization", () => {
+    const customRefund = { subject: "Corrección personalizada", body: "Monto neto {{montoNeto}}." };
+    const legacyRaw = JSON.stringify({
+      dteReceipt: DEFAULT_EMAIL_TEMPLATES.dteReceipt,
+      dteInvalidation: DEFAULT_EMAIL_TEMPLATES.dteInvalidation,
+      stripeRefund: customRefund
+    });
+
+    const update = prepareScopedEmailTemplateUpdate(legacyRaw, {
+      dteReceipt: { subject: "CDE {{numeroControl}} actualizado", body: "Entrega {{monto}}." },
+      dteInvalidation: { subject: "CDE {{numeroControl}} invalidado", body: "Estado {{estado}}." }
+    }, "SV_CDE");
+
+    expect(update.templates).toEqual({
+      dteReceipt: { subject: "CDE {{numeroControl}} actualizado", body: "Entrega {{monto}}." },
+      dteInvalidation: { subject: "CDE {{numeroControl}} invalidado", body: "Estado {{estado}}." },
+      stripeAcknowledgment: DEFAULT_EMAIL_TEMPLATES.stripeAcknowledgment,
+      stripeRefund: customRefund,
+      stripeAnnualStatement: DEFAULT_EMAIL_TEMPLATES.stripeAnnualStatement
+    });
+  });
+
   it("rejects a stale validated snapshot when a legacy writer replaces it with a structurally invalid row", async () => {
     const database = migratedDatabase();
     try {

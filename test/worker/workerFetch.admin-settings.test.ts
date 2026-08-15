@@ -874,6 +874,89 @@ describe("email template settings", () => {
     expect(db.audits).toHaveLength(0);
   });
 
+  it("lets the first Salvadoran save complete a legacy two-template row and persists all five templates", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    db.settings.push({
+      key: "email_templates_json",
+      value: JSON.stringify({
+        dteReceipt: DEFAULT_EMAIL_TEMPLATES.dteReceipt,
+        dteInvalidation: DEFAULT_EMAIL_TEMPLATES.dteInvalidation
+      }),
+      updated_by: "legacy_owner"
+    });
+
+    const response = await putEmailTemplates(db, {
+      scope: "SV_CDE",
+      templates: salvadoranTemplates
+    });
+
+    expect(response.status).toBe(200);
+    const saved = await response.json() as {
+      emailTemplates: { templates: Record<string, { subject: string; body: string }> };
+    };
+    expect(saved.emailTemplates.templates).toEqual({
+      dteReceipt: { subject: "CDE {{numeroControl}} actualizado", body: "Entrega {{monto}}." },
+      dteInvalidation: salvadoranTemplates.dteInvalidation,
+      stripeAcknowledgment: DEFAULT_EMAIL_TEMPLATES.stripeAcknowledgment,
+      stripeRefund: DEFAULT_EMAIL_TEMPLATES.stripeRefund,
+      stripeAnnualStatement: DEFAULT_EMAIL_TEMPLATES.stripeAnnualStatement
+    });
+    expect(db.audits).toHaveLength(1);
+
+    const freshGet = await worker.fetch(
+      new Request("https://example.org/api/settings/email-templates", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(freshGet.status).toBe(200);
+    await expect(freshGet.json()).resolves.toMatchObject({
+      emailTemplates: {
+        templates: {
+          dteReceipt: { subject: "CDE {{numeroControl}} actualizado", body: "Entrega {{monto}}." },
+          dteInvalidation: salvadoranTemplates.dteInvalidation,
+          stripeAcknowledgment: DEFAULT_EMAIL_TEMPLATES.stripeAcknowledgment,
+          stripeRefund: DEFAULT_EMAIL_TEMPLATES.stripeRefund,
+          stripeAnnualStatement: DEFAULT_EMAIL_TEMPLATES.stripeAnnualStatement
+        }
+      }
+    });
+  });
+
+  it("preserves a valid U.S. customization while completing missing U.S. templates on the first Salvadoran save", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    const customRefund = { subject: "Corrección personalizada", body: "Monto neto {{montoNeto}}." };
+    db.settings.push({
+      key: "email_templates_json",
+      value: JSON.stringify({
+        dteReceipt: DEFAULT_EMAIL_TEMPLATES.dteReceipt,
+        dteInvalidation: DEFAULT_EMAIL_TEMPLATES.dteInvalidation,
+        stripeRefund: customRefund
+      }),
+      updated_by: "legacy_owner"
+    });
+
+    const response = await putEmailTemplates(db, {
+      scope: "SV_CDE",
+      templates: salvadoranTemplates
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      emailTemplates: {
+        templates: {
+          dteReceipt: { subject: "CDE {{numeroControl}} actualizado", body: "Entrega {{monto}}." },
+          stripeRefund: customRefund,
+          stripeAcknowledgment: DEFAULT_EMAIL_TEMPLATES.stripeAcknowledgment,
+          stripeAnnualStatement: DEFAULT_EMAIL_TEMPLATES.stripeAnnualStatement
+        }
+      }
+    });
+  });
+
   it("returns a reload conflict for an invalid untouched scope without overwriting it", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
@@ -897,7 +980,7 @@ describe("email template settings", () => {
     expect(db.audits).toHaveLength(0);
   });
 
-  it("returns a reload conflict when a legacy writer installs a structurally invalid row after preflight", async () => {
+  it("returns a reload conflict when a legacy writer installs an explicitly invalid U.S. template after preflight", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
     db.settings.push({
@@ -907,7 +990,8 @@ describe("email template settings", () => {
     });
     const legacyRaw = JSON.stringify({
       dteReceipt: DEFAULT_EMAIL_TEMPLATES.dteReceipt,
-      dteInvalidation: DEFAULT_EMAIL_TEMPLATES.dteInvalidation
+      dteInvalidation: DEFAULT_EMAIL_TEMPLATES.dteInvalidation,
+      stripeRefund: { subject: "Corrección dañada", body: "   " }
     });
     let signalBatchReached!: () => void;
     let releaseBatch!: () => void;

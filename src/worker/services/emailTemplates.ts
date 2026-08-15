@@ -253,7 +253,7 @@ export function prepareScopedEmailTemplateUpdate(
       : DEFAULT_EMAIL_TEMPLATES[definition.type];
   }
   const normalizedCandidate = normalizeEmailTemplateSettings(scopedCandidate);
-  const patch = Object.fromEntries(
+  const scopedPatch = Object.fromEntries(
     EMAIL_TEMPLATE_DEFINITIONS
       .filter((definition) => definition.scope === scope)
       .map((definition) => [definition.type, normalizedCandidate[definition.type]])
@@ -270,10 +270,19 @@ export function prepareScopedEmailTemplateUpdate(
   if (!isRecord(stored)) {
     throw new EmailTemplateStoredStateError("Las plantillas guardadas deben volver a cargarse.");
   }
+  const missingTemplateDefaults = Object.fromEntries(
+    EMAIL_TEMPLATE_DEFINITIONS
+      .filter((definition) => !Object.prototype.hasOwnProperty.call(stored, definition.type))
+      .map((definition) => [definition.type, DEFAULT_EMAIL_TEMPLATES[definition.type]])
+  ) as Partial<EmailTemplateSettings>;
   try {
     return {
-      patch,
-      templates: normalizeEmailTemplateSettings({ ...stored, ...patch })
+      patch: { ...missingTemplateDefaults, ...scopedPatch },
+      templates: normalizeEmailTemplateSettings({
+        ...cloneDefaultTemplates(),
+        ...stored,
+        ...scopedPatch
+      })
     };
   } catch (error) {
     if (error instanceof EmailTemplateValidationError) {
