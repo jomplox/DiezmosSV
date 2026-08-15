@@ -293,7 +293,12 @@ test("covers every owner navigation surface with accessible filters and no app r
 });
 
 test("edits Salvadoran and U.S. email templates separately while identifying the fixed U.S. PDFs", async ({ page }) => {
-  let savedTemplates: Record<string, { subject: string; body: string }> | null = null;
+  const savedRequests: Array<{
+    scope?: "SV_CDE" | "US_STRIPE";
+    templates: Record<string, { subject: string; body: string }>;
+  }> = [];
+  let lastSavedResponse: Record<string, { subject: string; body: string }> | null = null;
+  let lastGetResponse: Record<string, { subject: string; body: string }> | null = null;
   const definitions = [
     {
       type: "dteReceipt",
@@ -341,23 +346,29 @@ test("edits Salvadoran and U.S. email templates separately while identifying the
       placeholders: ["{{donante}}", "{{anio}}", "{{totalNeto}}"]
     }
   ];
-  let templates = Object.fromEntries(definitions.map((definition) => [
+  // The stored legacy row has only the two Salvadoran definitions. The real GET
+  // normalizes it before it reaches the browser, so the editor still receives all five.
+  let persistedTemplates = Object.fromEntries(definitions
+    .filter((definition) => definition.scope === "SV_CDE")
+    .map((definition) => [definition.type, { subject: definition.defaultSubject, body: definition.defaultBody }]));
+  const normalizedTemplates = () => Object.fromEntries(definitions.map((definition) => [
     definition.type,
-    { subject: definition.defaultSubject, body: definition.defaultBody }
+    persistedTemplates[definition.type] ?? { subject: definition.defaultSubject, body: definition.defaultBody }
   ]));
   await installOwnerAdmin(page, async (route, url) => {
     if (url.pathname !== "/api/settings/email-templates") return false;
-    if (route.request().method() === "PUT") {
+    const method = route.request().method();
+    if (method === "PUT") {
       const payload = route.request().postDataJSON() as {
         scope?: "SV_CDE" | "US_STRIPE";
         templates: Record<string, { subject: string; body: string }>;
       };
-      savedTemplates = payload.templates;
-      // El endpoint real fusiona el grupo enviado sobre lo guardado y solo reemplaza las
-      // cinco cuando el cuerpo no trae `scope`. Reemplazar siempre modelaría un servidor
-      // que descarta el país que no se envió.
-      templates = payload.scope ? { ...templates, ...payload.templates } : payload.templates;
+      savedRequests.push(payload);
+      persistedTemplates = payload.scope ? { ...persistedTemplates, ...payload.templates } : payload.templates;
     }
+    const templates = normalizedTemplates();
+    if (method === "PUT") lastSavedResponse = templates;
+    else lastGetResponse = templates;
     await fulfillJson(route, {
       emailTemplates: {
         definitions,
@@ -392,6 +403,28 @@ test("edits Salvadoran and U.S. email templates separately while identifying the
     }
   }
 
+  const savedSalvadoranSubject = "Comprobante legado actualizado {{numeroControl}}";
+  const receipt = salvadoranTemplates.getByRole("region", { name: "Envío de comprobante", exact: true });
+  const receiptSubject = receipt.getByRole("textbox", { name: "Asunto — Envío de comprobante", exact: true });
+  await receiptSubject.fill(savedSalvadoranSubject);
+  await salvadoranTemplates.getByRole("button", { name: "Guardar plantillas de El Salvador" }).click();
+  await expect.poll(() => savedRequests).toHaveLength(1);
+  expect(savedRequests[0]?.scope).toBe("SV_CDE");
+  expect(Object.keys(savedRequests[0]?.templates ?? {}).sort()).toEqual(["dteInvalidation", "dteReceipt"]);
+  await expect(page.getByRole("status")).toHaveText("Plantillas de El Salvador actualizadas");
+  await expect(page.getByRole("status")).not.toContainText("Vuelva a cargar las plantillas antes de guardar.");
+  expect(Object.keys(lastSavedResponse ?? {})).toEqual(definitions.map((definition) => definition.type));
+  expect(lastSavedResponse?.dteReceipt.subject).toBe(savedSalvadoranSubject);
+  await expect(receiptSubject).toHaveValue(savedSalvadoranSubject);
+
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Documentos", exact: true })).toBeVisible();
+  await openView(page, "Configuración");
+  await page.getByRole("button", { name: /^Plantillas/ }).click();
+  expect(Object.keys(lastGetResponse ?? {})).toEqual(definitions.map((definition) => definition.type));
+  expect(lastGetResponse?.dteReceipt.subject).toBe(savedSalvadoranSubject);
+  await expect(receiptSubject).toHaveValue(savedSalvadoranSubject);
+
   const immediate = templatePanel.getByRole("region", { name: "Constancia inmediata", exact: true });
   const body = immediate.getByRole("textbox", { name: "Cuerpo del correo — Constancia inmediata", exact: true });
   await expect(body).toHaveValue("Primera\nSegunda");
@@ -419,9 +452,15 @@ test("edits Salvadoran and U.S. email templates separately while identifying the
   await expect(body).toHaveValue("> Texto");
   await immediate.getByRole("textbox", { name: "Asunto — Constancia inmediata", exact: true }).fill("Gracias por su entrega, {{donante}}");
   await usTemplates.getByRole("button", { name: "Guardar plantillas de EE. UU." }).click();
-  await expect.poll(() => savedTemplates?.stripeAcknowledgment.subject ?? null)
+  await expect.poll(() => savedRequests).toHaveLength(2);
+  expect(savedRequests[1]?.scope).toBe("US_STRIPE");
+  expect(Object.keys(savedRequests[1]?.templates ?? {}).sort())
+    .toEqual(["stripeAcknowledgment", "stripeAnnualStatement", "stripeRefund"]);
+  await expect.poll(() => lastSavedResponse?.stripeAcknowledgment.subject ?? null)
     .toBe("Gracias por su entrega, {{donante}}");
-  expect(savedTemplates?.stripeAcknowledgment.body).toBe("> Texto");
+  expect(lastSavedResponse?.stripeAcknowledgment.body).toBe("> Texto");
+  expect(lastSavedResponse?.dteReceipt.subject).toBe(savedSalvadoranSubject);
+  await expect(receiptSubject).toHaveValue(savedSalvadoranSubject);
 });
 
 test("paginates every long preview table in Exportar without changing its data source", async ({ page }) => {
