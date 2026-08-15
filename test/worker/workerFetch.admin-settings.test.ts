@@ -874,6 +874,29 @@ describe("email template settings", () => {
     expect(db.audits).toHaveLength(0);
   });
 
+  it("returns a reload conflict for non-object stored JSON without writing or auditing", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    db.settings.push({
+      key: "email_templates_json",
+      value: JSON.stringify(["not", "template settings"]),
+      updated_by: "previous_owner"
+    });
+    const settingsBefore = structuredClone(db.settings);
+
+    const response = await putEmailTemplates(db, {
+      scope: "SV_CDE",
+      templates: salvadoranTemplates
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "email_templates_reload_required"
+    });
+    expect(db.settings).toEqual(settingsBefore);
+    expect(db.audits).toHaveLength(0);
+  });
+
   it("lets the first Salvadoran save complete a legacy two-template row and persists all five templates", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
@@ -903,6 +926,9 @@ describe("email template settings", () => {
       stripeAnnualStatement: DEFAULT_EMAIL_TEMPLATES.stripeAnnualStatement
     });
     expect(db.audits).toHaveLength(1);
+    expect(db.audits.map((audit) => JSON.parse(String(audit.metadata_json)))).toEqual([
+      { scope: "SV_CDE", types: ["dteReceipt", "dteInvalidation"] }
+    ]);
 
     const freshGet = await worker.fetch(
       new Request("https://example.org/api/settings/email-templates", {

@@ -5,9 +5,10 @@ import {
   serializeAuditContext,
   type AuditRequestContext
 } from "../../services/requestContext";
-import type {
-  EmailTemplateScope,
-  EmailTemplateSettings
+import {
+  EMAIL_TEMPLATE_DEFINITIONS,
+  type EmailTemplateScope,
+  type EmailTemplateSettings
 } from "../../services/emailTemplates";
 
 export class EmailTemplateSnapshotConflictError extends Error {
@@ -46,7 +47,9 @@ export async function saveScopedEmailTemplates(
 ): Promise<string> {
   const updatedAt = nowIso();
   const patchJson = JSON.stringify(input.patch);
-  const templateTypes = Object.keys(input.patch);
+  const templateTypes = EMAIL_TEMPLATE_DEFINITIONS
+    .filter((definition) => definition.scope === input.scope)
+    .map((definition) => definition.type);
   const settingsMutation = db
     .prepare(
       `INSERT INTO app_settings (key, value, updated_by, updated_at)
