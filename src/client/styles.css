@@ -4468,12 +4468,16 @@ pre {
 }
 
 .donar-stripe-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
   min-height: 360px;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 12px;
   color: #595959;
+  background: #ffffff;
   font-size: 14px;
   text-align: center;
 }
@@ -4497,6 +4501,7 @@ pre {
 }
 
 .donar-stripe-embedded {
+  position: relative;
   display: grid;
   gap: 16px;
   min-height: 360px;

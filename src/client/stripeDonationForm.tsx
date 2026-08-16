@@ -1,7 +1,7 @@
 import { EmbeddedCheckout, EmbeddedCheckoutProvider } from "@stripe/react-stripe-js";
 import type { StripeEmbeddedCheckoutAnalyticsEventUnion } from "@stripe/stripe-js";
 import { loadStripe } from "@stripe/stripe-js/pure";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 export interface StripeCheckoutClientConfig {
   sessionId: string;
@@ -80,6 +80,7 @@ function LiveStripeDonationForm({
   config: StripeCheckoutClientConfig;
   onReady: () => void;
 }) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const stripePromise = useMemo(() => loadStripe(config.publishableKey), [config.publishableKey]);
   const onAnalyticsEvent = useCallback((event: StripeEmbeddedCheckoutAnalyticsEventUnion) => {
     if (event.eventType === "checkoutRendered") {
@@ -91,8 +92,30 @@ function LiveStripeDonationForm({
     onAnalyticsEvent
   }), [config.clientSecret, onAnalyticsEvent]);
 
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    let observer: MutationObserver | undefined;
+    const detectPublishedFrameHeight = () => {
+      const frame = root.querySelector<HTMLIFrameElement>(".donar-stripe-frame-mount iframe");
+      const height = frame?.style.getPropertyValue("height").trim() ?? "";
+      if (!/^\d+(?:\.\d+)?px$/.test(height) || Number.parseFloat(height) <= 0) return;
+      observer?.disconnect();
+      onReady();
+    };
+    observer = new MutationObserver(detectPublishedFrameHeight);
+    observer.observe(root, {
+      attributes: true,
+      attributeFilter: ["style"],
+      childList: true,
+      subtree: true
+    });
+    detectPublishedFrameHeight();
+    return () => observer?.disconnect();
+  }, [onReady]);
+
   return (
-    <div className="donar-stripe-live">
+    <div ref={rootRef} className="donar-stripe-live">
       <EmbeddedCheckoutProvider stripe={stripePromise} options={options}>
         <EmbeddedCheckout className="donar-stripe-frame-mount" />
       </EmbeddedCheckoutProvider>

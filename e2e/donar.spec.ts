@@ -119,6 +119,9 @@ window.Stripe = function () {
           timestamp: Math.floor(Date.now() / 1000)
         });
       };
+      window.__setStripeFrameHeight = function (height) {
+        if (mountedFrame) mountedFrame.style.setProperty("height", height + "px", "important");
+      };
       return Promise.resolve({
         mount: function (node) {
           mountedFrame = document.createElement("iframe");
@@ -1085,7 +1088,7 @@ test("provider preconnects begin only after the U.S. lane is selected", async ({
   expect(stripeSessionRequests).toBe(0);
 });
 
-test("Stripe keeps one loader through a shell iframe until Checkout is rendered", async ({ page }) => {
+test("Stripe overlays one loader through a shell iframe until Checkout is rendered", async ({ page }) => {
   const sessionDelay = await delayRoute(page, "**/api/donations/stripe/checkout", {
     status: 201,
     contentType: "application/json",
@@ -1123,6 +1126,14 @@ test("Stripe keeps one loader through a shell iframe until Checkout is rendered"
   await expect(loader).toBeVisible();
   await expect(page.getByRole("status")).toHaveCount(1);
   expect(await isRememberedNode(loader, "stripe-loader")).toBe(true);
+  const stripeFrame = page.getByTitle("Formulario seguro de Stripe");
+  const [loaderBox, loadingFrameBox] = await Promise.all([
+    loader.boundingBox(),
+    stripeFrame.boundingBox()
+  ]);
+  expect(loaderBox).not.toBeNull();
+  expect(loadingFrameBox).not.toBeNull();
+  expect(loadingFrameBox!.y).toBeLessThan(loaderBox!.y + loaderBox!.height);
   expect(sessionDelay.requestCount()).toBe(1);
   expect(await page.evaluate(() => (
     window as Window & { __stripeEmbeddedCheckoutCreates?: number }
@@ -1139,10 +1150,54 @@ test("Stripe keeps one loader through a shell iframe until Checkout is rendered"
     window as Window & { __emitStripeAnalyticsEvent: (eventType: string) => void }
   ).__emitStripeAnalyticsEvent("checkoutRendered"));
   await expect(loader).toHaveCount(0);
+  const readyFrameBox = await stripeFrame.boundingBox();
+  expect(readyFrameBox).not.toBeNull();
+  expect(Math.abs(readyFrameBox!.y - loadingFrameBox!.y)).toBeLessThanOrEqual(1);
   expect(sessionDelay.requestCount()).toBe(1);
   expect(await page.evaluate(() => (
     window as Window & { __stripeEmbeddedCheckoutCreates?: number }
   ).__stripeEmbeddedCheckoutCreates)).toBe(1);
+});
+
+test("Stripe clears its loader when the rendered frame publishes a height without analytics", async ({ page }) => {
+  await page.route("**/api/donations/stripe/checkout", (route) => route.fulfill({
+    status: 201,
+    contentType: "application/json",
+    body: JSON.stringify({
+      sessionId: "cs_test_height_ready_fixture",
+      clientSecret: "cs_test_height_ready_fixture_secret_mock",
+      publishableKey: "pk_test_mock",
+      mock: false
+    })
+  }));
+  await page.route("https://js.stripe.com/**", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/javascript",
+    body: MOCK_STRIPE_JS
+  }));
+  await page.route("https://checkout.stripe.test/embedded-delayed", (route) => route.fulfill({
+    status: 200,
+    contentType: "text/html; charset=utf-8",
+    body: "<html lang=\"es\"><body><div id=\"stripe-shell\"></div></body></html>"
+  }));
+
+  await enterStripeHandoff(page);
+  const loader = page.locator('.donar-stripe-loading[role="status"]');
+  const stripeFrame = page.getByTitle("Formulario seguro de Stripe");
+  await expect(page.frameLocator('iframe[title="Formulario seguro de Stripe"]')
+    .locator("#stripe-shell")).toHaveCount(1);
+  await expect(loader).toBeVisible();
+  const loadingFrameBox = await stripeFrame.boundingBox();
+  expect(loadingFrameBox).not.toBeNull();
+
+  await page.evaluate(() => (
+    window as Window & { __setStripeFrameHeight: (height: number) => void }
+  ).__setStripeFrameHeight(904));
+
+  await expect(loader).toHaveCount(0);
+  const readyFrameBox = await stripeFrame.boundingBox();
+  expect(readyFrameBox).not.toBeNull();
+  expect(Math.abs(readyFrameBox!.y - loadingFrameBox!.y)).toBeLessThanOrEqual(1);
 });
 
 test("Givebutter keeps a truthful reduced-motion loader until its bounded escape hatch", async ({ page }) => {
