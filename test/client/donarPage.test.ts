@@ -29,6 +29,7 @@ import {
   STRIPE_MONTHLY_LABEL,
   STRIPE_US_COUNTRY_CODE,
   stripeIntro,
+  stripeIntroSegments,
   DONAR_CHANGE_DOOR_LABEL,
   DONAR_DOOR_EEUU_DESC,
   DONAR_DOOR_EEUU_LABEL,
@@ -1162,7 +1163,10 @@ describe("Stripe donar page source contract", () => {
 
   it("shows the production 501c3 explanation and mounts the Stripe form in place", () => {
     const intro = stripeIntro("Iglesia Ejemplo Central");
-    expect(donarSource).toContain("stripeIntro(branding.organizationName)");
+    expect(donarSource).toContain("stripeIntroSegments(branding.organizationName)");
+    expect(stripeIntroSegments("Iglesia Ejemplo Central").beneficiary).toContain(
+      "Iglesia Ejemplo Central en El Salvador"
+    );
     expect(intro).toContain("Friends of Iglesia Ejemplo Central (501c3)");
     // The US door funds the SAME church — the intro says so, never implying a
     // different beneficiary.

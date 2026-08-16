@@ -1,7 +1,7 @@
 import { markDonorBrandingSettled } from "./donorReady";
 import svFlag from "./assets/sv-flag.svg";
 import { GIVEBUTTER_ICON_DATA_URI } from "./assets/givebutterIcon";
-import { AlertCircle, CheckCircle2, ShieldCheck } from "lucide-react";
+import { AlertCircle, CheckCircle2, ShieldCheck, SquareArrowOutUpRight } from "lucide-react";
 import { type FormEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   DONAR_ALL_COUNTRIES_GROUP_LABEL,
@@ -68,7 +68,7 @@ import {
   givebutterEmbedUrl,
   givebutterHostedUrl,
   stripeCheckoutBody,
-  stripeIntro,
+  stripeIntroSegments,
   graciasDisplayFromSearch,
   isUsDonation,
   routeParamForDoor,
@@ -1004,6 +1004,7 @@ export function DonarPage() {
       </button>
     </div>
   );
+  const stripeIntroduction = stripeIntroSegments(branding.organizationName);
 
   return (
     <div className="donar-screen">
@@ -1345,13 +1346,14 @@ export function DonarPage() {
         {/* US Stripe step — our Spanish composition stays on this page while Stripe
             owns the embedded form and dynamically renders eligible methods. */}
         {step === 2 && usDonation && (
-          <div className="donar-stripe donar-step">
+          <div className={`donar-stripe donar-step${usProvider === "stripe" && givebutterAvailable ? " donar-stripe-has-provider-dock" : ""}`}>
             {summary}
             <div className="donar-handoff">
               {/* tabIndex={-1} makes this programmatically focusable without adding a
                   tab stop: it is the landing point when the donor returns to Stripe. */}
               <p className="donar-intro" ref={stripeIntroRef} tabIndex={-1}>
-                {stripeIntro(branding.organizationName)}
+                {stripeIntroduction.beneficiary}<span className="donar-intro-flag"><DonarFlagBadge country="sv" /></span>.{" "}
+                {stripeIntroduction.processing}
               </p>
               {/* One persistent live region for the whole step: the surface swap is
                   silent otherwise, since each switch only unmounts and mounts markup. */}
@@ -1373,25 +1375,28 @@ export function DonarPage() {
                       Spanish form and the tax receipt, so it owns the "understand → pay"
                       reading flow. Givebutter is the way out of it, not the way in. */}
                   {givebutterAvailable && (
-                    <button
-                      type="button"
-                      className="donar-provider-choice"
-                      onClick={() => {
-                        usProviderSwitchedRef.current = true;
-                        setUsProvider("givebutter");
-                      }}
-                    >
-                      <img
-                        src={GIVEBUTTER_ICON_DATA_URI}
-                        alt=""
-                        aria-hidden="true"
-                      />
-                      <span className="donar-provider-choice-copy">
-                        <strong>{stripeGiftType === "TITHE" ? "Diezmar con Givebutter" : "Ofrendar con Givebutter"}</strong>
-                        <small>(Con formulario en inglés)</small>
-                      </span>
-                      <span className="donar-provider-choice-arrow" aria-hidden="true">→</span>
-                    </button>
+                    <div className="donar-provider-dock">
+                      <button
+                        type="button"
+                        className="donar-provider-choice"
+                        onClick={() => {
+                          usProviderSwitchedRef.current = true;
+                          setUsProvider("givebutter");
+                        }}
+                      >
+                        <img
+                          src={GIVEBUTTER_ICON_DATA_URI}
+                          alt=""
+                          aria-hidden="true"
+                        />
+                        <span className="donar-provider-choice-copy">
+                          <strong>{stripeGiftType === "TITHE" ? "Diezmar con Givebutter" : "Ofrendar con Givebutter"}</strong>
+                          <small>(Con formulario en inglés)</small>
+                        </span>
+                        <span className="donar-provider-choice-arrow" aria-hidden="true">→</span>
+                      </button>
+                      <DonarSupport supportEmail={branding.supportEmail} />
+                    </div>
                   )}
                 </>
               )}
@@ -1409,14 +1414,14 @@ export function DonarPage() {
                     <span className="donar-provider-stripe-mark" aria-hidden="true" />
                     <span className="donar-provider-choice-copy">
                       <strong>Volver a Stripe</strong>
-                      <small>Formulario en español</small>
+                      <small>(Con formulario en español)</small>
                     </span>
                     <span className="donar-provider-choice-arrow" aria-hidden="true">←</span>
                   </button>
                   <p className="donar-givebutter-confirmation">
                     Confirme en Givebutter el tipo de entrega, el monto y la frecuencia antes de continuar; estos datos se envían solo como valores iniciales.
                   </p>
-                  {/* The single escape hatch stays above the 760px frame: a donor staring
+                  {/* The single escape hatch stays above the bounded frame: a donor staring
                       at a blank embed must not have to scroll past it to find the way out.
                       It uses the same quiet, single-line link treatment as Wompi. */}
                   <a
@@ -1424,13 +1429,15 @@ export function DonarPage() {
                     href={givebutterHostedPageUrl}
                     target="_blank"
                     rel="noopener noreferrer"
+                    aria-label="¿Problemas con el formulario? Abrir Givebutter en una pestaña nueva"
                   >
-                    ¿Problemas con el formulario? Abrir Givebutter
+                    <span>¿Problemas con el formulario? Abrir Givebutter</span>
+                    <SquareArrowOutUpRight size={14} aria-hidden="true" focusable="false" />
                   </a>
                   {/* The opaque overlay is positioned against the frame's own box. It clears
                       once the budget elapses so a frame whose host never answers does not
                       keep saying "preparando" beside the explicit fallback link. */}
-                  <div className="donar-givebutter-frame-area">
+                  <div className="donar-givebutter-frame-area donar-provider-viewport">
                     {!givebutterFrameLoaded && !givebutterFrameDelayed && (
                       <div className="donar-givebutter-loading" role="status">
                         <span className="donar-spinner" aria-hidden="true" />
@@ -1500,7 +1507,9 @@ export function DonarPage() {
           </div>
         )}
 
-        <DonarSupport supportEmail={branding.supportEmail} />
+        {!(step === 2 && usDonation && usProvider === "stripe" && givebutterAvailable) && (
+          <DonarSupport supportEmail={branding.supportEmail} />
+        )}
       </div>
     </div>
   );

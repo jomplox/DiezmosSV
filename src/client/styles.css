@@ -3653,6 +3653,12 @@ pre {
   vertical-align: -0.08em;
 }
 
+.donar-intro-flag {
+  display: inline-flex;
+  margin-left: 0.3em;
+  vertical-align: -0.08em;
+}
+
 /* Step label under the brand title on the working steps (Paso ≥2): a small
    caps-tracked Gotham line ("SUS DATOS", "SU ENTREGA") that orients without
    competing with the ceremonial header. #767676 clears WCAG AA (4.54:1). */
@@ -4150,6 +4156,17 @@ pre {
   font-size: 17px;
 }
 
+.donar-provider-dock {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.donar-provider-dock .donar-support {
+  margin: 0;
+}
+
 .donar-givebutter-surface {
   display: grid;
   gap: 12px;
@@ -4172,9 +4189,15 @@ pre {
   width: min(100%, 440px);
 }
 
+.donar-provider-viewport {
+  height: clamp(480px, 62vh, 620px);
+  height: clamp(480px, 62svh, 620px);
+}
+
 .donar-givebutter-frame {
-  width: min(100%, 440px);
-  min-height: 760px;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
   border: 0;
   background: #ffffff;
 }
@@ -4196,6 +4219,9 @@ pre {
 }
 
 .donar-givebutter-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   color: #555555;
   font-size: 12px;
   text-align: center;
@@ -4503,6 +4529,36 @@ pre {
   display: grid;
   gap: 16px;
   min-height: 360px;
+}
+
+.donar-stripe-embedded.donar-provider-viewport {
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+}
+
+.donar-stripe-embedded:focus {
+  outline: 2px solid #000000;
+  outline-offset: -3px;
+}
+
+@media (max-width: 519px) {
+  .donar-stripe-has-provider-dock {
+    padding-bottom: calc(112px + env(safe-area-inset-bottom));
+  }
+
+  .donar-provider-dock {
+    position: fixed;
+    z-index: 20;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    box-sizing: border-box;
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+    border-top: 1px solid #e5e5e5;
+    background: rgba(255, 255, 255, 0.98);
+    box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.08);
+  }
 }
 
 .donar-stripe-disclosure {

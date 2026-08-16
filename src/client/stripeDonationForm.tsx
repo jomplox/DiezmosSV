@@ -59,7 +59,12 @@ export function StripeDonationForm({ session, onRetry }: StripeDonationFormProps
   }
 
   return (
-    <div className="donar-hosted-surface donar-stripe-embedded">
+    <div
+      className="donar-hosted-surface donar-stripe-embedded donar-provider-viewport"
+      role="region"
+      aria-label="Formulario seguro de Stripe"
+      tabIndex={0}
+    >
       {!embeddedReady && (
         <div className="donar-stripe-loading" role="status">
           <span className="donar-spinner" aria-hidden="true" />

@@ -895,6 +895,10 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   await expect(page.locator(".donar-intro")).toHaveText(
     `Su diezmo u ofrenda apoya a ${BRANDING_DISPLAY_NAME} en El Salvador. Se procesa en EE. UU. a través de Friends of ${BRANDING_DISPLAY_NAME} (501c3) y recibirá un recibo deducible de impuestos en EE. UU. por correo.`
   );
+  const introFlag = page.locator(".donar-intro .donar-flag");
+  await expect(introFlag).toBeVisible();
+  await expect(introFlag).toHaveAttribute("aria-hidden", "true");
+  expect(await introFlag.evaluate((element) => element.tagName)).toBe("IMG");
   await expect(
     page.getByText("Stripe mostrará en español las opciones disponibles para usted de forma segura.")
   ).toHaveCount(0);
@@ -986,6 +990,12 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   // that the render budget elapsed without changing the donor-visible help text.
   const givebutterHatch = page.locator(".donar-givebutter-hint");
   await expect(givebutterHatch).toHaveCount(1);
+  await expect(page.getByRole("link", {
+    name: "¿Problemas con el formulario? Abrir Givebutter en una pestaña nueva"
+  })).toBeVisible();
+  const externalLinkIcon = givebutterHatch.locator(".lucide-square-arrow-out-up-right");
+  await expect(externalLinkIcon).toBeVisible();
+  await expect(externalLinkIcon).toHaveAttribute("aria-hidden", "true");
   await expect(page.locator('.donar-givebutter-surface a[href^="https://givebutter.com/"]')).toHaveCount(1);
   const givebutterHostedPage = new URL(await givebutterHatch.getAttribute("href") ?? "");
   expect(givebutterHostedPage.searchParams.get("amount")).toBe("100");
@@ -998,6 +1008,12 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   expect(hatchBox).not.toBeNull();
   expect(frameBox).not.toBeNull();
   expect(hatchBox!.y).toBeLessThan(frameBox!.y);
+  const givebutterSupport = page.locator(".donar-support");
+  await expect(givebutterSupport).toHaveCount(1);
+  const givebutterSupportBox = await givebutterSupport.boundingBox();
+  expect(givebutterSupportBox).not.toBeNull();
+  expect(givebutterSupportBox!.y).toBeGreaterThanOrEqual(frameBox!.y + frameBox!.height);
+  expect(givebutterSupportBox!.y - (frameBox!.y + frameBox!.height)).toBeLessThanOrEqual(32);
   const givebutterHelpText = "¿Problemas con el formulario? Abrir Givebutter";
   await expect(givebutterHatch).toHaveText(givebutterHelpText);
   await expect(givebutterHatch).toHaveClass(/\bdonar-givebutter-fallback\b/, {
@@ -1020,7 +1036,9 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
     textDecorationLine: "underline",
     whiteSpace: "nowrap"
   });
-  const stripeReturn = page.getByRole("button", { name: /Volver a Stripe.*Formulario en español/i });
+  const stripeReturn = page.getByRole("button", {
+    name: /^Volver a Stripe\s+\(Con formulario en español\)$/i
+  });
   await expect(stripeReturn.locator(".donar-provider-stripe-mark")).toBeVisible();
   await stripeReturn.click();
   await expect(givebutterFrame).toHaveCount(0);
@@ -1043,6 +1061,27 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
     return { borderWidth: style.borderTopWidth, borderRadius: style.borderRadius };
   })).toEqual({ borderWidth: "0px", borderRadius: "0px" });
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(mobileViewport.width);
+  const mobileProviderDock = page.locator(".donar-provider-dock");
+  await expect(mobileProviderDock).toBeVisible();
+  await expect(mobileProviderDock.getByRole("button", {
+    name: /^Ofrendar con Givebutter\s+\(Con formulario en inglés\)$/i
+  })).toBeVisible();
+  await expect(mobileProviderDock.getByText("¿Dudas o necesita ayuda?", { exact: false })).toBeVisible();
+  await expect(page.locator(".donar-support")).toHaveCount(1);
+  const mobileDockLayout = await mobileProviderDock.evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    return {
+      position: getComputedStyle(element).position,
+      bottom: Math.round(window.innerHeight - box.bottom),
+      height: Math.round(box.height)
+    };
+  });
+  expect(mobileDockLayout.position).toBe("fixed");
+  expect(Math.abs(mobileDockLayout.bottom)).toBeLessThanOrEqual(1);
+  expect(mobileDockLayout.height).toBeGreaterThanOrEqual(80);
+  expect(await page.locator(".donar-stripe-has-provider-dock").evaluate((element) => (
+    Number.parseFloat(getComputedStyle(element).paddingBottom)
+  ))).toBeGreaterThanOrEqual(mobileDockLayout.height);
 
   const desktopViewport = { width: 671, height: 944 };
   await page.setViewportSize(desktopViewport);
@@ -1056,6 +1095,7 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
     desktopCardBox!.x + desktopCardBox!.width - 1,
     1
   );
+  expect(await mobileProviderDock.evaluate((element) => getComputedStyle(element).position)).toBe("static");
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(desktopViewport.width);
 
   expect(checkoutBodies).toHaveLength(3);
@@ -1198,6 +1238,38 @@ test("Stripe clears its loader when the rendered frame publishes a height withou
   const readyFrameBox = await stripeFrame.boundingBox();
   expect(readyFrameBox).not.toBeNull();
   expect(Math.abs(readyFrameBox!.y - loadingFrameBox!.y)).toBeLessThanOrEqual(1);
+
+  await page.setViewportSize({ width: 393, height: 852 });
+  const stripeViewport = page.getByRole("region", { name: "Formulario seguro de Stripe" });
+  await expect(stripeViewport).toBeVisible();
+  const viewportMetrics = await stripeViewport.evaluate((element) => {
+    const style = getComputedStyle(element);
+    const before = element.scrollTop;
+    element.scrollTop = 120;
+    return {
+      overflowY: style.overflowY,
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      before,
+      after: element.scrollTop
+    };
+  });
+  expect(viewportMetrics.overflowY).toBe("auto");
+  expect(viewportMetrics.clientHeight).toBeGreaterThanOrEqual(480);
+  expect(viewportMetrics.clientHeight).toBeLessThanOrEqual(620);
+  expect(viewportMetrics.scrollHeight).toBeGreaterThan(viewportMetrics.clientHeight);
+  expect(viewportMetrics.after).toBeGreaterThan(viewportMetrics.before);
+  await stripeViewport.evaluate((element) => { element.scrollTop = 0; });
+  await stripeViewport.focus();
+  await expect(stripeViewport).toBeFocused();
+  const focusOutline = await stripeViewport.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { style: style.outlineStyle, width: Number.parseFloat(style.outlineWidth) };
+  });
+  expect(focusOutline.style).not.toBe("none");
+  expect(focusOutline.width).toBeGreaterThanOrEqual(2);
+  await page.keyboard.press("PageDown");
+  await expect.poll(() => stripeViewport.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
 });
 
 test("Givebutter keeps a truthful reduced-motion loader until its bounded escape hatch", async ({ page }) => {
@@ -1241,6 +1313,8 @@ test("Givebutter keeps a truthful reduced-motion loader until its bounded escape
   ]);
   expect(loaderBox).not.toBeNull();
   expect(loadingFrameBox).not.toBeNull();
+  expect(loadingFrameBox!.height).toBeGreaterThanOrEqual(480);
+  expect(loadingFrameBox!.height).toBeLessThanOrEqual(620);
   expect(Math.abs(loaderBox!.x - loadingFrameBox!.x)).toBeLessThanOrEqual(1);
   expect(Math.abs(loaderBox!.y - loadingFrameBox!.y)).toBeLessThanOrEqual(1);
   expect(Math.abs(loaderBox!.width - loadingFrameBox!.width)).toBeLessThanOrEqual(1);

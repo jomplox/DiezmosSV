@@ -22,6 +22,7 @@ import {
   isStripeResultPath,
   stripeCheckoutBody,
   stripeIntro,
+  stripeIntroSegments,
   stripeSessionIdFromSearch,
   stripeSessionPath
 } from "../../src/client/donation";
@@ -99,6 +100,14 @@ describe("Stripe donor browser contract", () => {
     expect(stripeIntro(null)).toBe(
       "Su diezmo u ofrenda apoya a esta iglesia en El Salvador. Se procesa en EE. UU. a través de una organización estadounidense 501c3 y recibirá un recibo deducible de impuestos en EE. UU. por correo."
     );
+    expect(stripeIntroSegments("Iglesia Ejemplo Central")).toEqual({
+      beneficiary: "Su diezmo u ofrenda apoya a Iglesia Ejemplo Central en El Salvador",
+      processing: "Se procesa en EE. UU. a través de Friends of Iglesia Ejemplo Central (501c3) y recibirá un recibo deducible de impuestos en EE. UU. por correo."
+    });
+    expect(stripeIntroSegments(null)).toEqual({
+      beneficiary: "Su diezmo u ofrenda apoya a esta iglesia en El Salvador",
+      processing: "Se procesa en EE. UU. a través de una organización estadounidense 501c3 y recibirá un recibo deducible de impuestos en EE. UU. por correo."
+    });
   });
 
   it("maps each gift type to its configured Givebutter fund with explicit supported prefills", () => {
