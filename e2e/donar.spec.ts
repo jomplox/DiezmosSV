@@ -1475,6 +1475,23 @@ test("Givebutter keeps a truthful reduced-motion loader until its bounded escape
   const spinner = loader.locator(".donar-spinner");
   await expect(spinner).toBeVisible();
   await expect(spinner).toHaveCSS("animation-name", "none");
+  const desktopViewport = page.viewportSize();
+  if (!desktopViewport) throw new Error("Playwright viewport is unavailable");
+  await page.setViewportSize({ width: 393, height: 852 });
+  const loadingMessage = loader.locator(":scope > span").nth(1);
+  const visualLoadingGap = await loadingMessage.evaluate((element) => {
+    const spinner = element.previousElementSibling;
+    const text = element.firstChild;
+    if (!spinner || !text) throw new Error("Givebutter loader content is incomplete");
+    const range = document.createRange();
+    range.selectNodeContents(text);
+    const firstLine = range.getClientRects()[0];
+    if (!firstLine) throw new Error("Givebutter loader message did not render");
+    return firstLine.left - spinner.getBoundingClientRect().right;
+  });
+  expect(visualLoadingGap).toBeGreaterThanOrEqual(6);
+  expect(visualLoadingGap).toBeLessThanOrEqual(16);
+  await page.setViewportSize(desktopViewport);
   expect(await loader.evaluate((element) => getComputedStyle(element).backgroundColor))
     .toBe("rgb(255, 255, 255)");
   const [loaderBox, loadingFrameBox] = await Promise.all([
