@@ -4164,8 +4164,8 @@ pre {
   text-align: center;
 }
 
-/* Positioning context for the loading placeholder: the frame's own box, so the
-   placeholder cannot ride up over the controls when the escape hatch is promoted. */
+/* Positioning context for the loading overlay: it covers the frame's own box
+   without reserving extra space or moving the provider content when removed. */
 .donar-givebutter-frame-area {
   position: relative;
   display: grid;
@@ -4181,20 +4181,18 @@ pre {
 
 .donar-givebutter-loading {
   position: absolute;
-  top: 24px;
-  left: 50%;
-  transform: translateX(-50%);
+  inset: 0;
+  z-index: 1;
   margin: 0;
-  padding: 0 16px;
-  width: 100%;
+  padding: 24px 16px;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 10px;
   color: #5d5d5d;
+  background: #ffffff;
   font-size: 14px;
   text-align: center;
-  pointer-events: none;
 }
 
 .donar-givebutter-hint {

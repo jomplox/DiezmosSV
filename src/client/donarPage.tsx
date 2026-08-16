@@ -1427,7 +1427,7 @@ export function DonarPage() {
                   >
                     ¿Problemas con el formulario? Abrir Givebutter
                   </a>
-                  {/* The placeholder is positioned against the frame's own box. It clears
+                  {/* The opaque overlay is positioned against the frame's own box. It clears
                       once the budget elapses so a frame whose host never answers does not
                       keep saying "preparando" beside the explicit fallback link. */}
                   <div className="donar-givebutter-frame-area">

@@ -1225,11 +1225,32 @@ test("Givebutter keeps a truthful reduced-motion loader until its bounded escape
   await givebutterDelay.held;
 
   const loader = page.locator('.donar-givebutter-loading[role="status"]');
+  const givebutterFrame = page.getByTitle("Formulario de donación Givebutter (en inglés)");
   await expect(loader).toHaveCount(1);
   await expect(loader).toContainText("Preparando su formulario seguro con Givebutter…");
   await expect(page.getByRole("status")).toHaveCount(1);
   await rememberNode(loader, "givebutter-loader");
-  await expect(loader.locator(".donar-spinner")).toHaveCSS("animation-name", "none");
+  const spinner = loader.locator(".donar-spinner");
+  await expect(spinner).toBeVisible();
+  await expect(spinner).toHaveCSS("animation-name", "none");
+  expect(await loader.evaluate((element) => getComputedStyle(element).backgroundColor))
+    .toBe("rgb(255, 255, 255)");
+  const [loaderBox, loadingFrameBox] = await Promise.all([
+    loader.boundingBox(),
+    givebutterFrame.boundingBox()
+  ]);
+  expect(loaderBox).not.toBeNull();
+  expect(loadingFrameBox).not.toBeNull();
+  expect(Math.abs(loaderBox!.x - loadingFrameBox!.x)).toBeLessThanOrEqual(1);
+  expect(Math.abs(loaderBox!.y - loadingFrameBox!.y)).toBeLessThanOrEqual(1);
+  expect(Math.abs(loaderBox!.width - loadingFrameBox!.width)).toBeLessThanOrEqual(1);
+  expect(Math.abs(loaderBox!.height - loadingFrameBox!.height)).toBeLessThanOrEqual(1);
+  expect(await page.evaluate(({ x, y }) => (
+    document.elementFromPoint(x, y)?.closest(".donar-givebutter-loading") !== null
+  ), {
+    x: loadingFrameBox!.x + loadingFrameBox!.width / 2,
+    y: loadingFrameBox!.y + loadingFrameBox!.height / 2
+  })).toBe(true);
   await page.waitForTimeout(500);
   expect(await isRememberedNode(loader, "givebutter-loader")).toBe(true);
 
@@ -1239,6 +1260,9 @@ test("Givebutter keeps a truthful reduced-motion loader until its bounded escape
   });
   await expect(loader).toHaveCount(0);
   await expect(escapeHatch).toHaveText("¿Problemas con el formulario? Abrir Givebutter");
+  const readyFrameBox = await givebutterFrame.boundingBox();
+  expect(readyFrameBox).not.toBeNull();
+  expect(Math.abs(readyFrameBox!.y - loadingFrameBox!.y)).toBeLessThanOrEqual(1);
 
   givebutterDelay.release();
 });
