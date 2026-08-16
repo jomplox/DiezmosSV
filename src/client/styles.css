@@ -4167,18 +4167,14 @@ pre {
   margin: 0;
 }
 
+.donar-provider-panel[hidden] {
+  display: none;
+}
+
 .donar-givebutter-surface {
   display: grid;
   gap: 12px;
   justify-items: center;
-}
-
-.donar-givebutter-confirmation {
-  width: min(100%, 440px);
-  color: #555555;
-  font-size: 13px;
-  line-height: 1.45;
-  text-align: center;
 }
 
 /* Positioning context for the loading overlay: it covers the frame's own box

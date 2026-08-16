@@ -449,6 +449,10 @@ export function DonarPage() {
   const [monthly, setMonthly] = useState(false);
   const [stripeGiftType, setStripeGiftType] = useState<StripeGiftType>("TITHE");
   const [usProvider, setUsProvider] = useState<"stripe" | "givebutter">("stripe");
+  // Givebutter stays absent until the donor selects it once. After that first
+  // activation both provider surfaces remain mounted and switching only changes
+  // visibility, preserving each third-party form's in-progress state.
+  const [givebutterMounted, setGivebutterMounted] = useState(false);
   // Two independent facts about Givebutter's embed, deliberately not one status:
   // "loaded" only says the frame fired onLoad (it hides the loading placeholder), and
   // "delayed" says the render budget elapsed (it also hides that placeholder). Keeping
@@ -474,11 +478,11 @@ export function DonarPage() {
   // summary's Editar control on an embedded handoff step.
   const heroInputRef = useRef<HTMLInputElement | null>(null);
   const summaryEditRef = useRef<HTMLButtonElement | null>(null);
-  // The two US provider switches unmount the very button that was clicked, so focus
-  // has to be handed to the TOP of the surface that replaces it. The flag keeps the
-  // initial mount of Paso 2 alone — only a real switch moves focus.
+  // The provider-switch button changes identity after activation, so focus is handed
+  // to the top of the newly visible surface. The flag keeps the initial Paso 2 mount
+  // alone — only a real switch moves focus.
   const stripeIntroRef = useRef<HTMLParagraphElement | null>(null);
-  const givebutterIntroRef = useRef<HTMLParagraphElement | null>(null);
+  const givebutterFallbackRef = useRef<HTMLAnchorElement | null>(null);
   const usProviderSwitchedRef = useRef(false);
 
   // When to render the Stripe wizard instead of the SV fiscal steps: the EE.
@@ -523,6 +527,7 @@ export function DonarPage() {
     setMonthly(false);
     setStripeGiftType("TITHE");
     setUsProvider("stripe");
+    setGivebutterMounted(false);
     stripeAttemptRef.current = null;
     setStripeSessionAttempt(null);
     setStep(1);
@@ -628,18 +633,15 @@ export function DonarPage() {
     return () => created.forEach((link) => link.remove());
   }, [door]);
 
-  // Givebutter's embed is mounted only after the donor explicitly selects it, and this
-  // timer is authoritative: the render budget clears the loading placeholder whether
-  // or not the frame reported load. A cross-origin iframe fires load for the
-  // browser's own error documents too (deleted campaign, blocked host, dropped
-  // network), so load is never proof that the embed rendered and must not suppress the
-  // stable hosted-page escape hatch. Switching back to Stripe cancels this timer and
-  // removes the iframe.
-  // Layout effect, not a passive one: the reset has to commit before paint, or a second
-  // entry (Givebutter → Stripe → Givebutter) paints one frame carrying the previous
-  // session's delayed class and no placeholder before resetting the loading state.
+  // Givebutter's embed is mounted only after the donor explicitly selects it. This
+  // timer is authoritative for that mount: the render budget clears the loading
+  // placeholder whether or not the frame reported load. A cross-origin iframe fires
+  // load for the browser's own error documents too, so load is never proof that the
+  // embed rendered and must not suppress the stable hosted-page escape hatch.
+  // Provider switches deliberately do not restart this lifecycle; the iframe remains
+  // mounted and retains both its document and any donor input.
   useLayoutEffect(() => {
-    if (!usDonation || step !== 2 || usProvider !== "givebutter" || !givebutterFrameUrl) {
+    if (!usDonation || step !== 2 || !givebutterMounted || !givebutterFrameUrl) {
       return;
     }
     let cancelled = false;
@@ -654,7 +656,7 @@ export function DonarPage() {
       cancelled = true;
       window.clearTimeout(timeout);
     };
-  }, [givebutterFrameUrl, step, usDonation, usProvider]);
+  }, [givebutterFrameUrl, givebutterMounted, step, usDonation]);
 
   // A provider switch unmounts the button that was just activated; without this,
   // focus falls to <body> and the donor loses their place mid-donation.
@@ -665,7 +667,7 @@ export function DonarPage() {
     usProviderSwitchedRef.current = false;
     // Each provider opens at its own explanatory text rather than the alternative
     // control below the form, so focus never scrolls past the surface just requested.
-    const target = usProvider === "givebutter" ? givebutterIntroRef.current : stripeIntroRef.current;
+    const target = usProvider === "givebutter" ? givebutterFallbackRef.current : stripeIntroRef.current;
     target?.focus();
   }, [usProvider]);
 
@@ -926,10 +928,12 @@ export function DonarPage() {
     if (door === "sv" && usDonation) {
       setMonthly(false);
       setUsProvider("stripe");
+      setGivebutterMounted(false);
       update({ pais: "" });
       return;
     }
     setUsProvider("stripe");
+    setGivebutterMounted(false);
     setStep(1);
   }
 
@@ -948,6 +952,7 @@ export function DonarPage() {
     }
     setStage("form");
     setUsProvider("stripe");
+    setGivebutterMounted(false);
     setStep(1);
   }
 
@@ -1271,6 +1276,7 @@ export function DonarPage() {
                       window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
                       setStripeGiftType(form.giftType === "OFRENDA" ? "OFFERING" : "TITHE");
                       setUsProvider("stripe");
+                      setGivebutterMounted(false);
                       stripeAttemptRef.current = null;
                       setStripeSessionAttempt(null);
                       update({ foreignResident: false, pais: "" });
@@ -1353,60 +1359,29 @@ export function DonarPage() {
                 {stripeIntroduction.beneficiary}<span className="donar-intro-flag"><DonarFlagBadge country="sv" /></span>.{" "}
                 {stripeIntroduction.processing}
               </p>
-              {/* One persistent live region for the whole step: the surface swap is
-                  silent otherwise, since each switch only unmounts and mounts markup. */}
+              {/* One persistent live region for the whole step: visibility changes are
+                  silent otherwise because both loaded provider trees remain mounted. */}
               <p className="donar-provider-announcement" aria-live="polite" aria-atomic="true">
                 {usProvider === "givebutter"
                   ? "Formulario de Givebutter, en inglés."
                   : "Formulario de Stripe, en español."}
               </p>
-              {usProvider === "stripe" && (
-                <>
-                  {stripeSessionAttempt && (
-                    <StripeDonationForm
-                      key={stripeSessionAttempt.sequence}
-                      session={stripeSessionAttempt.session}
-                      onRetry={retryStripeSession}
-                    />
-                  )}
-                  {/* The alternative sits BELOW the default form: Stripe carries the
-                      Spanish form and the tax receipt, so it owns the "understand → pay"
-                      reading flow. Givebutter is the way out of it, not the way in. */}
-                  {givebutterAvailable && (
-                    <div className="donar-provider-dock">
-                      <button
-                        type="button"
-                        className="donar-provider-choice"
-                        onClick={() => {
-                          usProviderSwitchedRef.current = true;
-                          setUsProvider("givebutter");
-                        }}
-                      >
-                        <img
-                          src={GIVEBUTTER_ICON_DATA_URI}
-                          alt=""
-                          aria-hidden="true"
-                        />
-                        <span className="donar-provider-choice-copy">
-                          <strong>{stripeGiftType === "TITHE" ? "Diezmar con Givebutter" : "Ofrendar con Givebutter"}</strong>
-                          <small>(Con formulario en inglés)</small>
-                        </span>
-                        <span className="donar-provider-choice-arrow" aria-hidden="true">→</span>
-                      </button>
-                      <DonarSupport supportEmail={branding.supportEmail} />
-                    </div>
-                  )}
-                </>
-              )}
-              {usProvider === "givebutter" && givebutterFrameUrl && givebutterHostedPageUrl && (
-                <div className="donar-givebutter-surface">
-                  <p className="donar-givebutter-confirmation" ref={givebutterIntroRef} tabIndex={-1}>
-                    Confirme en Givebutter el tipo de entrega, el monto y la frecuencia antes de continuar; estos datos se envían solo como valores iniciales.
-                  </p>
+              <div className="donar-provider-panel" hidden={usProvider !== "stripe"}>
+                {stripeSessionAttempt && (
+                  <StripeDonationForm
+                    key={stripeSessionAttempt.sequence}
+                    session={stripeSessionAttempt.session}
+                    onRetry={retryStripeSession}
+                  />
+                )}
+              </div>
+              {givebutterMounted && givebutterFrameUrl && givebutterHostedPageUrl && (
+                <div className="donar-provider-panel donar-givebutter-surface" hidden={usProvider !== "givebutter"}>
                   {/* The single escape hatch stays above the bounded frame: a donor staring
                       at a blank embed must not have to scroll past it to find the way out.
                       It uses the same quiet, single-line link treatment as Wompi. */}
                   <a
+                    ref={givebutterFallbackRef}
                     className={givebutterFrameDelayed ? "link-button donar-givebutter-hint donar-givebutter-fallback" : "link-button donar-givebutter-hint"}
                     href={givebutterHostedPageUrl}
                     target="_blank"
@@ -1438,7 +1413,34 @@ export function DonarPage() {
                       onLoad={() => setGivebutterFrameLoaded(true)}
                     />
                   </div>
-                  <div className="donar-provider-dock">
+                </div>
+              )}
+              {/* The active provider owns one switch control and one support line. The
+                  dock follows the visible form on desktop and stays fixed on mobile. */}
+              {givebutterAvailable && (
+                <div className="donar-provider-dock">
+                  {usProvider === "stripe" ? (
+                    <button
+                      type="button"
+                      className="donar-provider-choice"
+                      onClick={() => {
+                        usProviderSwitchedRef.current = true;
+                        setGivebutterMounted(true);
+                        setUsProvider("givebutter");
+                      }}
+                    >
+                      <img
+                        src={GIVEBUTTER_ICON_DATA_URI}
+                        alt=""
+                        aria-hidden="true"
+                      />
+                      <span className="donar-provider-choice-copy">
+                        <strong>{stripeGiftType === "TITHE" ? "Diezmar con Givebutter" : "Ofrendar con Givebutter"}</strong>
+                        <small>(Con formulario en inglés)</small>
+                      </span>
+                      <span className="donar-provider-choice-arrow" aria-hidden="true">→</span>
+                    </button>
+                  ) : (
                     <button
                       type="button"
                       className="donar-provider-choice donar-provider-choice-stripe"
@@ -1454,8 +1456,8 @@ export function DonarPage() {
                       </span>
                       <span className="donar-provider-choice-arrow" aria-hidden="true">←</span>
                     </button>
-                    <DonarSupport supportEmail={branding.supportEmail} />
-                  </div>
+                  )}
+                  <DonarSupport supportEmail={branding.supportEmail} />
                 </div>
               )}
             </div>

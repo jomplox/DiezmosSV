@@ -1207,24 +1207,6 @@ describe("Stripe donar page source contract", () => {
     expect(frame).not.toContain("referrerPolicy");
   });
 
-  it("renders the Givebutter alternative below the default Stripe form", () => {
-    const branchStart = pageSource.indexOf('{usProvider === "stripe" && (');
-    expect(branchStart).toBeGreaterThan(-1);
-    const branch = pageSource.slice(
-      branchStart,
-      pageSource.indexOf('{usProvider === "givebutter" && (', branchStart)
-    );
-    // Stripe carries the Spanish form and the tax receipt, so it owns the
-    // "understand → pay" flow; the alternative follows it in DOM order.
-    const stripeForm = branch.indexOf("<StripeDonationForm");
-    const givebutterChoice = branch.indexOf("Ofrendar con Givebutter");
-    expect(stripeForm).toBeGreaterThan(-1);
-    expect(givebutterChoice).toBeGreaterThan(stripeForm);
-    // The move changes nothing about the form's guard or its per-attempt key.
-    expect(branch).toContain("{stripeSessionAttempt && (");
-    expect(branch).toContain("key={stripeSessionAttempt.sequence}");
-  });
-
   it("keeps both US provider controls inside the page's monochrome vocabulary", () => {
     // Anchored to the line start and counted: a later rule whose selector merely ends
     // in .donar-provider-choice must not silently become what these assertions read.
@@ -1257,30 +1239,6 @@ describe("Stripe donar page source contract", () => {
     expect(timerCallback).toContain("setGivebutterFrameDelayed(true)");
     expect(timerCallback).not.toContain("givebutterFrameLoaded");
     expect(GIVEBUTTER_RENDER_TIMEOUT_MS).toBe(4_000);
-  });
-
-  it("keeps focus and screen-reader context across both US provider switches", () => {
-    expect(pageSource).toContain("usProviderSwitchedRef.current = true;");
-    // Each switch lands on the TOP of the surface it opened. Givebutter's confirmation
-    // sits above its form; Stripe's step intro sits above its own form. Neither switch
-    // focuses the alternative control that now lives below the active provider.
-    expect(pageSource).toContain(
-      'const target = usProvider === "givebutter" ? givebutterIntroRef.current : stripeIntroRef.current;'
-    );
-    expect(pageSource).toContain('<p className="donar-intro" ref={stripeIntroRef} tabIndex={-1}>');
-    expect(pageSource).toContain(
-      '<p className="donar-givebutter-confirmation" ref={givebutterIntroRef} tabIndex={-1}>'
-    );
-    expect(pageSource).not.toContain("stripeReturnRef");
-    // The retired ref leaves no dead wiring behind.
-    expect(donarSource).not.toContain("givebutterChoiceRef");
-    // The provider-switch announcement is a bare live region, leaving role=status to
-    // the active provider's one visible loader.
-    const usBlockStart = pageSource.indexOf("{/* US Stripe step");
-    const usBlock = pageSource.slice(usBlockStart, pageSource.indexOf("{/* Paso 3", usBlockStart));
-    expect(usBlock.match(/aria-live=/g)).toHaveLength(1);
-    expect(usBlock).toContain("Formulario de Givebutter, en inglés.");
-    expect(usBlock).toContain("Formulario de Stripe, en español.");
   });
 
   it("no longer offers the US-path escape hatch back to the SV fiscal form", () => {

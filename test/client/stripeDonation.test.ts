@@ -225,10 +225,10 @@ describe("Stripe donor page source contract", () => {
     );
   });
 
-  it("gates Givebutter behind a mapped handoff and asks the donor to confirm every prefill", () => {
+  it("gates Givebutter behind a mapped handoff without extra provider instructions", () => {
     expect(donarSource).toContain("giftType: stripeGiftType");
     expect(donarSource).toContain("givebutterFrameUrl && givebutterHostedPageUrl");
-    expect(donarSource).toContain(
+    expect(donarSource).not.toContain(
       "Confirme en Givebutter el tipo de entrega, el monto y la frecuencia"
     );
     expect(donarSource).toContain('usProvider === "stripe"');

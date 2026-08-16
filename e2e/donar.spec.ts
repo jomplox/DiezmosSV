@@ -954,9 +954,9 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   await expect(page.getByRole("radio", { name: "Tarjeta" })).toHaveCount(0);
   await expect(page.getByRole("radio", { name: "Cuenta bancaria de EE. UU." })).toHaveCount(0);
 
-  // Givebutter is an explicit alternative. Selecting it removes Stripe's embedded
-  // tree entirely, preserves the amount/frequency prefill, and can return to the
-  // already-created Stripe Session without minting another one.
+  // Givebutter is an explicit alternative. Selecting it preserves the already-loaded
+  // Stripe tree, keeps the amount/frequency prefill, and can return without minting
+  // another Session or rebuilding either provider surface.
   const givebutterChoice = page.getByRole("button", {
     name: /^Ofrendar con Givebutter\s+\(Con formulario en inglés\)$/i
   });
@@ -969,7 +969,9 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   expect(givebutterChoiceBox!.height).toBeLessThanOrEqual(54);
   // Stripe is the default path — it carries the Spanish form and the tax receipt — so
   // the alternative sits below it instead of interrupting the reading flow.
-  const defaultStripeBox = await page.locator(".donar-stripe-embedded").boundingBox();
+  const stripeEmbed = page.locator(".donar-stripe-embedded");
+  await rememberNode(stripeEmbed, "stripe-provider-surface");
+  const defaultStripeBox = await stripeEmbed.boundingBox();
   expect(defaultStripeBox).not.toBeNull();
   expect(givebutterChoiceBox!.y).toBeGreaterThanOrEqual(defaultStripeBox!.y + defaultStripeBox!.height);
   // …and it is painted in the page's monochrome vocabulary, not as the loudest thing
@@ -983,9 +985,17 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   })).toEqual({ borderColor: "rgb(216, 216, 216)", backgroundImage: "none" });
   expect(givebutterRequests).toEqual([]);
   await givebutterChoice.click();
-  await expect(page.locator(".donar-stripe-embedded")).toHaveCount(0);
+  const providerAnnouncement = page.locator(".donar-provider-announcement");
+  await expect(providerAnnouncement).toHaveText("Formulario de Givebutter, en inglés.");
+  await expect(page.getByText(
+    "Confirme en Givebutter el tipo de entrega, el monto y la frecuencia antes de continuar; estos datos se envían solo como valores iniciales."
+  )).toHaveCount(0);
+  await expect(stripeEmbed).toHaveCount(1);
+  await expect(stripeEmbed).toBeHidden();
+  expect(await isRememberedNode(stripeEmbed, "stripe-provider-surface")).toBe(true);
   const givebutterFrame = page.getByTitle("Formulario de donación Givebutter (en inglés)");
   await expect(givebutterFrame).toBeVisible();
+  await rememberNode(givebutterFrame, "givebutter-provider-frame");
   const givebutterEmbedRequest = new URL(givebutterRequests.at(0) ?? "");
   expect(givebutterEmbedRequest.pathname).toBe("/embed/c/example-campaign");
   expect(givebutterEmbedRequest.searchParams.get("amount")).toBe("100");
@@ -994,11 +1004,6 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   // offering member of the pair without reading or printing any deployment value.
   expect(givebutterEmbedRequest.searchParams.get("fund")).toBe("842013");
   expect(givebutterEmbedRequest.searchParams.get("goalBar")).toBe("false");
-  const givebutterConfirmation = page.getByText(
-    "Confirme en Givebutter el tipo de entrega, el monto y la frecuencia antes de continuar; estos datos se envían solo como valores iniciales."
-  );
-  await expect(givebutterConfirmation).toBeVisible();
-  await expect(givebutterConfirmation).toBeFocused();
   // One escape hatch out of a non-rendering embed — never a hint and a button to the
   // same hosted page — and it sits above the bounded frame, so a donor facing a blank
   // box never has to scroll past it to find the way out. The delayed class records
@@ -1008,6 +1013,7 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   await expect(page.getByRole("link", {
     name: "¿Problemas con el formulario? Abrir Givebutter en una pestaña nueva"
   })).toBeVisible();
+  await expect(givebutterHatch).toBeFocused();
   const externalLinkIcon = givebutterHatch.locator(".lucide-square-arrow-out-up-right");
   await expect(externalLinkIcon).toBeVisible();
   await expect(externalLinkIcon).toHaveAttribute("aria-hidden", "true");
@@ -1101,15 +1107,34 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   );
 
   await stripeReturn.click();
-  await expect(givebutterFrame).toHaveCount(0);
-  await expect(page.locator(".donar-stripe-embedded")).toBeVisible();
-  await expect(page.locator(".donar-intro")).toContainText(`Friends of ${BRANDING_DISPLAY_NAME} (501c3)`);
+  await expect(givebutterFrame).toHaveCount(1);
+  await expect(givebutterFrame).toBeHidden();
+  expect(await isRememberedNode(givebutterFrame, "givebutter-provider-frame")).toBe(true);
+  await expect(stripeEmbed).toBeVisible();
+  expect(await isRememberedNode(stripeEmbed, "stripe-provider-surface")).toBe(true);
+  expect(givebutterRequests).toHaveLength(1);
+  const stripeIntro = page.locator(".donar-intro");
+  await expect(stripeIntro).toContainText(`Friends of ${BRANDING_DISPLAY_NAME} (501c3)`);
+  await expect(stripeIntro).toBeFocused();
+  await expect(providerAnnouncement).toHaveText("Formulario de Stripe, en español.");
+
+  // Repeated switching only changes visibility: neither the Stripe surface nor the
+  // Givebutter iframe is replaced, and the iframe URL is not requested again.
+  await givebutterChoice.click();
+  await expect(stripeEmbed).toHaveCount(1);
+  await expect(stripeEmbed).toBeHidden();
+  expect(await isRememberedNode(stripeEmbed, "stripe-provider-surface")).toBe(true);
+  await expect(givebutterFrame).toBeVisible();
+  expect(await isRememberedNode(givebutterFrame, "givebutter-provider-frame")).toBe(true);
+  expect(givebutterRequests).toHaveLength(1);
+  await stripeReturn.click();
+  await expect(stripeEmbed).toBeVisible();
+  await expect(givebutterFrame).toBeHidden();
 
   // Stripe reuses the Wompi handoff shell: the hosted surface is full-bleed on
   // mobile and aligns to the raised card edges on tablet/desktop. Only the
   // provider-owned content inside that boundary differs.
   await expect(page.locator(".donar-stripe > .donar-handoff")).toBeVisible();
-  const stripeEmbed = page.locator(".donar-stripe-embedded");
   const mobileStripeBox = await stripeEmbed.boundingBox();
   expect(mobileStripeBox).not.toBeNull();
   expect(mobileStripeBox!.x).toBeCloseTo(0, 1);
