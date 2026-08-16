@@ -95,6 +95,23 @@ async function isRememberedNode(locator: Locator, key: string): Promise<boolean>
   ), key);
 }
 
+async function mobileProviderShellMetrics(provider: Locator) {
+  return provider.evaluate((element) => {
+    const providerBox = element.getBoundingClientRect();
+    const dockBox = document.querySelector(".donar-provider-dock")!.getBoundingClientRect();
+    return {
+      providerTop: Math.round(providerBox.top),
+      providerBottom: Math.round(providerBox.bottom),
+      providerHeight: Math.round(providerBox.height),
+      dockTop: Math.round(dockBox.top),
+      pageScrollRange: Math.round(
+        Math.max(document.documentElement.scrollHeight, document.body.scrollHeight) - window.innerHeight
+      ),
+      pageScrollY: Math.round(window.scrollY)
+    };
+  });
+}
+
 const MOCK_STRIPE_JS = `
 window.Stripe = function () {
   let mountedFrame = null;
@@ -1100,22 +1117,20 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
     Number.parseFloat(getComputedStyle(element).paddingBottom)
   ))).toBeGreaterThanOrEqual(mobileGivebutterDockLayout.height);
 
-  // The provider step keeps the ceremonial brand title, but its mobile chrome
-  // must leave most of the phone to the provider-owned form. The frame gets a
-  // substantial independent viewport, and enough of it is visible above the
-  // fixed switcher before the donor scrolls the outer page.
-  const mobileGivebutterBudget = await page.locator(".donar-givebutter-frame-area").evaluate((element) => {
-    const provider = element.getBoundingClientRect();
-    const dock = document.querySelector(".donar-provider-dock")!.getBoundingClientRect();
-    return {
-      providerHeight: Math.round(provider.height),
-      visibleHeight: Math.round(Math.max(0, Math.min(provider.bottom, dock.top) - Math.max(provider.top, 0)))
-    };
-  });
-  expect(mobileGivebutterBudget.visibleHeight).toBeGreaterThanOrEqual(360);
-  expect(mobileGivebutterBudget.providerHeight).toBeGreaterThanOrEqual(640);
+  // The provider step is one viewport-sized shell on mobile: the page itself
+  // does not compete for the gesture, the active provider owns the remaining
+  // space, and the switcher stays fixed below it. This preserves the reason for
+  // the bounded form while removing the clunky page + iframe nested scroll.
+  const mobileGivebutterBudget = await mobileProviderShellMetrics(
+    page.locator(".donar-givebutter-frame-area")
+  );
+  expect(mobileGivebutterBudget.pageScrollRange).toBeLessThanOrEqual(1);
+  expect(mobileGivebutterBudget.pageScrollY).toBe(0);
+  expect(mobileGivebutterBudget.providerTop).toBeGreaterThanOrEqual(0);
+  expect(mobileGivebutterBudget.providerBottom).toBeLessThanOrEqual(mobileGivebutterBudget.dockTop);
+  expect(mobileGivebutterBudget.dockTop - mobileGivebutterBudget.providerBottom).toBeLessThanOrEqual(24);
+  expect(mobileGivebutterBudget.providerHeight).toBeGreaterThanOrEqual(240);
 
-  await givebutterFrame.scrollIntoViewIfNeeded();
   const mobileGivebutterFrameBox = await givebutterFrame.boundingBox();
   expect(mobileGivebutterFrameBox).not.toBeNull();
   const givebutterContent = page.frames().find((frame) => frame.url().startsWith("https://givebutter.com/"));
@@ -1132,6 +1147,7 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   await expect.poll(async () => await givebutterContent!.evaluate(() => window.scrollY)).toBeGreaterThan(
     givebutterScrollBefore
   );
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
 
   await stripeReturn.click();
   await expect(givebutterFrame).toHaveCount(1);
@@ -1195,16 +1211,13 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   expect(await page.locator(".donar-stripe-has-provider-dock").evaluate((element) => (
     Number.parseFloat(getComputedStyle(element).paddingBottom)
   ))).toBeGreaterThanOrEqual(mobileDockLayout.height);
-  const mobileStripeBudget = await stripeEmbed.evaluate((element) => {
-    const provider = element.getBoundingClientRect();
-    const dock = document.querySelector(".donar-provider-dock")!.getBoundingClientRect();
-    return {
-      providerHeight: Math.round(provider.height),
-      visibleHeight: Math.round(Math.max(0, Math.min(provider.bottom, dock.top) - Math.max(provider.top, 0)))
-    };
-  });
-  expect(mobileStripeBudget.providerHeight).toBeGreaterThanOrEqual(640);
-  expect(mobileStripeBudget.visibleHeight).toBeGreaterThanOrEqual(360);
+  const mobileStripeBudget = await mobileProviderShellMetrics(stripeEmbed);
+  expect(mobileStripeBudget.pageScrollRange).toBeLessThanOrEqual(1);
+  expect(mobileStripeBudget.pageScrollY).toBe(0);
+  expect(mobileStripeBudget.providerTop).toBeGreaterThanOrEqual(0);
+  expect(mobileStripeBudget.providerBottom).toBeLessThanOrEqual(mobileStripeBudget.dockTop);
+  expect(mobileStripeBudget.dockTop - mobileStripeBudget.providerBottom).toBeLessThanOrEqual(24);
+  expect(mobileStripeBudget.providerHeight).toBeGreaterThanOrEqual(240);
 
   const desktopViewport = { width: 671, height: 944 };
   await page.setViewportSize(desktopViewport);
@@ -1374,9 +1387,12 @@ test("Stripe bounds the rendered frame and preserves native scrolling without an
     };
   });
   expect(viewportMetrics.overflowY).toBe("hidden");
-  expect(viewportMetrics.clientHeight).toBeGreaterThanOrEqual(640);
-  expect(viewportMetrics.clientHeight).toBeLessThanOrEqual(720);
+  expect(viewportMetrics.clientHeight).toBeGreaterThanOrEqual(240);
   expect(viewportMetrics.scrollHeight - viewportMetrics.clientHeight).toBeLessThanOrEqual(4);
+  const mobileShell = await mobileProviderShellMetrics(stripeViewport);
+  expect(mobileShell.pageScrollRange).toBeLessThanOrEqual(1);
+  expect(mobileShell.providerBottom).toBeLessThanOrEqual(mobileShell.dockTop);
+  expect(mobileShell.dockTop - mobileShell.providerBottom).toBeLessThanOrEqual(24);
   await expect.poll(async () => (await stripeFrame.boundingBox())?.height ?? 0)
     .toBeCloseTo(viewportMetrics.clientHeight, 0);
 

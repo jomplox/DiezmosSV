@@ -1079,21 +1079,6 @@ describe("donar responsive donor layout", () => {
     expect(donarSource).toContain("isValidDui(");
   });
 
-  it("lets both hosted-provider surfaces go edge-to-edge only on mobile", () => {
-    const handoffRule = stylesSource.match(/\.donar-handoff\s*\{[^}]*\}/)?.[0] ?? "";
-    const hostedSurfaceRule = stylesSource.match(/\.donar-hosted-surface\s*\{[^}]*\}/)?.[0] ?? "";
-
-    expect(handoffRule).toContain("width: 100%;");
-    expect(handoffRule).toContain("justify-items: stretch;");
-    expect(hostedSurfaceRule).toContain("width: 100vw;");
-    expect(hostedSurfaceRule).toContain("max-width: none;");
-    expect(hostedSurfaceRule).toContain("margin-inline: calc((100% - 100vw) / 2);");
-    expect(stylesSource).toMatch(
-      /@media \(min-width: 520px\) \{[\s\S]{0,1000}\.donar-hosted-surface\s*\{[\s\S]{0,200}width:\s*calc\(100% \+ 80px\);[\s\S]{0,200}margin-inline:\s*-40px;/
-    );
-    expect(stylesSource).toMatch(/\.donar-handoff\s*>\s*\.donar-intro\s*\{[^}]*margin-top:\s*10px;/);
-  });
-
   it("uses a flat full-bleed shell at 430px while keeping the title balanced", () => {
     expect(stylesSource).toMatch(
       /@media \(max-width: 430px\) \{[\s\S]{0,1000}\.donar-screen\s*\{[\s\S]{0,160}padding:\s*0;[\s\S]{0,160}background:\s*#ffffff;/

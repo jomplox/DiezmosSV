@@ -4269,7 +4269,11 @@ pre {
   box-sizing: border-box;
   width: 100vw;
   max-width: none;
-  margin-inline: calc((100% - 100vw) / 2);
+  /* `50% - 50vw` is the broadly supported equivalent of halving
+     `100% - 100vw`. Keeping the arithmetic multiplication-only prevents a
+     mobile browser from discarding the margin and starting the full-width
+     provider at the card inset, which clips its right edge. */
+  margin-inline: calc(50% - 50vw);
   border: 1px solid #e5e5e5;
   border-radius: 12px;
   background: #ffffff;
@@ -4553,19 +4557,43 @@ pre {
 }
 
 @media (max-width: 519px) {
+  /* Mobile Safari may keep `body` at its larger 100vh even while the visible
+     dynamic viewport is shorter. Lock the document only while the provider
+     shell is mounted so that browser-chrome changes cannot recreate a second
+     page-level scroller around the provider iframe. */
+  html:has(.donar-screen-provider-step),
+  body:has(.donar-screen-provider-step) {
+    height: 100vh;
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
+  }
+
   /* The U.S. provider step keeps the ceremonial brand as the H1, but recovers
      the compact working-step rhythm that previously made more of the hosted
      form visible. Only this step is compressed; the chooser and SV wizard keep
      their established presentation. */
   .donar-screen-provider-step {
+    height: 100vh;
+    height: 100svh;
+    height: 100dvh;
+    min-height: 0;
     padding-top: 8px;
+    padding-bottom: 0;
+    overflow: hidden;
+    overscroll-behavior: none;
   }
 
   .donar-card-provider-step {
     grid-template-columns: 1fr auto auto 1fr;
+    grid-template-rows: auto auto auto minmax(0, 1fr);
     column-gap: 8px;
     row-gap: 10px;
+    height: 100%;
+    min-height: 0;
     padding-top: 12px;
+    padding-bottom: 0;
+    overflow: hidden;
   }
 
   .donar-card-provider-step > .donar-card-top,
@@ -4609,6 +4637,31 @@ pre {
     gap: 8px;
   }
 
+  .donar-card-provider-step > .donar-stripe {
+    height: 100%;
+    min-height: 0;
+    grid-template-rows: auto minmax(0, 1fr);
+    overflow: hidden;
+    animation: none;
+  }
+
+  .donar-card-provider-step .donar-handoff {
+    height: 100%;
+    min-height: 0;
+    grid-template-rows: auto minmax(0, 1fr);
+    overflow: hidden;
+  }
+
+  .donar-card-provider-step .donar-provider-panel:not([hidden]),
+  .donar-card-provider-step .donar-givebutter-surface {
+    height: 100%;
+    min-height: 0;
+  }
+
+  .donar-card-provider-step .donar-givebutter-surface {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
   .donar-card-provider-step .donar-handoff > .donar-intro {
     margin-top: 0;
     font-size: 13px;
@@ -4616,8 +4669,8 @@ pre {
   }
 
   .donar-card-provider-step .donar-provider-viewport {
-    height: clamp(520px, calc(100vh - 132px), 720px);
-    height: clamp(520px, calc(100svh - 132px), 720px);
+    height: 100%;
+    min-height: 0;
   }
 
   .donar-stripe-has-provider-dock {
