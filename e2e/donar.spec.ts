@@ -1218,7 +1218,7 @@ test("Stripe clears its loader when the rendered frame publishes a height withou
   await page.route("https://checkout.stripe.test/embedded-delayed", (route) => route.fulfill({
     status: 200,
     contentType: "text/html; charset=utf-8",
-    body: "<html lang=\"es\"><body><div id=\"stripe-shell\"></div></body></html>"
+    body: "<!doctype html><html lang=\"es\"><head><style>html,body{margin:0}body{min-height:904px}</style></head><body><div id=\"stripe-shell\">Inicio del formulario</div><div style=\"margin-top:820px\">Final del formulario</div></body></html>"
   }));
 
   await enterStripeHandoff(page);
@@ -1244,32 +1244,42 @@ test("Stripe clears its loader when the rendered frame publishes a height withou
   await expect(stripeViewport).toBeVisible();
   const viewportMetrics = await stripeViewport.evaluate((element) => {
     const style = getComputedStyle(element);
-    const before = element.scrollTop;
-    element.scrollTop = 120;
     return {
       overflowY: style.overflowY,
       clientHeight: element.clientHeight,
-      scrollHeight: element.scrollHeight,
-      before,
-      after: element.scrollTop
+      scrollHeight: element.scrollHeight
     };
   });
-  expect(viewportMetrics.overflowY).toBe("auto");
+  expect(viewportMetrics.overflowY).toBe("hidden");
   expect(viewportMetrics.clientHeight).toBeGreaterThanOrEqual(480);
   expect(viewportMetrics.clientHeight).toBeLessThanOrEqual(620);
-  expect(viewportMetrics.scrollHeight).toBeGreaterThan(viewportMetrics.clientHeight);
-  expect(viewportMetrics.after).toBeGreaterThan(viewportMetrics.before);
-  await stripeViewport.evaluate((element) => { element.scrollTop = 0; });
-  await stripeViewport.focus();
-  await expect(stripeViewport).toBeFocused();
-  const focusOutline = await stripeViewport.evaluate((element) => {
-    const style = getComputedStyle(element);
-    return { style: style.outlineStyle, width: Number.parseFloat(style.outlineWidth) };
-  });
-  expect(focusOutline.style).not.toBe("none");
-  expect(focusOutline.width).toBeGreaterThanOrEqual(2);
-  await page.keyboard.press("PageDown");
-  await expect.poll(() => stripeViewport.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  expect(viewportMetrics.scrollHeight - viewportMetrics.clientHeight).toBeLessThanOrEqual(4);
+  await expect.poll(async () => (await stripeFrame.boundingBox())?.height ?? 0)
+    .toBeCloseTo(viewportMetrics.clientHeight, 0);
+
+  const stripeFrameDocument = page.frameLocator('iframe[title="Formulario seguro de Stripe"]')
+    .locator("html");
+  await expect.poll(() => stripeFrameDocument.evaluate((element) => (
+    element.ownerDocument.defaultView?.innerHeight ?? 0
+  ))).toBe(viewportMetrics.clientHeight);
+  const innerMetrics = await stripeFrameDocument.evaluate((element) => ({
+    clientHeight: element.ownerDocument.defaultView?.innerHeight ?? 0,
+    scrollHeight: Math.max(element.scrollHeight, element.ownerDocument.body.scrollHeight),
+    scrollY: element.ownerDocument.defaultView?.scrollY ?? 0
+  }));
+  expect(innerMetrics.clientHeight).toBe(viewportMetrics.clientHeight);
+  expect(innerMetrics.scrollHeight).toBeGreaterThan(innerMetrics.clientHeight);
+
+  const stripeViewportBox = await stripeViewport.boundingBox();
+  expect(stripeViewportBox).not.toBeNull();
+  await page.mouse.move(
+    stripeViewportBox!.x + stripeViewportBox!.width / 2,
+    stripeViewportBox!.y + stripeViewportBox!.height / 2
+  );
+  await page.mouse.wheel(0, 360);
+  await expect.poll(() => stripeFrameDocument.evaluate((element) => (
+    element.ownerDocument.defaultView?.scrollY ?? 0
+  ))).toBeGreaterThan(innerMetrics.scrollY);
 });
 
 test("Givebutter keeps a truthful reduced-motion loader until its bounded escape hatch", async ({ page }) => {

@@ -63,7 +63,6 @@ export function StripeDonationForm({ session, onRetry }: StripeDonationFormProps
       className="donar-hosted-surface donar-stripe-embedded donar-provider-viewport"
       role="region"
       aria-label="Formulario seguro de Stripe"
-      tabIndex={0}
     >
       {!embeddedReady && (
         <div className="donar-stripe-loading" role="status">
@@ -100,12 +99,30 @@ function LiveStripeDonationForm({
   useLayoutEffect(() => {
     const root = rootRef.current;
     if (!root) return;
+    const viewport = root.parentElement;
+    if (!viewport) return;
     let observer: MutationObserver | undefined;
+    let boundedFrame: HTMLIFrameElement | undefined;
+    let boundedHeight = "";
+    const applyViewportHeight = (frame: HTMLIFrameElement) => {
+      if (viewport.clientHeight <= 0) return;
+      boundedFrame = frame;
+      boundedHeight = `${viewport.clientHeight}px`;
+      root.style.setProperty("height", boundedHeight);
+      frame.style.setProperty("height", boundedHeight, "important");
+    };
     const detectPublishedFrameHeight = () => {
       const frame = root.querySelector<HTMLIFrameElement>(".donar-stripe-frame-mount iframe");
-      const height = frame?.style.getPropertyValue("height").trim() ?? "";
+      if (!frame) return;
+      const height = frame.style.getPropertyValue("height").trim();
+      if (frame === boundedFrame && height === boundedHeight) return;
       if (!/^\d+(?:\.\d+)?px$/.test(height) || Number.parseFloat(height) <= 0) return;
-      observer?.disconnect();
+      // Stripe publishes its full content height inline with !important. Leaving
+      // that height in place makes a capped parent the scroll owner, but pointer
+      // gestures over the cross-origin iframe never reach that parent. Keep the
+      // iframe itself at the bounded viewport height so its own document scrolls,
+      // exactly like the Wompi iframe. Reapply after later Stripe height updates.
+      applyViewportHeight(frame);
       onReady();
     };
     observer = new MutationObserver(detectPublishedFrameHeight);
@@ -115,8 +132,15 @@ function LiveStripeDonationForm({
       childList: true,
       subtree: true
     });
+    const resizeObserver = new ResizeObserver(() => {
+      if (boundedFrame) applyViewportHeight(boundedFrame);
+    });
+    resizeObserver.observe(viewport);
     detectPublishedFrameHeight();
-    return () => observer?.disconnect();
+    return () => {
+      observer?.disconnect();
+      resizeObserver.disconnect();
+    };
   }, [onReady]);
 
   return (
