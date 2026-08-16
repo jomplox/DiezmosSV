@@ -110,25 +110,28 @@ function LiveStripeDonationForm({
       boundedHeight = `${viewport.clientHeight}px`;
       root.style.setProperty("height", boundedHeight);
       frame.style.setProperty("height", boundedHeight, "important");
+      frame.removeAttribute("scrolling");
     };
     const detectPublishedFrameHeight = () => {
       const frame = root.querySelector<HTMLIFrameElement>(".donar-stripe-frame-mount iframe");
       if (!frame) return;
       const height = frame.style.getPropertyValue("height").trim();
-      if (frame === boundedFrame && height === boundedHeight) return;
+      const providerDisablesScrolling = frame.getAttribute("scrolling")?.toLowerCase() === "no";
+      if (frame === boundedFrame && height === boundedHeight && !providerDisablesScrolling) return;
       if (!/^\d+(?:\.\d+)?px$/.test(height) || Number.parseFloat(height) <= 0) return;
       // Stripe publishes its full content height inline with !important. Leaving
       // that height in place makes a capped parent the scroll owner, but pointer
       // gestures over the cross-origin iframe never reach that parent. Keep the
       // iframe itself at the bounded viewport height so its own document scrolls,
-      // exactly like the Wompi iframe. Reapply after later Stripe height updates.
+      // exactly like the Wompi iframe, and clear Stripe's obsolete no-scroll
+      // attribute. Reapply after later Stripe height or attribute updates.
       applyViewportHeight(frame);
       onReady();
     };
     observer = new MutationObserver(detectPublishedFrameHeight);
     observer.observe(root, {
       attributes: true,
-      attributeFilter: ["style"],
+      attributeFilter: ["style", "scrolling"],
       childList: true,
       subtree: true
     });

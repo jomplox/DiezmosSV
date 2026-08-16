@@ -126,6 +126,7 @@ window.Stripe = function () {
         mount: function (node) {
           mountedFrame = document.createElement("iframe");
           mountedFrame.title = "Formulario seguro de Stripe";
+          mountedFrame.scrolling = "no";
           mountedFrame.src = "https://checkout.stripe.test/embedded-delayed";
           node.appendChild(mountedFrame);
         },
@@ -1199,7 +1200,7 @@ test("Stripe overlays one loader through a shell iframe until Checkout is render
   ).__stripeEmbeddedCheckoutCreates)).toBe(1);
 });
 
-test("Stripe clears its loader when the rendered frame publishes a height without analytics", async ({ page }) => {
+test("Stripe bounds the rendered frame and preserves native scrolling without analytics", async ({ page }) => {
   await page.route("**/api/donations/stripe/checkout", (route) => route.fulfill({
     status: 201,
     contentType: "application/json",
