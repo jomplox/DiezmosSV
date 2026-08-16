@@ -1010,8 +1010,8 @@ export function DonarPage() {
   const stripeIntroduction = stripeIntroSegments(branding.organizationName);
 
   return (
-    <div className="donar-screen">
-      <div className="donar-card card">
+    <div className={`donar-screen${step === 2 && usDonation ? " donar-screen-provider-step" : ""}`}>
+      <div className={`donar-card card${step === 2 && usDonation ? " donar-card-provider-step" : ""}`}>
         {/* Wizard chrome: back affordance left ("← Cambiar opción" only on Paso 1,
             "← Atrás" afterwards), minimal "Paso n de m" indicator right. */}
         <div className="donar-card-top">

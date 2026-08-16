@@ -1073,6 +1073,8 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
 
   const mobileViewport = { width: 393, height: 852 };
   await page.setViewportSize(mobileViewport);
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await expect.poll(async () => await page.evaluate(() => window.scrollY)).toBe(0);
   const mobileGivebutterDockLayout = await givebutterProviderDock.evaluate((element) => {
     const box = element.getBoundingClientRect();
     return {
@@ -1087,6 +1089,21 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   expect(await page.locator(".donar-stripe-has-provider-dock").evaluate((element) => (
     Number.parseFloat(getComputedStyle(element).paddingBottom)
   ))).toBeGreaterThanOrEqual(mobileGivebutterDockLayout.height);
+
+  // The provider step keeps the ceremonial brand title, but its mobile chrome
+  // must leave most of the phone to the provider-owned form. The frame gets a
+  // substantial independent viewport, and enough of it is visible above the
+  // fixed switcher before the donor scrolls the outer page.
+  const mobileGivebutterBudget = await page.locator(".donar-givebutter-frame-area").evaluate((element) => {
+    const provider = element.getBoundingClientRect();
+    const dock = document.querySelector(".donar-provider-dock")!.getBoundingClientRect();
+    return {
+      providerHeight: Math.round(provider.height),
+      visibleHeight: Math.round(Math.max(0, Math.min(provider.bottom, dock.top) - Math.max(provider.top, 0)))
+    };
+  });
+  expect(mobileGivebutterBudget.visibleHeight).toBeGreaterThanOrEqual(360);
+  expect(mobileGivebutterBudget.providerHeight).toBeGreaterThanOrEqual(640);
 
   await givebutterFrame.scrollIntoViewIfNeeded();
   const mobileGivebutterFrameBox = await givebutterFrame.boundingBox();
@@ -1130,11 +1147,14 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   await stripeReturn.click();
   await expect(stripeEmbed).toBeVisible();
   await expect(givebutterFrame).toBeHidden();
+  await expect(stripeIntro).toBeFocused();
 
   // Stripe reuses the Wompi handoff shell: the hosted surface is full-bleed on
   // mobile and aligns to the raised card edges on tablet/desktop. Only the
   // provider-owned content inside that boundary differs.
   await expect(page.locator(".donar-stripe > .donar-handoff")).toBeVisible();
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await expect.poll(async () => await page.evaluate(() => window.scrollY)).toBe(0);
   const mobileStripeBox = await stripeEmbed.boundingBox();
   expect(mobileStripeBox).not.toBeNull();
   expect(mobileStripeBox!.x).toBeCloseTo(0, 1);
@@ -1165,6 +1185,16 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   expect(await page.locator(".donar-stripe-has-provider-dock").evaluate((element) => (
     Number.parseFloat(getComputedStyle(element).paddingBottom)
   ))).toBeGreaterThanOrEqual(mobileDockLayout.height);
+  const mobileStripeBudget = await stripeEmbed.evaluate((element) => {
+    const provider = element.getBoundingClientRect();
+    const dock = document.querySelector(".donar-provider-dock")!.getBoundingClientRect();
+    return {
+      providerHeight: Math.round(provider.height),
+      visibleHeight: Math.round(Math.max(0, Math.min(provider.bottom, dock.top) - Math.max(provider.top, 0)))
+    };
+  });
+  expect(mobileStripeBudget.providerHeight).toBeGreaterThanOrEqual(640);
+  expect(mobileStripeBudget.visibleHeight).toBeGreaterThanOrEqual(360);
 
   const desktopViewport = { width: 671, height: 944 };
   await page.setViewportSize(desktopViewport);

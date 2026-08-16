@@ -4547,6 +4547,73 @@ pre {
 }
 
 @media (max-width: 519px) {
+  /* The U.S. provider step keeps the ceremonial brand as the H1, but recovers
+     the compact working-step rhythm that previously made more of the hosted
+     form visible. Only this step is compressed; the chooser and SV wizard keep
+     their established presentation. */
+  .donar-screen-provider-step {
+    padding-top: 8px;
+  }
+
+  .donar-card-provider-step {
+    grid-template-columns: 1fr auto auto 1fr;
+    column-gap: 8px;
+    row-gap: 10px;
+    padding-top: 12px;
+  }
+
+  .donar-card-provider-step > .donar-card-top,
+  .donar-card-provider-step > .donar-step-label,
+  .donar-card-provider-step > .donar-stripe,
+  .donar-card-provider-step > .donar-support {
+    grid-column: 1 / -1;
+  }
+
+  .donar-card-provider-step > .donar-card-top {
+    min-height: 24px;
+  }
+
+  .donar-card-provider-step > .donar-glyph {
+    grid-column: 2;
+  }
+
+  .donar-card-provider-step > .donar-glyph svg {
+    width: 20px;
+    height: 20px;
+  }
+
+  .donar-card-provider-step > .donar-wizard-title {
+    grid-column: 3;
+    gap: 6px;
+    font-size: clamp(18px, 5.1vw, 20px);
+  }
+
+  .donar-card-provider-step .donar-title-lane-flag {
+    width: clamp(24px, 7.1vw, 28px);
+    height: clamp(24px, 7.1vw, 28px);
+    flex-basis: clamp(24px, 7.1vw, 28px);
+  }
+
+  .donar-card-provider-step .donar-summary {
+    padding: 10px 12px;
+  }
+
+  .donar-card-provider-step .donar-stripe,
+  .donar-card-provider-step .donar-handoff {
+    gap: 8px;
+  }
+
+  .donar-card-provider-step .donar-handoff > .donar-intro {
+    margin-top: 0;
+    font-size: 13px;
+    line-height: 1.35;
+  }
+
+  .donar-card-provider-step .donar-provider-viewport {
+    height: clamp(520px, calc(100vh - 132px), 720px);
+    height: clamp(520px, calc(100svh - 132px), 720px);
+  }
+
   .donar-stripe-has-provider-dock {
     padding-bottom: calc(112px + env(safe-area-inset-bottom));
   }
