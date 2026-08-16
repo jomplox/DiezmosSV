@@ -1,5 +1,5 @@
-import { lstatSync } from "node:fs";
-import { resolve } from "node:path";
+import { lstatSync, realpathSync } from "node:fs";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 
 export function assertPrivateEnvFile(path, options = {}) {
   let stat;
@@ -14,6 +14,17 @@ export function assertPrivateEnvFile(path, options = {}) {
 
   if (!stat.isFile() || stat.isSymbolicLink()) {
     throw new Error(`Environment path must be a regular non-symlink file: ${path}`);
+  }
+
+  if (options.requireOutsideDirectory) {
+    const candidatePath = realpathSync(path);
+    const protectedDirectory = realpathSync(options.requireOutsideDirectory);
+    const relativePath = relative(protectedDirectory, candidatePath);
+    const insideProtectedDirectory = relativePath === ""
+      || (relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath));
+    if (insideProtectedDirectory) {
+      throw new Error(`Environment file must be stored outside the repository: ${path}`);
+    }
   }
 
   if (process.platform !== "win32") {

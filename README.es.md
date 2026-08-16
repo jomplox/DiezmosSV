@@ -208,7 +208,7 @@ DiezmosSV/
 │   ├── client/                 # Panel React + Vite, /donar, fuentes, recursos
 │   └── shared/                 # Catálogos · DUI · NIT · ventanas legales · política de contraseñas
 │                               # correcciones fiscales · entrega · montos · correo
-├── migrations/                 # Esquema D1 (incremental, solo se agrega, 0001…0043)
+├── migrations/                 # Esquema D1 (incremental, solo se agrega, 0001…0044)
 ├── DTE/svfe-json-schemas/      # Esquemas JSON de MH para validación
 ├── docs/                       # Despliegue/UAT · manual del operador · restauración de retención
 │                               # cutover/conciliación de claims fiscales · recuperación previa al CDE
@@ -370,6 +370,16 @@ fuera de este repositorio y sin enlaces simbólicos:
 ```dotenv
 # /ruta/privada/absoluta/staging.env
 DIEZMOSSV_DEPLOY_TARGET=staging
+DIEZMOSSV_WORKER_NAME=<nombre-exacto-worker-staging>
+DIEZMOSSV_GITHUB_REPOSITORY=jomplox/DiezmosSV
+DIEZMOSSV_CLOUDFLARE_ACCOUNT_ID=<id-exacto-cuenta>
+DIEZMOSSV_APP_ENV=staging
+DIEZMOSSV_D1_DATABASE_NAME=<nombre-exacto-d1-staging>
+DIEZMOSSV_D1_DATABASE_ID=<id-exacto-d1-staging>
+DIEZMOSSV_R2_BUCKET_NAME=<bucket-r2-exacto-staging>
+DIEZMOSSV_QUEUE_NAME=<cola-exacta-staging>
+DIEZMOSSV_QUEUE_DLQ_NAME=<dlq-exacta-staging>
+DIEZMOSSV_WORKERS_DEV=true
 VITE_GIVEBUTTER_CAMPAIGN=example-campaign
 # Opcional: reemplace ambos valores con IDs numéricos reales y distintos, u omita ambos.
 # VITE_GIVEBUTTER_TITHE_FUND_ID=<id-real-fondo-diezmo>
@@ -378,10 +388,13 @@ DIEZMOSSV_APP_ORIGIN=https://staging.example.invalid
 DIEZMOSSV_DONOR_LOGO_FILE=/ruta/privada/absoluta/logo.png
 ```
 
-Selecciónelo con `export DIEZMOSSV_DEPLOY_CONFIG=/ruta/privada/absoluta/staging.env`. El ambiente
+Mantenga disponibles ambos archivos para que la guarda también demuestre que staging y producción no
+reutilizan Worker, origen, D1, bucket R2, cola ni DLQ. Selecciónelos con
+`DIEZMOSSV_STAGING_DEPLOY_CONFIG` y `DIEZMOSSV_PRODUCTION_DEPLOY_CONFIG`; la variable heredada
+`DIEZMOSSV_DEPLOY_CONFIG` todavía puede señalar el archivo activo. El ambiente
 seleccionado debe coincidir con `--env`; el PNG/JPEG debe ser decodificable por la misma ruta de
 `pdf-lib` que usan los comprobantes. Antes de un despliegue remoto, el preflight de marca valida ese
-raster localmente, exige que `/api/health` reporte `appEnv=staging` y compara exactamente el raster
+raster localmente, exige que `/api/health` reporte `appEnv=staging` y el `workerName` exacto, y compara exactamente el raster
 remoto anunciado. `cf:deploy:staging` ejecuta automáticamente el preflight y el build privado vinculado
 al ambiente; los mismos pasos pueden ejecutarse por separado sin desplegar:
 
@@ -393,6 +406,10 @@ públicos de enrutamiento que solo entran al navegador después de la validació
 del nombre de la campaña.
 
 ```bash
+export DIEZMOSSV_STAGING_DEPLOY_CONFIG=/ruta/privada/absoluta/staging.env
+export DIEZMOSSV_PRODUCTION_DEPLOY_CONFIG=/ruta/privada/absoluta/production.env
+export DIEZMOSSV_DEPLOY_CONFIG="$DIEZMOSSV_STAGING_DEPLOY_CONFIG"
+export DIEZMOSSV_APPROVED_SHA=<sha-revisado-de-40-caracteres>
 npm run cf:branding:check -- --env staging
 npm run build:private -- --env staging
 ```
@@ -451,11 +468,12 @@ revisión manual del registro legal; el preflight nunca borra, reenlaza ni elige
 migración en sí corre a través de `scripts/d1-schema-compatibility.mjs`, que reconcilia el libro de
 migraciones aplicadas antes de entregar el control a Wrangler.
 
-Dos guardas de despliegue hacen fallar el comando en vez de publicar un despliegue roto:
+Tres guardas de despliegue hacen fallar el comando en vez de publicar un despliegue roto:
 
 | Guarda | Se ejecuta en | Bloquea salvo que |
 |---|---|---|
 | `scripts/assert-fiscal-cutover.mjs` | `cf:migrate:prod`, `cf:deploy:prod`, `cf:cutover:staging` | `FISCAL_CUTOVER_QUIESCED=1` esté definido. Las migraciones 0020/0021 y el Worker con soporte de claims deben entrar en **una sola ventana de mantenimiento con tráfico detenido**: drene las solicitudes del Worker anterior, pause colas/cron y el tráfico que muta datos, y luego reconozca la ventana. |
+| `scripts/assert-release-provenance.mjs` | builds privados y todo comando de migración, despliegue o tail vinculado a un ambiente | `DIEZMOSSV_APPROVED_SHA` coincida exactamente con un `HEAD` versionado limpio; el commit fijado tenga al menos un check de GitHub y todos estén completos/exitosos; la configuración privada de Wrangler coincida exactamente con el manifiesto del ambiente; y los recursos persistentes de staging/producción sean distintos. |
 | `scripts/run-private-build.mjs` | `build:private`, y a través de él `cf:deploy:staging` y `cf:deploy:prod` | El archivo de despliegue vinculado al ambiente y exclusivo del dueño, el slug de campaña Givebutter, el origen y el raster del donante pasan validación. Solo el slug público se inyecta en Vite; los valores de Stripe siguen siendo solo de runtime. |
 
 Guarde los parámetros de la prueba de humo en ese archivo `0600` fuera del árbol del repositorio. El
@@ -480,10 +498,11 @@ UAT en staging. Sus valores en vivo también quedan únicamente en la configurac
 que se describió arriba. Seleccione un archivo de despliegue distinto y exclusivo del dueño que
 contenga `DIEZMOSSV_DEPLOY_TARGET=production`, el origen de producción, la campaña y un PNG/JPEG
 privado embebible. Un archivo vinculado a staging o un origen cuyo `/api/health` no reporte
-`appEnv=production` se rechaza antes de autenticar la marca o subir archivos.
+`appEnv=production` y el `workerName` exacto de producción se rechaza antes de autenticar la marca o subir archivos.
 
 ```bash
 export DIEZMOSSV_DEPLOY_CONFIG="/ruta/privada/absoluta/production.env"
+export DIEZMOSSV_APPROVED_SHA=<sha-revisado-de-40-caracteres>
 
 # Verifique los destinos privados de producción sin imprimir sus valores dentro de este repositorio.
 node scripts/run-private-wrangler.mjs d1 list
@@ -1056,7 +1075,7 @@ El modelo de seguridad es el modelo del claim fiscal aplicado a una ruta de repa
 ## 📚 Modelo de datos
 
 <details>
-<summary><strong>Tablas de D1 (migrations/0001_init.sql, extendidas hasta la 0043)</strong></summary>
+<summary><strong>Tablas de D1 (migrations/0001_init.sql, extendidas hasta la 0044)</strong></summary>
 
 <br/>
 

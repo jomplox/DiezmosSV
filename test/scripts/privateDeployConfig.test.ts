@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  assertDistinctDeploymentResources,
   loadOperatorCredentials,
   loadPrivateDeployConfig
 } from "../../scripts/private-deploy-config.mjs";
@@ -40,9 +41,21 @@ describe("private deployment configuration", () => {
       })
     ).toMatchObject({
       target: "staging",
+      workerName: "diezmos-sv-staging",
+      githubRepository: "jomplox/DiezmosSV",
       campaign: "campaign-fixture",
       givebutterFunds: null,
       origin: "https://staging.example.invalid",
+      resourceManifest: {
+        accountId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        appEnv: "staging",
+        d1DatabaseName: "diezmos-sv-staging-db",
+        d1DatabaseId: "11111111-1111-1111-1111-111111111111",
+        r2BucketName: "diezmos-sv-staging-archive",
+        queueName: "diezmos-sv-staging-issuance",
+        queueDlqName: "diezmos-sv-staging-issuance-dlq",
+        workersDev: true
+      },
       donorLogo: { contentType: "image/png", bytes: pngBytes }
     });
   });
@@ -162,6 +175,16 @@ describe("private deployment configuration", () => {
 
   it.each([
     "DIEZMOSSV_DEPLOY_TARGET",
+    "DIEZMOSSV_WORKER_NAME",
+    "DIEZMOSSV_GITHUB_REPOSITORY",
+    "DIEZMOSSV_CLOUDFLARE_ACCOUNT_ID",
+    "DIEZMOSSV_APP_ENV",
+    "DIEZMOSSV_D1_DATABASE_NAME",
+    "DIEZMOSSV_D1_DATABASE_ID",
+    "DIEZMOSSV_R2_BUCKET_NAME",
+    "DIEZMOSSV_QUEUE_NAME",
+    "DIEZMOSSV_QUEUE_DLQ_NAME",
+    "DIEZMOSSV_WORKERS_DEV",
     "VITE_GIVEBUTTER_CAMPAIGN",
     "DIEZMOSSV_APP_ORIGIN",
     "DIEZMOSSV_DONOR_LOGO_FILE"
@@ -249,6 +272,26 @@ describe("private deployment configuration", () => {
         env: { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath },
         repositoryRoot: fixture.repositoryRoot
       }), fixture
+    );
+  });
+
+  it("rejects staging and production manifests that reuse persistent resources", () => {
+    const stagingFixture = deploymentFixture();
+    const staging = loadPrivateDeployConfig({
+      target: "staging",
+      env: { DIEZMOSSV_DEPLOY_CONFIG: stagingFixture.configPath },
+      repositoryRoot: stagingFixture.repositoryRoot
+    });
+    const productionFixture = deploymentFixture({ target: "production" });
+    const production = loadPrivateDeployConfig({
+      target: "production",
+      env: { DIEZMOSSV_DEPLOY_CONFIG: productionFixture.configPath },
+      repositoryRoot: productionFixture.repositoryRoot
+    });
+    production.resourceManifest.d1DatabaseId = staging.resourceManifest.d1DatabaseId;
+
+    expect(() => assertDistinctDeploymentResources(staging, production)).toThrow(
+      /must not reuse/i
     );
   });
 
@@ -494,6 +537,16 @@ function deploymentFixture(options: {
   const configPath = join(privateRoot, "staging.env");
   const configContents = [
     `DIEZMOSSV_DEPLOY_TARGET=${options.target ?? "staging"}`,
+    `DIEZMOSSV_WORKER_NAME=diezmos-sv-${options.target ?? "staging"}`,
+    "DIEZMOSSV_GITHUB_REPOSITORY=jomplox/DiezmosSV",
+    "DIEZMOSSV_CLOUDFLARE_ACCOUNT_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    `DIEZMOSSV_APP_ENV=${options.target ?? "staging"}`,
+    `DIEZMOSSV_D1_DATABASE_NAME=diezmos-sv-${options.target ?? "staging"}-db`,
+    `DIEZMOSSV_D1_DATABASE_ID=${options.target === "production" ? "22222222-2222-2222-2222-222222222222" : "11111111-1111-1111-1111-111111111111"}`,
+    `DIEZMOSSV_R2_BUCKET_NAME=diezmos-sv-${options.target ?? "staging"}-archive`,
+    `DIEZMOSSV_QUEUE_NAME=diezmos-sv-${options.target ?? "staging"}-issuance`,
+    `DIEZMOSSV_QUEUE_DLQ_NAME=diezmos-sv-${options.target ?? "staging"}-issuance-dlq`,
+    "DIEZMOSSV_WORKERS_DEV=true",
     "VITE_GIVEBUTTER_CAMPAIGN=campaign-fixture",
     `DIEZMOSSV_APP_ORIGIN=${options.origin ?? "https://staging.example.invalid"}`,
     `DIEZMOSSV_DONOR_LOGO_FILE=${logoPath}`,

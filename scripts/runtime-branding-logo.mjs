@@ -30,7 +30,10 @@ export async function verifyRuntimeBrandingLogo(config, { fetchImpl = fetch } = 
   } catch {
     throw new Error("Runtime deployment target verification unavailable");
   }
-  if (health?.appEnv !== config.target) {
+  if (
+    health?.appEnv !== config.target ||
+    health?.workerName !== config.workerName
+  ) {
     throw new Error("Runtime deployment target does not match the selected release target");
   }
 
@@ -179,6 +182,7 @@ async function publicFetch(fetchImpl, url, errorMessage) {
     return await fetchImpl(url, {
       method: "GET",
       headers: { Accept: "application/json, image/png, image/jpeg" },
+      redirect: "error",
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
     });
   } catch (error) {
@@ -188,7 +192,11 @@ async function publicFetch(fetchImpl, url, errorMessage) {
 
 async function privateFetch(fetchImpl, url, init, errorMessage) {
   try {
-    return await fetchImpl(url, { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    return await fetchImpl(url, {
+      ...init,
+      redirect: "error",
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+    });
   } catch (error) {
     throw requestError(errorMessage, error);
   }

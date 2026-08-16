@@ -10,6 +10,8 @@ import { getMhCertificateXml } from "../config";
 import type { Env } from "../types";
 import { deploymentEnvironmentPolicy } from "./environmentPolicy";
 
+const CLOUDFLARE_API_BASE_URL = "https://api.cloudflare.com/client/v4";
+
 type CredentialEnvironment = "test" | "production";
 
 export interface CredentialUpdateInput {
@@ -407,8 +409,13 @@ export async function bootstrapCloudflareWriterToken(env: Env, token: string): P
 }
 
 async function patchCloudflareWorkerSecretsWithToken(env: Env, patch: SecretPatch, apiToken: string): Promise<{ updated: string[]; deleted: string[] }> {
-  const response = await fetch(`${env.CLOUDFLARE_API_BASE_URL ?? "https://api.cloudflare.com/client/v4"}/accounts/${encodeURIComponent(env.CLOUDFLARE_ACCOUNT_ID!.trim())}/workers/scripts/${encodeURIComponent(env.CLOUDFLARE_SCRIPT_NAME!.trim())}/secrets-bulk`, {
+  const configuredApiBase = env.CLOUDFLARE_API_BASE_URL?.trim();
+  if (configuredApiBase && configuredApiBase !== CLOUDFLARE_API_BASE_URL) {
+    throw new CredentialWriterConfigError("La API de Cloudflare no puede configurarse a un destino alternativo.");
+  }
+  const response = await fetch(`${CLOUDFLARE_API_BASE_URL}/accounts/${encodeURIComponent(env.CLOUDFLARE_ACCOUNT_ID!.trim())}/workers/scripts/${encodeURIComponent(env.CLOUDFLARE_SCRIPT_NAME!.trim())}/secrets-bulk`, {
     method: "PATCH",
+    redirect: "error",
     headers: {
       Authorization: `Bearer ${apiToken}`,
       "Content-Type": "application/json"

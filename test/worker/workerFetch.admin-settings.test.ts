@@ -137,8 +137,7 @@ describe("credential administration", () => {
       env(db, {
         APP_ENV: "staging",
         CLOUDFLARE_ACCOUNT_ID: "account-id",
-        CLOUDFLARE_SCRIPT_NAME: "diezmossv-staging-example",
-        CLOUDFLARE_API_BASE_URL: "https://cf.test"
+        CLOUDFLARE_SCRIPT_NAME: "diezmossv-staging-example"
       })
     );
 
@@ -161,7 +160,8 @@ describe("credential administration", () => {
       entity_id: "diezmossv-staging-example"
     }));
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("https://cf.test/accounts/account-id/workers/scripts/diezmossv-staging-example/secrets-bulk");
+    expect(url).toBe("https://api.cloudflare.com/client/v4/accounts/account-id/workers/scripts/diezmossv-staging-example/secrets-bulk");
+    expect(init.redirect).toBe("error");
     expect(init.headers).toMatchObject({ Authorization: "Bearer cf-writer-token" });
   });
 });
@@ -595,7 +595,6 @@ describe("Stripe owner settings", () => {
       CLOUDFLARE_ACCOUNT_ID: "account",
       CLOUDFLARE_API_TOKEN: "writer-token",
       CLOUDFLARE_SCRIPT_NAME: "worker",
-      CLOUDFLARE_API_BASE_URL: "https://cf.test",
       STRIPE_WEBHOOK_SECRET: "whsec_active_private"
     };
     try {

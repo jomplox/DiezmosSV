@@ -202,7 +202,7 @@ DiezmosSV/
 │   ├── client/                 # React + Vite admin panel, /donar, fonts, assets
 │   └── shared/                 # Catalogs · DUI · NIT · legal windows · password policy
 │                               # fiscal corrections · checkout · money · email
-├── migrations/                 # D1 schema (incremental, append-only 0001…0043)
+├── migrations/                 # D1 schema (incremental, append-only 0001…0044)
 ├── DTE/svfe-json-schemas/      # MH-bundled JSON schemas for validation
 ├── docs/                       # Deploy/UAT · operator runbook · retention-restore
 │                               # fiscal-claim cutover/reconciliation · pre-CDE recovery
@@ -359,6 +359,16 @@ owner-owned `0600` files outside this repository, without symlinks:
 ```dotenv
 # /absolute/private/path/staging.env
 DIEZMOSSV_DEPLOY_TARGET=staging
+DIEZMOSSV_WORKER_NAME=<exact-staging-worker-name>
+DIEZMOSSV_GITHUB_REPOSITORY=jomplox/DiezmosSV
+DIEZMOSSV_CLOUDFLARE_ACCOUNT_ID=<exact-account-id>
+DIEZMOSSV_APP_ENV=staging
+DIEZMOSSV_D1_DATABASE_NAME=<exact-staging-d1-name>
+DIEZMOSSV_D1_DATABASE_ID=<exact-staging-d1-id>
+DIEZMOSSV_R2_BUCKET_NAME=<exact-staging-r2-bucket>
+DIEZMOSSV_QUEUE_NAME=<exact-staging-queue>
+DIEZMOSSV_QUEUE_DLQ_NAME=<exact-staging-dlq>
+DIEZMOSSV_WORKERS_DEV=true
 VITE_GIVEBUTTER_CAMPAIGN=example-campaign
 # Optional: replace both values with distinct real numeric Fund IDs, or omit both.
 # VITE_GIVEBUTTER_TITHE_FUND_ID=<real-tithe-fund-id>
@@ -367,10 +377,13 @@ DIEZMOSSV_APP_ORIGIN=https://staging.example.invalid
 DIEZMOSSV_DONOR_LOGO_FILE=/absolute/private/path/logo.png
 ```
 
-Select it with `export DIEZMOSSV_DEPLOY_CONFIG=/absolute/private/path/staging.env`. The selected target must
+Keep both target files available so the release gate can also prove that staging and production do not
+reuse a Worker, origin, D1 database, R2 bucket, queue, or dead-letter queue. Select them with
+`DIEZMOSSV_STAGING_DEPLOY_CONFIG` and `DIEZMOSSV_PRODUCTION_DEPLOY_CONFIG`; the legacy
+`DIEZMOSSV_DEPLOY_CONFIG` may still point at the selected file. The selected target must
 match `--env`; the PNG/JPEG must be decodable by the same `pdf-lib` path used for receipts. Before a
 remote deploy, the branding preflight validates that raster locally, requires `/api/health` to report
-`appEnv=staging`, and compares the exact advertised remote raster. `cf:deploy:staging` runs the preflight and
+`appEnv=staging` and the exact `workerName`, and compares the exact advertised remote raster. `cf:deploy:staging` runs the preflight and
 target-bound private build automatically; the same steps can be run independently without deploying:
 
 The Givebutter Fund mapping is optional but atomic. Omit both Fund IDs to hide the Givebutter alternative
@@ -380,6 +393,10 @@ rejects an incomplete, blank, nonnumeric, placeholder-like, or duplicate pair. T
 identifiers compiled into the browser only after validation; never guess them from the campaign name.
 
 ```bash
+export DIEZMOSSV_STAGING_DEPLOY_CONFIG=/absolute/private/path/staging.env
+export DIEZMOSSV_PRODUCTION_DEPLOY_CONFIG=/absolute/private/path/production.env
+export DIEZMOSSV_DEPLOY_CONFIG="$DIEZMOSSV_STAGING_DEPLOY_CONFIG"
+export DIEZMOSSV_APPROVED_SHA=<40-character-reviewed-commit-sha>
 npm run cf:branding:check -- --env staging
 npm run build:private -- --env staging
 ```
@@ -437,11 +454,12 @@ legal-record review; the preflight never deletes, relinks, or chooses a document
 migration itself runs through `scripts/d1-schema-compatibility.mjs`, which reconciles
 the applied-migration ledger before handing off to Wrangler.
 
-Two deploy guards fail the command closed rather than shipping a broken deployment:
+Three deploy guards fail the command closed rather than shipping a broken deployment:
 
 | Guard | Runs on | Blocks unless |
 |---|---|---|
 | `scripts/assert-fiscal-cutover.mjs` | `cf:migrate:prod`, `cf:deploy:prod`, `cf:cutover:staging` | `FISCAL_CUTOVER_QUIESCED=1` is set. Migrations 0020/0021 and the claim-aware Worker must land in **one quiesced maintenance window**: drain old Worker requests, pause queues/cron and mutating traffic, then acknowledge. |
+| `scripts/assert-release-provenance.mjs` | private builds and every target-bearing migrate, deploy, or tail command | `DIEZMOSSV_APPROVED_SHA` exactly equals clean tracked `HEAD`; the pinned GitHub commit has at least one check and all checks are complete/successful; the selected private Wrangler config exactly matches the owner-only target manifest; and staging/production persistent resources are distinct. |
 | `scripts/run-private-build.mjs` | `build:private`, and through it `cf:deploy:staging` and `cf:deploy:prod` | The selected target-bound owner-only deploy file, Givebutter campaign slug, origin, and donor raster pass validation. Only the public campaign slug is injected into Vite; Stripe values remain runtime-only. |
 
 Store the smoke settings in that `0600` out-of-tree file. The runner uses this approved path by
@@ -464,11 +482,12 @@ Production is intentionally a separate Wrangler environment and should be used o
 UAT approval. Its live values also stay only in the selected private Wrangler config described above.
 Select a distinct owner-only deploy file containing `DIEZMOSSV_DEPLOY_TARGET=production`, the
 production app origin, campaign, and an embeddable private PNG/JPEG. A staging-target file or an
-origin whose `/api/health` does not report `appEnv=production` is rejected before branding authentication or
+origin whose `/api/health` does not report `appEnv=production` and the exact production `workerName` is rejected before branding authentication or
 upload.
 
 ```bash
 export DIEZMOSSV_DEPLOY_CONFIG="/absolute/private/path/production.env"
+export DIEZMOSSV_APPROVED_SHA=<40-character-reviewed-commit-sha>
 
 # Verify the private production targets without printing their values into this repository.
 node scripts/run-private-wrangler.mjs d1 list
@@ -1018,7 +1037,7 @@ The safety model is the fiscal-claim model applied to a repair path:
 ## 🗄 Data model
 
 <details>
-<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0043)</strong></summary>
+<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0044)</strong></summary>
 
 <br/>
 

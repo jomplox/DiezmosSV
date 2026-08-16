@@ -610,6 +610,27 @@ describe("Stripe public donation routes", () => {
       frequency: "monthly"
     });
     const sessionId = String(created.body.sessionId);
+    const portalCookie = cookieHeaderFrom(created.response);
+    const setCookie = created.response.headers.get("set-cookie") ?? "";
+    expect(portalCookie).toMatch(/^diezmossv_stripe_portal_/);
+    expect(setCookie).toContain("Path=/api/donations/stripe/portal");
+    expect(setCookie).toContain("HttpOnly");
+    expect(setCookie).toContain("SameSite=Strict");
+    expect(setCookie).toContain("Secure");
+    const storedCapability = database.prepare(
+      `SELECT portal_capability_hash, portal_capability_expires_at,
+              portal_capability_revoked_at
+         FROM stripe_checkout_sessions
+        WHERE stripe_session_id = ?`
+    ).get(sessionId) as Record<string, unknown>;
+    expect(storedCapability).toEqual({
+      portal_capability_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      portal_capability_expires_at: expect.any(String),
+      portal_capability_revoked_at: null
+    });
+    const rawCapability = portalCookie.split("=", 2)[1];
+    expect(rawCapability).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(storedCapability.portal_capability_hash).not.toBe(rawCapability);
 
     const open = await worker.fetch(
       new Request(`${origin}/api/donations/stripe/session/${sessionId}`),
@@ -646,15 +667,124 @@ describe("Stripe public donation routes", () => {
       recurringStatus: "ACTIVE"
     });
 
-    const portal = await worker.fetch(new Request(`${origin}/api/donations/stripe/portal`, {
+    const sessionOnly = await worker.fetch(new Request(`${origin}/api/donations/stripe/portal`, {
       method: "POST",
       headers: jsonHeaders(),
+      body: JSON.stringify({ sessionId })
+    }), { ...workerEnv, DONATION_INTAKE_DISABLED: "true" });
+    expect(sessionOnly.status).toBe(403);
+
+    const portal = await worker.fetch(new Request(`${origin}/api/donations/stripe/portal`, {
+      method: "POST",
+      headers: { ...jsonHeaders(), Cookie: portalCookie },
       body: JSON.stringify({ sessionId })
     }), { ...workerEnv, DONATION_INTAKE_DISABLED: "true" });
     expect(portal.status).toBe(200);
     await expect(portal.json()).resolves.toEqual({
       url: "https://billing.stripe.test/session/cus_fixture"
     });
+  });
+
+  it("rotates the monthly portal capability on a safe Checkout replay", async () => {
+    const first = await createCheckout(workerEnv, {
+      requestId,
+      amount: 25,
+      frequency: "monthly"
+    });
+    const replay = await createCheckout(workerEnv, {
+      requestId,
+      amount: 25,
+      frequency: "monthly"
+    });
+    const sessionId = String(first.body.sessionId);
+    const firstCookie = cookieHeaderFrom(first.response);
+    const replayCookie = cookieHeaderFrom(replay.response);
+    expect(replay.response.status).toBe(200);
+    expect(replay.body).toEqual(first.body);
+    expect(replayCookie).not.toBe(firstCookie);
+
+    database.prepare(
+      `UPDATE stripe_checkout_sessions
+          SET status = 'COMPLETE', payment_status = 'PAID',
+              stripe_customer_id = 'cus_rotated', subscription_status = 'ACTIVE'
+        WHERE stripe_session_id = ?`
+    ).run(sessionId);
+
+    expect((await createPortal(workerEnv, sessionId, firstCookie)).status).toBe(403);
+    expect((await createPortal(workerEnv, sessionId, replayCookie)).status).toBe(200);
+  });
+
+  it("rejects cross-checkout, expired, and revoked portal capabilities", async () => {
+    const first = await createCheckout(workerEnv, {
+      requestId,
+      amount: 25,
+      frequency: "monthly"
+    });
+    const second = await createCheckout(workerEnv, {
+      requestId: "1c2e2165-edb7-4e4b-bc50-95a7fa3cdfe6",
+      amount: 25,
+      frequency: "monthly"
+    }, "203.0.113.2");
+    const firstSessionId = String(first.body.sessionId);
+    const secondSessionId = String(second.body.sessionId);
+    const firstCookie = cookieHeaderFrom(first.response);
+    const secondCookie = cookieHeaderFrom(second.response);
+    database.prepare(
+      `UPDATE stripe_checkout_sessions
+          SET status = 'COMPLETE', payment_status = 'PAID',
+              stripe_customer_id = 'cus_first', subscription_status = 'ACTIVE'
+        WHERE stripe_session_id = ?`
+    ).run(firstSessionId);
+    database.prepare(
+      `UPDATE stripe_checkout_sessions
+          SET status = 'COMPLETE', payment_status = 'PAID',
+              stripe_customer_id = 'cus_second', subscription_status = 'ACTIVE'
+        WHERE stripe_session_id = ?`
+    ).run(secondSessionId);
+
+    const crossCheckout = await createPortal(workerEnv, secondSessionId, firstCookie);
+    expect(crossCheckout.status).toBe(403);
+
+    database.prepare(
+      `UPDATE stripe_checkout_sessions
+          SET portal_capability_expires_at = '2000-01-01T00:00:00.000Z'
+        WHERE stripe_session_id = ?`
+    ).run(secondSessionId);
+    expect((await createPortal(workerEnv, secondSessionId, secondCookie)).status).toBe(403);
+
+    database.prepare(
+      `UPDATE stripe_checkout_sessions
+          SET portal_capability_expires_at = '2099-01-01T00:00:00.000Z',
+              portal_capability_revoked_at = '2026-08-16T00:00:00.000Z'
+        WHERE stripe_session_id = ?`
+    ).run(secondSessionId);
+    expect((await createPortal(workerEnv, secondSessionId, secondCookie)).status).toBe(403);
+  });
+
+  it("enforces a customer-wide portal budget across changing caller IPs", async () => {
+    const created = await createCheckout(workerEnv, {
+      requestId,
+      amount: 25,
+      frequency: "monthly"
+    });
+    const sessionId = String(created.body.sessionId);
+    const cookie = cookieHeaderFrom(created.response);
+    database.prepare(
+      `UPDATE stripe_checkout_sessions
+          SET status = 'COMPLETE', payment_status = 'PAID',
+              stripe_customer_id = 'cus_limited', subscription_status = 'ACTIVE'
+        WHERE stripe_session_id = ?`
+    ).run(sessionId);
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      expect((await createPortal(workerEnv, sessionId, cookie, `203.0.113.${attempt + 10}`)).status).toBe(200);
+    }
+    const limited = await createPortal(workerEnv, sessionId, cookie, "203.0.113.99");
+    expect(limited.status).toBe(429);
+    await expect(limited.json()).resolves.toMatchObject({ error: "too_many_attempts" });
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM stripe_portal_rate_limit_claims"
+    ).get()).toEqual({ count: 5 });
   });
 
   it("rejects unsafe mutations, invalid input, and new intake during shutdown", async () => {
@@ -749,6 +879,19 @@ async function createCheckout(
 
 function jsonHeaders(): Record<string, string> {
   return { "Content-Type": "application/json", Origin: origin };
+}
+
+function cookieHeaderFrom(response: Response): string {
+  const setCookie = response.headers.get("set-cookie") ?? "";
+  return setCookie.split(";", 1)[0] ?? "";
+}
+
+function createPortal(workerEnv: Env, sessionId: string, cookie: string, ip = "203.0.113.9"): Promise<Response> {
+  return worker.fetch(new Request(`${origin}/api/donations/stripe/portal`, {
+    method: "POST",
+    headers: { ...jsonHeaders(), Cookie: cookie, "CF-Connecting-IP": ip },
+    body: JSON.stringify({ sessionId })
+  }), { ...workerEnv, DONATION_INTAKE_DISABLED: "true" });
 }
 
 function stripeJson(

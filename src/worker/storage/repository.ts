@@ -37,6 +37,7 @@ import {
 import {
   claimDonationDatosRateLimit as claimDonationDatosRateLimitRepository,
   claimDonationIntentRateLimit as claimDonationIntentRateLimitRepository,
+  claimStripePortalRateLimit as claimStripePortalRateLimitRepository,
   claimStripeProviderRecoveryRead as claimStripeProviderRecoveryReadRepository,
   claimLoginAttempt as claimLoginAttemptRepository,
   claimPasswordResetBudgets as claimPasswordResetBudgetsRepository,
@@ -92,6 +93,9 @@ import {
   recordStripePaymentMethodForCheckout as recordStripePaymentMethodForCheckoutRepository,
   recordStripePaymentMethodForInvoiceByPaymentIntent as recordStripePaymentMethodForInvoiceByPaymentIntentRepository,
   recordStripeWebhookPaymentMethodEvidence as recordStripeWebhookPaymentMethodEvidenceRepository,
+  hasValidStripePortalCapability as hasValidStripePortalCapabilityRepository,
+  revokeStripePortalCapability as revokeStripePortalCapabilityRepository,
+  rotateStripePortalCapability as rotateStripePortalCapabilityRepository,
   reserveStripeCheckout as reserveStripeCheckoutRepository,
   saveStripeAcknowledgmentSnapshot as saveStripeAcknowledgmentSnapshotRepository,
   stageStripeInvoicePaid as stageStripeInvoicePaidRepository,
@@ -360,6 +364,24 @@ export class Repository {
 
   async getStripeCheckoutById(id: string): Promise<StripeCheckoutRecord | null> {
     return getStripeCheckoutByIdRepository(this.db, id);
+  }
+
+  async rotateStripePortalCapability(
+    input: Parameters<typeof rotateStripePortalCapabilityRepository>[1]
+  ): Promise<boolean> {
+    return rotateStripePortalCapabilityRepository(this.db, input);
+  }
+
+  async hasValidStripePortalCapability(
+    input: Parameters<typeof hasValidStripePortalCapabilityRepository>[1]
+  ): Promise<boolean> {
+    return hasValidStripePortalCapabilityRepository(this.db, input);
+  }
+
+  async revokeStripePortalCapability(
+    input: Parameters<typeof revokeStripePortalCapabilityRepository>[1]
+  ): Promise<boolean> {
+    return revokeStripePortalCapabilityRepository(this.db, input);
   }
 
   async attachStripeCheckoutSession(
@@ -1619,6 +1641,12 @@ export class Repository {
       expiresAt,
       limit
     );
+  }
+
+  async claimStripePortalRateLimit(
+    input: Parameters<typeof claimStripePortalRateLimitRepository>[1]
+  ): Promise<string | null> {
+    return claimStripePortalRateLimitRepository(this.db, input);
   }
 
   async claimPasswordResetBudgets(

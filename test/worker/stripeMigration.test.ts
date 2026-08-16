@@ -29,6 +29,10 @@ const annualEmailEvidenceMigrationPath = resolve(
   import.meta.dirname,
   "../../migrations/0041_stripe_annual_email_evidence.sql"
 );
+const portalCapabilityMigrationPath = resolve(
+  import.meta.dirname,
+  "../../migrations/0044_stripe_portal_capability.sql"
+);
 
 describe("Stripe U.S. donation persistence", () => {
   const openDatabases: DatabaseSync[] = [];
@@ -69,6 +73,9 @@ describe("Stripe U.S. donation persistence", () => {
       "payment_method_wallet",
       "payment_method_charge_id",
       "payment_method_event_id",
+      "portal_capability_hash",
+      "portal_capability_expires_at",
+      "portal_capability_revoked_at",
       "subscription_status",
       "stripe_payment_intent_id",
       "rate_limit_claim_id",
@@ -127,6 +134,24 @@ describe("Stripe U.S. donation persistence", () => {
       "payment_method_amount_cents",
       "payment_method_livemode"
     ]));
+  });
+
+  it("upgrades existing Stripe checkouts with empty portal capability state", () => {
+    const database = track(openDatabases, migratedDatabaseThrough("0043"));
+    insertCheckout(database, "checkout_portal_upgrade", "request_portal_upgrade", "fingerprint_portal_upgrade");
+
+    database.exec(readFileSync(portalCapabilityMigrationPath, "utf8"));
+
+    expect(database.prepare(
+      `SELECT portal_capability_hash, portal_capability_expires_at,
+              portal_capability_revoked_at
+         FROM stripe_checkout_sessions
+        WHERE id = ?`
+    ).get("checkout_portal_upgrade")).toEqual({
+      portal_capability_hash: null,
+      portal_capability_expires_at: null,
+      portal_capability_revoked_at: null
+    });
   });
 
   it("upgrades 0039 gifts as legacy evidence and makes newly attached methods immutable", () => {

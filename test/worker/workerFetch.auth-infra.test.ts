@@ -17,6 +17,25 @@ import {
 
 installWorkerFetchGlobals();
 
+describe("public deployment identity", () => {
+  it("returns both the environment and exact Worker script name", async () => {
+    const response = await worker.fetch(
+      new Request("https://example.org/api/health"),
+      env(new InMemoryD1(), {
+        APP_ENV: "staging",
+        CLOUDFLARE_SCRIPT_NAME: "diezmos-sv-staging"
+      })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      appEnv: "staging",
+      workerName: "diezmos-sv-staging"
+    });
+  });
+});
+
 describe("request body limits", () => {
   it("rejects an oversized login body before authentication or throttling", async () => {
     const db = new InMemoryD1();
@@ -120,6 +139,60 @@ describe("request body limits", () => {
   });
 });
 
+describe("public auth mutation admission", () => {
+  it.each([
+    ["login", "https://example.org/api/auth/login", undefined],
+    ["bootstrap", "https://example.org/api/auth/bootstrap-owner", `bt_${"A".repeat(43)}`]
+  ] as const)("rejects cross-site simple %s requests before spending an IP budget", async (_name, url, bootstrapToken) => {
+    const db = new InMemoryD1();
+    const headers = new Headers({
+      "Content-Type": "text/plain;charset=UTF-8",
+      Origin: "https://attacker.example",
+      "Sec-Fetch-Site": "cross-site",
+      "CF-Connecting-IP": "203.0.113.80"
+    });
+    if (bootstrapToken) headers.set("X-Bootstrap-Owner-Token", bootstrapToken);
+
+    const response = await worker.fetch(
+      new Request(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          email: "attacker@example.org",
+          name: "Attacker",
+          password: "Long-enough1!"
+        })
+      }),
+      env(db, { BOOTSTRAP_OWNER_TOKEN: VALID_BOOTSTRAP_TOKEN })
+    );
+
+    expect(response.status).toBe(415);
+    expect(db.loginRateLimits.size).toBe(0);
+    expect(db.users).toHaveLength(0);
+    expect(db.audits).toHaveLength(0);
+  });
+
+  it("rejects a mismatched login origin before spending an IP budget", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(
+      new Request("https://example.org/api/auth/login", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://attacker.example",
+          "CF-Connecting-IP": "203.0.113.81"
+        },
+        body: JSON.stringify({ email: "attacker@example.org", password: "Long-enough1!" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(403);
+    expect(db.loginRateLimits.size).toBe(0);
+    expect(db.loginCredentialReads).toBe(0);
+  });
+});
+
 describe("document route authorization order", () => {
   it("returns 401 without looking up either an existing or missing document", async () => {
     const db = new InMemoryD1();
@@ -195,6 +268,7 @@ describe("owner bootstrap", () => {
     expect(response.status).toBe(403);
     await expect(response.json()).resolves.toMatchObject({ error: "bootstrap_token_required" });
     expect(db.users).toHaveLength(0);
+    expect(db.loginRateLimits.size).toBe(0);
   });
 
   it("rejects first-owner bootstrap when the setup token is wrong", async () => {
@@ -207,6 +281,7 @@ describe("owner bootstrap", () => {
     expect(response.status).toBe(403);
     await expect(response.json()).resolves.toMatchObject({ error: "bootstrap_token_required" });
     expect(db.users).toHaveLength(0);
+    expect(db.loginRateLimits.size).toBe(1);
   });
 
   it("fails closed when the configured setup token is not a generated token", async () => {
@@ -234,6 +309,7 @@ describe("owner bootstrap", () => {
         new Request("https://example.org/api/auth/bootstrap-owner", {
           method: "POST",
           headers: {
+            "Content-Type": "application/json",
             "CF-Connecting-IP": "203.0.113.88",
             "X-Bootstrap-Owner-Token": `invalid-${attempt}`
           },

@@ -39,6 +39,9 @@ export interface StripeCheckoutRecord {
   payment_method_wallet: string | null;
   payment_method_charge_id: string | null;
   payment_method_event_id: string | null;
+  portal_capability_hash: string | null;
+  portal_capability_expires_at: string | null;
+  portal_capability_revoked_at: string | null;
   donor_name: string | null;
   donor_email: string | null;
   donor_phone: string | null;
@@ -236,6 +239,59 @@ export async function getStripeCheckoutById(
   return db.prepare(
     "SELECT * FROM stripe_checkout_sessions WHERE id = ?"
   ).bind(id).first<StripeCheckoutRecord>();
+}
+
+export async function rotateStripePortalCapability(
+  db: D1Database,
+  input: {
+    checkoutId: string;
+    capabilityHash: string;
+    expiresAt: string;
+    now: string;
+  }
+): Promise<boolean> {
+  const row = await db.prepare(
+    `UPDATE stripe_checkout_sessions
+        SET portal_capability_hash = ?, portal_capability_expires_at = ?,
+            portal_capability_revoked_at = NULL, updated_at = ?
+      WHERE id = ? AND frequency = 'MONTHLY'
+      RETURNING id`
+  ).bind(
+    input.capabilityHash,
+    input.expiresAt,
+    input.now,
+    input.checkoutId
+  ).first<{ id: string }>();
+  return row !== null;
+}
+
+export async function hasValidStripePortalCapability(
+  db: D1Database,
+  input: { checkoutId: string; capabilityHash: string; now: string }
+): Promise<boolean> {
+  const row = await db.prepare(
+    `SELECT id FROM stripe_checkout_sessions
+      WHERE id = ? AND frequency = 'MONTHLY'
+        AND payment_status = 'PAID' AND stripe_customer_id IS NOT NULL
+        AND portal_capability_hash = ?
+        AND portal_capability_expires_at > ?
+        AND portal_capability_revoked_at IS NULL
+      LIMIT 1`
+  ).bind(input.checkoutId, input.capabilityHash, input.now).first<{ id: string }>();
+  return row !== null;
+}
+
+export async function revokeStripePortalCapability(
+  db: D1Database,
+  input: { checkoutId: string; now: string }
+): Promise<boolean> {
+  const result = await db.prepare(
+    `UPDATE stripe_checkout_sessions
+        SET portal_capability_revoked_at = ?, updated_at = ?
+      WHERE id = ? AND portal_capability_hash IS NOT NULL
+        AND portal_capability_revoked_at IS NULL`
+  ).bind(input.now, input.now, input.checkoutId).run();
+  return Number(result.meta?.changes ?? 0) > 0;
 }
 
 export async function attachStripeCheckoutSession(

@@ -4,17 +4,22 @@ import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { loadEnvFile } from "node:process";
 import { assertPrivateEnvFile } from "./assert-private-env-file.mjs";
+import { loadPrivateDeployConfig } from "./private-deploy-config.mjs";
+import {
+  assertStagingSmokeTarget,
+  stagingSmokeFetch
+} from "./staging-smoke-client.mjs";
 
 const help = `
 DiezmosSV Cloudflare staging smoke test
 
 Required env:
-  STAGING_URL              Deployed Worker URL, for example https://diezmossv-staging-example.<account>.workers.dev
   STAGING_EMAIL            Admin/operator login email
   STAGING_PASSWORD         Admin/operator login password
   SMOKE_DONOR_DOCUMENT     Valid Salvadoran DUI to place on the TEST CDE
 
 Optional env:
+  STAGING_URL              If present, must exactly match the approved private deploy origin
   WOMPI_API_SECRET         Required when SMOKE_PATHS includes webhook
   STAGING_BOOTSTRAP=1      Bootstrap owner before login if login fails and D1 is empty
   STAGING_BOOTSTRAP_TOKEN  Required when STAGING_BOOTSTRAP=1; sent as X-Bootstrap-Owner-Token
@@ -46,19 +51,40 @@ if (args.has("--help") || args.has("-h")) {
 }
 
 const configuredEnvFile = process.env.DIEZMOSSV_ENV_FILE?.trim();
+if (configuredEnvFile && !isAbsolute(configuredEnvFile)) {
+  fail("DIEZMOSSV_ENV_FILE must be an absolute path outside the repository");
+}
 const envFile = configuredEnvFile
-  ? (isAbsolute(configuredEnvFile) ? configuredEnvFile : resolve(process.cwd(), configuredEnvFile))
+  ? configuredEnvFile
   : join(homedir(), "Library", "Application Support", "DiezmosSV", "private", "env", "staging-smoke.env");
 try {
-  assertPrivateEnvFile(envFile);
+  assertPrivateEnvFile(envFile, { requireOutsideDirectory: resolve(import.meta.dirname, "..") });
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error));
 }
 loadEnvFile(envFile);
+const repositoryRoot = resolve(import.meta.dirname, "..");
+let deployment;
+try {
+  deployment = loadPrivateDeployConfig({
+    target: "staging",
+    env: process.env,
+    repositoryRoot
+  });
+} catch (error) {
+  fail(error instanceof Error ? error.message : String(error));
+}
+const configuredStagingUrl = process.env.STAGING_URL?.trim();
+if (
+  configuredStagingUrl &&
+  normalizeBaseUrl(configuredStagingUrl) !== deployment.origin
+) {
+  fail("STAGING_URL does not match the approved staging origin");
+}
 
 const dryRun = args.has("--dry-run");
 const paths = parsePaths(process.env.SMOKE_PATHS ?? "webhook,admin");
-const required = ["STAGING_URL", "STAGING_EMAIL", "STAGING_PASSWORD", "SMOKE_DONOR_DOCUMENT"];
+const required = ["STAGING_EMAIL", "STAGING_PASSWORD", "SMOKE_DONOR_DOCUMENT"];
 if (paths.includes("webhook")) {
   required.push("WOMPI_API_SECRET");
 }
@@ -71,7 +97,8 @@ if (missing.length > 0) {
 }
 
 const config = {
-  baseUrl: normalizeBaseUrl(requiredEnv("STAGING_URL")),
+  baseUrl: deployment.origin,
+  workerName: deployment.workerName,
   email: requiredEnv("STAGING_EMAIL"),
   password: requiredEnv("STAGING_PASSWORD"),
   bootstrap: process.env.STAGING_BOOTSTRAP === "1",
@@ -119,14 +146,22 @@ await main();
 async function main() {
   const startedAt = Date.now();
   const results = [];
+  logStep("Checking /api/health");
+  const health = await assertStagingSmokeTarget({
+    baseUrl: config.baseUrl,
+    workerName: config.workerName
+  });
+  results.push({
+    check: "health",
+    ok: true,
+    appEnv: health.appEnv,
+    workerName: health.workerName
+  });
+
   logStep("Checking ASSETS/admin UI shell");
   const shell = await textRequest("/", { token: null });
   assert(shell.includes("ExamplePerson1") || shell.includes("root"), "Admin UI shell did not look like the built app");
   results.push({ check: "admin_ui_shell", ok: true });
-
-  logStep("Checking /api/health");
-  const health = await jsonRequest("/api/health", { token: null });
-  results.push({ check: "health", ok: true, appEnv: health.appEnv });
 
   logStep("Authenticating");
   const auth = await authenticate();
@@ -395,10 +430,14 @@ async function request(path, options = {}) {
     headers["Content-Type"] = "application/json";
     body = JSON.stringify(options.body);
   }
-  return fetch(`${config.baseUrl}${path}`, {
-    method: options.method ?? "GET",
-    headers,
-    body
+  return stagingSmokeFetch({
+    baseUrl: config.baseUrl,
+    path,
+    options: {
+      method: options.method ?? "GET",
+      headers,
+      body
+    }
   });
 }
 

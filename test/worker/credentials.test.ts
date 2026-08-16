@@ -507,15 +507,15 @@ describe("credential writer bootstrap", () => {
       const result = await bootstrapCloudflareWriterToken(
         env({
           CLOUDFLARE_ACCOUNT_ID: "account-id",
-          CLOUDFLARE_SCRIPT_NAME: "diezmossv-staging-example",
-          CLOUDFLARE_API_BASE_URL: "https://cf.test"
+          CLOUDFLARE_SCRIPT_NAME: "diezmossv-staging-example"
         }),
         "cf-writer-token"
       );
 
       const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-      expect(url).toBe("https://cf.test/accounts/account-id/workers/scripts/diezmossv-staging-example/secrets-bulk");
+      expect(url).toBe("https://api.cloudflare.com/client/v4/accounts/account-id/workers/scripts/diezmossv-staging-example/secrets-bulk");
       expect(init.method).toBe("PATCH");
+      expect(init.redirect).toBe("error");
       expect(init.headers).toMatchObject({
         Authorization: "Bearer cf-writer-token",
         "Content-Type": "application/json"
@@ -530,6 +530,25 @@ describe("credential writer bootstrap", () => {
         }
       });
       expect(result).toEqual({ updated: ["CLOUDFLARE_API_TOKEN"], deleted: [] });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("rejects a configurable Cloudflare API origin before sending the writer token", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      await expect(bootstrapCloudflareWriterToken(
+        env({
+          CLOUDFLARE_ACCOUNT_ID: "account-id",
+          CLOUDFLARE_SCRIPT_NAME: "diezmossv-staging-example",
+          CLOUDFLARE_API_BASE_URL: "https://attacker.example"
+        }),
+        "cf-writer-token"
+      )).rejects.toThrow(/Cloudflare.*configur/i);
+      expect(fetchMock).not.toHaveBeenCalled();
     } finally {
       vi.unstubAllGlobals();
     }

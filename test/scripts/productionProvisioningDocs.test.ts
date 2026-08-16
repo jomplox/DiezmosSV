@@ -349,7 +349,7 @@ const allowedWranglerDocumentationCases = [
 describe("remote provisioning documentation", () => {
   it("mirrors the current Stripe migration range and non-archived ledgers in both READMEs", () => {
     for (const document of [readme, readmeEs]) {
-      expect(document).toContain("0001…0043");
+      expect(document).toContain("0001…0044");
       expect(document).toContain("stripe_retention_generations");
       expect(document).toContain("stripe_invoice_settlement_retention_generations");
       expect(document).toContain("Stripe");
@@ -365,11 +365,21 @@ describe("remote provisioning documentation", () => {
       expect(document).toContain("DIEZMOSSV_DEPLOY_CONFIG");
       expect(document).toContain("DIEZMOSSV_DEPLOY_TARGET=staging");
       expect(document).toContain("DIEZMOSSV_DEPLOY_TARGET=production");
+      expect(document).toContain("DIEZMOSSV_WORKER_NAME");
+      expect(document).toContain("DIEZMOSSV_CLOUDFLARE_ACCOUNT_ID");
+      expect(document).toContain("DIEZMOSSV_D1_DATABASE_ID");
+      expect(document).toContain("DIEZMOSSV_R2_BUCKET_NAME");
+      expect(document).toContain("DIEZMOSSV_QUEUE_NAME");
+      expect(document).toContain("DIEZMOSSV_QUEUE_DLQ_NAME");
+      expect(document).toContain("DIEZMOSSV_WORKERS_DEV");
+      expect(document).toContain("DIEZMOSSV_APPROVED_SHA");
+      expect(document).toContain("scripts/assert-release-provenance.mjs");
       expect(document).toContain("DIEZMOSSV_APP_ORIGIN");
       expect(document).toContain("DIEZMOSSV_DONOR_LOGO_FILE");
       expect(document).toContain("pdf-lib");
       expect(document).toContain("/api/health");
       expect(document).toContain("appEnv");
+      expect(document).toContain("workerName");
       expect(document).toContain("npm run cf:branding:check -- --env staging");
       expect(document).toContain("npm run cf:branding:check -- --env production");
       expect(document).toContain("npm run build:private -- --env staging");

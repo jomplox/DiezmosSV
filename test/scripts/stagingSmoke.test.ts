@@ -1,12 +1,13 @@
-import { mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 const smokeScript = resolve(import.meta.dirname, "../../scripts/staging-smoke.mjs");
 const smokeSource = readFileSync(smokeScript, "utf8");
 const stagingUatSource = readFileSync(resolve(import.meta.dirname, "../../docs/cloudflare-staging-uat.md"), "utf8");
+const repositoryRoot = resolve(import.meta.dirname, "../..");
 
 describe("staging smoke disposable VIEWER password", () => {
   it("derives the password from randomBytes instead of the timestamp", () => {
@@ -33,6 +34,36 @@ describe("staging smoke provenance", () => {
 });
 
 describe("staging smoke private environment file", () => {
+  it("rejects a relative credential path instead of resolving it inside the caller's checkout", () => {
+    const directory = mkdtempSync(join(tmpdir(), "diezmos-staging-smoke-relative-"));
+    const envFile = join(directory, "staging-smoke.env");
+    writeValidSmokeEnv(envFile);
+
+    const result = spawnSync(process.execPath, [smokeScript, "--dry-run"], {
+      cwd: directory,
+      encoding: "utf8",
+      env: { ...process.env, DIEZMOSSV_ENV_FILE: "staging-smoke.env" }
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stdout + result.stderr).toContain("absolute path");
+  });
+
+  it("rejects an absolute credential file stored anywhere inside the repository", () => {
+    const directory = mkdtempSync(join(repositoryRoot, ".staging-smoke-private-test-"));
+    try {
+      const envFile = join(directory, "staging-smoke.env");
+      writeValidSmokeEnv(envFile);
+
+      const result = runSmoke(envFile, ["--dry-run"]);
+
+      expect(result.status).not.toBe(0);
+      expect(result.stdout + result.stderr).toContain("outside the repository");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("loads required values from DIEZMOSSV_ENV_FILE without printing secrets", () => {
     const directory = mkdtempSync(join(tmpdir(), "diezmos-staging-smoke-"));
     const envFile = join(directory, "staging-smoke.env");
@@ -59,6 +90,24 @@ describe("staging smoke private environment file", () => {
     expect(output).not.toContain("smoke@example.org");
     expect(output).not.toContain("donorEmail");
     expect(output).not.toContain("donorDocument");
+  });
+
+  it("rejects a smoke URL that differs from the approved private deploy origin", () => {
+    const directory = mkdtempSync(join(tmpdir(), "diezmos-staging-smoke-"));
+    const envFile = join(directory, "staging-smoke.env");
+    writeValidSmokeEnv(envFile);
+    writeFileSync(
+      envFile,
+      readFileSync(envFile, "utf8").replace(
+        "https://staging.example.org",
+        "https://attacker.example"
+      ),
+      { mode: 0o600 }
+    );
+
+    const result = runSmoke(envFile, ["--dry-run"]);
+    expect(result.status).not.toBe(0);
+    expect(result.stdout + result.stderr).toContain("approved staging origin");
   });
 
   it("rejects a symlinked environment file", () => {
@@ -136,7 +185,36 @@ describe("staging smoke supported routes", () => {
 });
 
 function runSmoke(envFile: string, args: string[]): SpawnSyncReturns<string> {
-  const env: NodeJS.ProcessEnv = { ...process.env, DIEZMOSSV_ENV_FILE: envFile };
+  const privateRoot = dirname(envFile);
+  const logoPath = join(privateRoot, "staging-logo.png");
+  const configPath = join(privateRoot, "staging-deploy.env");
+  writeFileSync(
+    logoPath,
+    Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"),
+    { mode: 0o600 }
+  );
+  writeFileSync(configPath, [
+    "DIEZMOSSV_DEPLOY_TARGET=staging",
+    "DIEZMOSSV_WORKER_NAME=diezmos-sv-staging",
+    "DIEZMOSSV_GITHUB_REPOSITORY=jomplox/DiezmosSV",
+    "DIEZMOSSV_CLOUDFLARE_ACCOUNT_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "DIEZMOSSV_APP_ENV=staging",
+    "DIEZMOSSV_D1_DATABASE_NAME=diezmos-sv-staging-db",
+    "DIEZMOSSV_D1_DATABASE_ID=11111111-1111-1111-1111-111111111111",
+    "DIEZMOSSV_R2_BUCKET_NAME=diezmos-sv-staging-archive",
+    "DIEZMOSSV_QUEUE_NAME=diezmos-sv-staging-issuance",
+    "DIEZMOSSV_QUEUE_DLQ_NAME=diezmos-sv-staging-issuance-dlq",
+    "DIEZMOSSV_WORKERS_DEV=true",
+    "VITE_GIVEBUTTER_CAMPAIGN=campaign-fixture",
+    "DIEZMOSSV_APP_ORIGIN=https://staging.example.org",
+    `DIEZMOSSV_DONOR_LOGO_FILE=${logoPath}`,
+    ""
+  ].join("\n"), { mode: 0o600 });
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    DIEZMOSSV_ENV_FILE: envFile,
+    DIEZMOSSV_DEPLOY_CONFIG: configPath
+  };
   for (const key of [
     "STAGING_URL",
     "STAGING_EMAIL",
@@ -148,4 +226,18 @@ function runSmoke(envFile: string, args: string[]): SpawnSyncReturns<string> {
     delete env[key];
   }
   return spawnSync(process.execPath, [smokeScript, ...args], { encoding: "utf8", env });
+}
+
+function writeValidSmokeEnv(path: string): void {
+  writeFileSync(
+    path,
+    [
+      "STAGING_URL=https://staging.example.org",
+      "STAGING_EMAIL=operator@example.org",
+      "STAGING_PASSWORD=SENTINEL_STAGING_PASSWORD",
+      "WOMPI_API_SECRET=SENTINEL_WOMPI_SECRET",
+      "SMOKE_DONOR_DOCUMENT=10000000-1"
+    ].join("\n"),
+    { mode: 0o600 }
+  );
 }

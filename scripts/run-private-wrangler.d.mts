@@ -17,8 +17,15 @@ export function createSignalCleanupHandler(options: {
 
 export function createPrivateWranglerRunner(options?: {
   repositoryRoot?: string;
-  env?: NodeJS.ProcessEnv;
+  env?: Record<string, string | undefined>;
   configPath?: string;
   migrationsDirOverride?: string;
   spawnImpl?: typeof import("node:child_process").spawn;
+  assertProvenanceImpl?: typeof import(
+    "./assert-release-provenance.mjs"
+  ).assertReleaseProvenance;
 }): PrivateWranglerRunner;
+
+export function releaseTargetForWranglerArgs(
+  args: string[]
+): "staging" | "production" | null;

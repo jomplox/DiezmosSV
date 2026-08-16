@@ -178,6 +178,7 @@ describe("runtime donor logo verification", () => {
 
   it("bounds every request with an abort signal that is not already spent", async () => {
     const signals: (AbortSignal | undefined)[] = [];
+    const redirects: (RequestInit["redirect"] | undefined)[] = [];
     let remoteBytes: Buffer<ArrayBufferLike> = Buffer.from("<svg>legacy</svg>");
     let remoteContentType = "image/svg+xml";
     let version = "legacy-version";
@@ -203,6 +204,7 @@ describe("runtime donor logo verification", () => {
     });
     const fetchImpl: typeof fetch = (input, init) => {
       signals.push(init?.signal ?? undefined);
+      redirects.push(init?.redirect);
       return fetch(input, init);
     };
 
@@ -215,6 +217,7 @@ describe("runtime donor logo verification", () => {
         expect(signal).toBeInstanceOf(AbortSignal);
         expect(signal?.aborted).toBe(false);
       }
+      expect(redirects).toEqual(Array.from({ length: 8 }, () => "error"));
     } finally {
       await server.close();
     }
@@ -263,7 +266,10 @@ describe("runtime donor logo verification", () => {
     const server = await localServer(async (request, response) => {
       requests.push(`${request.method} ${request.url}`);
       if (request.url === "/api/health") {
-        return json(response, 200, { appEnv: "production" });
+        return json(response, 200, {
+          appEnv: "production",
+          workerName: "diezmos-sv-production"
+        });
       }
       if (request.url === "/api/branding") {
         return json(response, 200, { donorLogoVersion: "fixture-version" });
@@ -273,6 +279,31 @@ describe("runtime donor logo verification", () => {
         return response.end(localRasterBytes);
       }
       response.writeHead(404).end();
+    });
+
+    try {
+      await expect(
+        migrateRuntimeBrandingLogo(runtimeConfig(server.origin), credentials(), {
+          fetchImpl: fetch
+        })
+      ).rejects.toThrow(/deployment target/i);
+      expect(requests).toEqual(["GET /api/health"]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("rejects a different Worker identity before branding or authentication", async () => {
+    const requests: string[] = [];
+    const server = await localServer(async (request, response) => {
+      requests.push(`${request.method} ${request.url}`);
+      if (request.url === "/api/health") {
+        return json(response, 200, {
+          appEnv: "staging",
+          workerName: "attacker-controlled-worker"
+        });
+      }
+      response.writeHead(500).end();
     });
 
     try {
@@ -593,6 +624,18 @@ function runtimeConfig(origin: string, options: {
   const bytes = options.bytes ?? localRasterBytes;
   return {
     target: "staging" as const,
+    workerName: "diezmos-sv-staging",
+    githubRepository: "jomplox/DiezmosSV",
+    resourceManifest: {
+      accountId: "a".repeat(32),
+      appEnv: "staging" as const,
+      d1DatabaseName: "diezmos-sv-staging-db",
+      d1DatabaseId: "11111111-1111-1111-1111-111111111111",
+      r2BucketName: "diezmos-sv-staging-archive",
+      queueName: "diezmos-sv-staging-issuance",
+      queueDlqName: "diezmos-sv-staging-issuance-dlq",
+      workersDev: true
+    },
     campaign: "campaign-fixture",
     givebutterFunds: null,
     origin,
@@ -622,6 +665,16 @@ function cliFixture(origin: string, options: {
   writeFileSync(logoPath, logoBytes, { mode: 0o600 });
   writeFileSync(configPath, [
     "DIEZMOSSV_DEPLOY_TARGET=staging",
+    "DIEZMOSSV_WORKER_NAME=diezmos-sv-staging",
+    "DIEZMOSSV_GITHUB_REPOSITORY=jomplox/DiezmosSV",
+    "DIEZMOSSV_CLOUDFLARE_ACCOUNT_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "DIEZMOSSV_APP_ENV=staging",
+    "DIEZMOSSV_D1_DATABASE_NAME=diezmos-sv-staging-db",
+    "DIEZMOSSV_D1_DATABASE_ID=11111111-1111-1111-1111-111111111111",
+    "DIEZMOSSV_R2_BUCKET_NAME=diezmos-sv-staging-archive",
+    "DIEZMOSSV_QUEUE_NAME=diezmos-sv-staging-issuance",
+    "DIEZMOSSV_QUEUE_DLQ_NAME=diezmos-sv-staging-issuance-dlq",
+    "DIEZMOSSV_WORKERS_DEV=true",
     "VITE_GIVEBUTTER_CAMPAIGN=campaign-fixture",
     `DIEZMOSSV_APP_ORIGIN=${origin}`,
     `DIEZMOSSV_DONOR_LOGO_FILE=${logoPath}`,
@@ -709,10 +762,11 @@ function json(response: ServerResponse, status: number, body: unknown): void {
 function respondToHealth(
   request: IncomingMessage,
   response: ServerResponse,
-  appEnv = "staging"
+  appEnv = "staging",
+  workerName = "diezmos-sv-staging"
 ): boolean {
   if (request.url !== "/api/health") return false;
-  json(response, 200, { appEnv });
+  json(response, 200, { appEnv, workerName });
   return true;
 }
 

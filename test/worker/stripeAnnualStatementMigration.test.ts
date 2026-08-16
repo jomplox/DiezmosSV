@@ -172,7 +172,7 @@ describe("Stripe U.S. annual statement persistence", () => {
 
   it("upgrades 0042 legacy post-dispatch rows and still lets operators move them to REVIEW", () => {
     expect(migrationFiles().at(-1)).toBe(
-      "0043_stripe_annual_email_evidence_dispatch_guard.sql"
+      "0044_stripe_portal_capability.sql"
     );
     expect(existsSync(emailEvidenceDispatchGuardMigrationPath)).toBe(true);
     const database = migratedDatabaseThrough("0042");

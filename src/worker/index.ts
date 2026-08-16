@@ -152,7 +152,7 @@ import {
 } from "./storage/repository";
 import type { Ambiente, DteDocumentRecord, Env, IssuanceMessage, MhResponse, WompiWebhook } from "./types";
 import { addHours, cdeInvalidationDeadline, isWithinDeadline, nowIso } from "./utils/dates";
-import { sha256Hex, timingSafeEqual, utf8Bytes } from "./utils/encoding";
+import { base64UrlFromBytes, sha256Hex, timingSafeEqual, utf8Bytes } from "./utils/encoding";
 import { isRecord, normalizeUuidV4 } from "./utils/guards";
 import { newId } from "./utils/ids";
 import {
@@ -188,6 +188,12 @@ const STRIPE_RECOVERY_WINDOW_MS = 15 * 60 * 1000;
 const STRIPE_RECOVERY_LEASE_MS = 60 * 1000;
 const STRIPE_RECOVERY_IDENTITY_LIMIT = 5;
 const STRIPE_RECOVERY_IP_LIMIT = 20;
+const STRIPE_PORTAL_CAPABILITY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const STRIPE_PORTAL_RATE_WINDOW_MS = 15 * 60 * 1000;
+const STRIPE_PORTAL_IP_LIMIT = 10;
+const STRIPE_PORTAL_CUSTOMER_LIMIT = 5;
+const STRIPE_PORTAL_AGGREGATE_LIMIT = 100;
+const STRIPE_PORTAL_PATH = "/api/donations/stripe/portal";
 
 // Public donation endpoints parse untrusted JSON before validation and rate-limit
 // admission. Cap bodies at 16 KiB (normal payloads are a few hundred bytes) so an
@@ -337,7 +343,7 @@ function redirectToCanonicalDocument(env: Env, url: URL): Response | null {
 // write D1 state, or call Wompi. Direct server clients may omit Origin, but every
 // caller must use JSON; browser requests that do provide Origin must match the URL
 // that received the request. APP_ORIGIN remains the canonical link-generation origin.
-function rejectUnsafePublicDonationMutation(request: Request, url: URL): Response | null {
+function rejectUnsafePublicJsonMutation(request: Request, url: URL): Response | null {
   const mediaType = request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
   if (mediaType !== "application/json") {
     return jsonResponse(
@@ -1250,7 +1256,12 @@ interface ApiRouteContext extends RoutableContext {
 }
 
 async function handleHealth(ctx: ApiRouteContext): Promise<Response> {
-  return jsonResponse({ ok: true, appEnv: ctx.env.APP_ENV ?? "unknown", now: nowIso() });
+  return jsonResponse({
+    ok: true,
+    appEnv: ctx.env.APP_ENV ?? "unknown",
+    workerName: ctx.env.CLOUDFLARE_SCRIPT_NAME ?? null,
+    now: nowIso()
+  });
 }
 
 async function handleBootstrapStatus(ctx: ApiRouteContext): Promise<Response> {
@@ -1277,7 +1288,7 @@ async function handleDonorBrandingLogo(ctx: ApiRouteContext): Promise<Response> 
 // background on Paso 1→2); a body carrying donor data is a full create (the fallback
 // when no usable premint draft exists). Both mint the link identically.
 async function handleCreateDonationIntent(ctx: ApiRouteContext): Promise<Response> {
-  const rejected = rejectUnsafePublicDonationMutation(ctx.request, ctx.url);
+  const rejected = rejectUnsafePublicJsonMutation(ctx.request, ctx.url);
   if (rejected) return rejected;
   assertDeploymentCanCollectPayments(ctx.env);
   const clientIp = clientIpFrom(ctx.request);
@@ -1327,7 +1338,7 @@ async function handleCreateDonationIntent(ctx: ApiRouteContext): Promise<Respons
 }
 
 async function handleCreateStripeCheckout(ctx: ApiRouteContext): Promise<Response> {
-  const rejected = rejectUnsafePublicDonationMutation(ctx.request, ctx.url);
+  const rejected = rejectUnsafePublicJsonMutation(ctx.request, ctx.url);
   if (rejected) return rejected;
   assertDeploymentCanCollectPayments(ctx.env);
 
@@ -1459,12 +1470,13 @@ async function handleCreateStripeCheckout(ctx: ApiRouteContext): Promise<Respons
   } catch (error) {
     logWorkerError(ctx.env, "stripe_checkout_finalize_deferred", error);
   }
-  return jsonResponse({
-    sessionId: session.id,
-    clientSecret: session.clientSecret,
-    publishableKey: stripeConfiguration.publishableKey,
-    mock: stripeConfiguration.mock
-  }, { status: 201, headers: { "Cache-Control": "no-store" } });
+  return stripeCheckoutClientResponse(
+    ctx,
+    checkout,
+    session,
+    stripeConfiguration,
+    201
+  );
 }
 
 type StripeCheckoutCreationInput = ReturnType<typeof validateStripeCheckoutInput>;
@@ -1617,15 +1629,7 @@ async function existingStripeCheckoutResponse(
       outcome: "COMPLETE",
       now: nowIso()
     });
-    return jsonResponse(
-      {
-        sessionId: session.id,
-        clientSecret: session.clientSecret,
-        publishableKey: configuration.publishableKey,
-        mock: configuration.mock
-      },
-      { headers: { "Cache-Control": "no-store" } }
-    );
+    return stripeCheckoutClientResponse(ctx, checkout, session, configuration);
   } catch (error) {
     await ctx.repo.finalizeStripeProviderRecoveryRead({
       id: recoveryClaim,
@@ -1695,10 +1699,67 @@ function stripeCheckoutConflictResponse(): Response {
   );
 }
 
+async function stripeCheckoutClientResponse(
+  ctx: ApiRouteContext,
+  checkout: import("./storage/repository").StripeCheckoutRecord,
+  session: import("./services/stripeClient").StripeCheckoutSnapshot & { clientSecret: string },
+  configuration: ReturnType<typeof resolveStripeConfiguration>,
+  status = 200
+): Promise<Response> {
+  const headers = new Headers({ "Cache-Control": "no-store" });
+  if (checkout.frequency === "MONTHLY") {
+    const capability = base64UrlFromBytes(crypto.getRandomValues(new Uint8Array(32)));
+    const now = new Date();
+    try {
+      const stored = await ctx.repo.rotateStripePortalCapability({
+        checkoutId: checkout.id,
+        capabilityHash: await sha256Hex(utf8Bytes(capability)),
+        expiresAt: new Date(now.getTime() + STRIPE_PORTAL_CAPABILITY_TTL_MS).toISOString(),
+        now: now.toISOString()
+      });
+      if (stored) {
+        headers.append("Set-Cookie", stripePortalCapabilityCookie(
+          checkout.id,
+          capability,
+          ctx.url.protocol === "https:"
+        ));
+      }
+    } catch (error) {
+      logWorkerError(ctx.env, "stripe_portal_capability_store_failed", error);
+    }
+  }
+  return jsonResponse({
+    sessionId: session.id,
+    clientSecret: session.clientSecret,
+    publishableKey: configuration.publishableKey,
+    mock: configuration.mock
+  }, { status, headers });
+}
+
+function stripePortalCapabilityCookie(checkoutId: string, capability: string, secure: boolean): string {
+  const maxAge = Math.floor(STRIPE_PORTAL_CAPABILITY_TTL_MS / 1000);
+  return `${stripePortalCookieName(checkoutId)}=${capability}; Max-Age=${maxAge}; Path=${STRIPE_PORTAL_PATH}; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}`;
+}
+
+function stripePortalCookieName(checkoutId: string): string {
+  return `diezmossv_stripe_portal_${checkoutId}`;
+}
+
+function stripePortalCapabilityFromRequest(request: Request, checkoutId: string): string {
+  const expectedName = stripePortalCookieName(checkoutId);
+  const matches = (request.headers.get("cookie") ?? "")
+    .split(";")
+    .map((part) => part.trim())
+    .filter((part) => part.startsWith(`${expectedName}=`))
+    .map((part) => part.slice(expectedName.length + 1));
+  if (matches.length !== 1 || !/^[A-Za-z0-9_-]{43}$/.test(matches[0])) return "";
+  return matches[0];
+}
+
 function assertCreatedStripeCheckout(
   session: import("./services/stripeClient").StripeCheckoutSnapshot,
   checkout: import("./storage/repository").StripeCheckoutRecord
-): void {
+): asserts session is import("./services/stripeClient").StripeCheckoutSnapshot & { clientSecret: string } {
   const expectedMode = checkout.frequency === "MONTHLY" ? "subscription" : "payment";
   const expectedFrequency = checkout.frequency === "MONTHLY" ? "monthly" : "once";
   const expectedGiftType = checkout.gift_type === "TITHE"
@@ -1837,7 +1898,7 @@ async function handleStripeCheckoutStatus(ctx: ApiRouteContext): Promise<Respons
 }
 
 async function handleStripePortal(ctx: ApiRouteContext): Promise<Response> {
-  const rejected = rejectUnsafePublicDonationMutation(ctx.request, ctx.url);
+  const rejected = rejectUnsafePublicJsonMutation(ctx.request, ctx.url);
   if (rejected) return rejected;
   let body: Record<string, unknown>;
   try {
@@ -1861,10 +1922,40 @@ async function handleStripePortal(ctx: ApiRouteContext): Promise<Response> {
     || checkout.frequency !== "MONTHLY"
     || checkout.payment_status !== "PAID"
     || !checkout.stripe_customer_id
+    || checkout.subscription_status === "CANCELED"
   ) {
     return jsonResponse(
       { error: "stripe_portal_unavailable", message: "La administración de su entrega mensual aún no está disponible." },
       { status: 409, headers: { "Cache-Control": "no-store" } }
+    );
+  }
+  const capability = stripePortalCapabilityFromRequest(ctx.request, checkout.id);
+  const capabilityAccepted = capability !== "" && await ctx.repo.hasValidStripePortalCapability({
+    checkoutId: checkout.id,
+    capabilityHash: await sha256Hex(utf8Bytes(capability)),
+    now: nowIso()
+  });
+  if (!capabilityAccepted) {
+    return jsonResponse(
+      { error: "stripe_portal_unavailable", message: "Vuelva al navegador donde completó su entrega para administrar su entrega mensual." },
+      { status: 403, headers: { "Cache-Control": "no-store" } }
+    );
+  }
+  const rateNow = new Date();
+  const rateLimitClaimId = await ctx.repo.claimStripePortalRateLimit({
+    ipKeyHash: await rateLimitKey(`stripe-portal-ip:${clientIpFrom(ctx.request)}`),
+    customerKeyHash: await rateLimitKey(`stripe-portal-customer:${checkout.stripe_customer_id}`),
+    now: rateNow.toISOString(),
+    cutoff: new Date(rateNow.getTime() - STRIPE_PORTAL_RATE_WINDOW_MS).toISOString(),
+    expiresAt: new Date(rateNow.getTime() + STRIPE_PORTAL_RATE_WINDOW_MS).toISOString(),
+    ipLimit: STRIPE_PORTAL_IP_LIMIT,
+    customerLimit: STRIPE_PORTAL_CUSTOMER_LIMIT,
+    aggregateLimit: STRIPE_PORTAL_AGGREGATE_LIMIT
+  });
+  if (!rateLimitClaimId) {
+    return jsonResponse(
+      { error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." },
+      { status: 429, headers: { "Cache-Control": "no-store" } }
     );
   }
   let configuration;
@@ -1897,6 +1988,8 @@ async function handleStripePortal(ctx: ApiRouteContext): Promise<Response> {
 // fast D1-only call (no Wompi). Its dedicated per-IP budget counts every attempt,
 // including malformed bodies and failed capability guesses.
 async function handleDonationIntentDatos(ctx: ApiRouteContext): Promise<Response> {
+  const rejected = rejectUnsafePublicJsonMutation(ctx.request, ctx.url);
+  if (rejected) return rejected;
   const clientIp = clientIpFrom(ctx.request);
   const claimNow = nowIso();
   const rateLimitClaimId = await ctx.repo.claimDonationDatosRateLimit(
@@ -1954,6 +2047,11 @@ async function handleBootstrapOwner(ctx: ApiRouteContext): Promise<Response> {
   if (!isBootstrapOwnerTokenConfigured(ctx.env)) {
     return jsonResponse({ error: "bootstrap_configuration_invalid" }, { status: 503 });
   }
+  const rejected = rejectUnsafePublicJsonMutation(ctx.request, ctx.url);
+  if (rejected) return rejected;
+  if (!(ctx.request.headers.get(BOOTSTRAP_OWNER_TOKEN_HEADER)?.trim())) {
+    return jsonResponse({ error: "bootstrap_token_required" }, { status: 403 });
+  }
   const claimNow = nowIso();
   const accepted = await ctx.repo.claimLoginAttempt(
     await rateLimitKey(`bootstrap-owner:${clientIpFrom(ctx.request)}`),
@@ -1989,6 +2087,8 @@ async function handleBootstrapOwner(ctx: ApiRouteContext): Promise<Response> {
 }
 
 async function handleLogin(ctx: ApiRouteContext): Promise<Response> {
+  const rejected = rejectUnsafePublicJsonMutation(ctx.request, ctx.url);
+  if (rejected) return rejected;
   const body = (await readJsonObject(ctx.request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as unknown as { email: string; password: string };
   const normalizedEmail = String(body.email ?? "").trim().toLowerCase();
   const { ip: callerIp } = auditContextFrom(ctx.request);

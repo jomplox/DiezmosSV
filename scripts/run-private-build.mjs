@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { constants } from "node:os";
 import { pathToFileURL } from "node:url";
 import { loadPrivateDeployConfig } from "./private-deploy-config.mjs";
+import { assertReleaseProvenance } from "./assert-release-provenance.mjs";
 
 const PUBLIC_VITE_VARIABLES = [
   ["VITE_GIVEBUTTER_CAMPAIGN", (config) => config.campaign],
@@ -15,12 +16,14 @@ export async function runPrivateBuild({
   env = process.env,
   repositoryRoot = process.cwd(),
   spawnImpl = spawn,
-  platform = process.platform
+  platform = process.platform,
+  assertProvenanceImpl = assertReleaseProvenance
 } = {}) {
   // Validate the owner-only target, campaign, origin, and donor-logo contract
   // before Vite starts. Only validated public Givebutter routing values enter
   // the client build; Stripe credentials remain runtime-only.
   const config = loadPrivateDeployConfig({ target, env, repositoryRoot });
+  assertProvenanceImpl({ target, env, repositoryRoot, selectedConfig: config });
   const buildEnv = createBuildEnvironment(env, config);
   const invocation = buildInvocation(platform, buildEnv);
 

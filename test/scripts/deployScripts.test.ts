@@ -21,6 +21,28 @@ const lifecycleMigration = readFileSync(
 );
 
 describe("remote deploy and migration scripts", () => {
+  it("runs exact release provenance before every target-bearing remote command", () => {
+    for (const [script, target] of [
+      ["cf:migrate:staging", "staging"],
+      ["cf:deploy:staging", "staging"],
+      ["cf:tail:staging", "staging"],
+      ["cf:migrate:prod", "production"],
+      ["cf:deploy:prod", "production"],
+      ["cf:tail:prod", "production"]
+    ] as const) {
+      const steps = packageJson.scripts[script].split(" && ");
+      const provenance = steps.indexOf(
+        `node scripts/assert-release-provenance.mjs --env ${target}`
+      );
+      const remote = steps.findIndex((step) =>
+        step.includes("d1-migration-preflight") ||
+        step.includes("d1-schema-compatibility") ||
+        step.includes("run-private-wrangler")
+      );
+      expect(provenance).toBeGreaterThanOrEqual(0);
+      expect(remote).toBeGreaterThan(provenance);
+    }
+  });
   it("keeps routine staging scripts free of the one-time cutover guard", () => {
     for (const script of ["cf:migrate:staging", "cf:deploy:staging"] as const) {
       expect(packageJson.scripts[script], `script ${script}`).not.toContain(
@@ -58,10 +80,10 @@ describe("remote deploy and migration scripts", () => {
 
   it("wires the branding gate into both deploy scripts", () => {
     expect(packageJson.scripts["cf:deploy:staging"]).toBe(
-      "node scripts/assert-runtime-branding-logo.mjs --env staging && npm run build:private -- --env staging && node scripts/run-private-wrangler.mjs deploy --env staging --keep-vars"
+      "node scripts/assert-release-provenance.mjs --env staging && node scripts/assert-runtime-branding-logo.mjs --env staging && npm run build:private -- --env staging && node scripts/run-private-wrangler.mjs deploy --env staging --keep-vars"
     );
     expect(packageJson.scripts["cf:deploy:prod"]).toBe(
-      "node scripts/assert-fiscal-cutover.mjs && node scripts/assert-runtime-branding-logo.mjs --env production && npm run build:private -- --env production && node scripts/run-private-wrangler.mjs deploy --env production --keep-vars"
+      "node scripts/assert-fiscal-cutover.mjs && node scripts/assert-release-provenance.mjs --env production && node scripts/assert-runtime-branding-logo.mjs --env production && npm run build:private -- --env production && node scripts/run-private-wrangler.mjs deploy --env production --keep-vars"
     );
     expect(packageJson.scripts["cf:branding:check"]).toBe(
       "node scripts/assert-runtime-branding-logo.mjs"
@@ -79,7 +101,7 @@ describe("remote deploy and migration scripts", () => {
 
   it("guards the explicit staging cutover before migration and deployment", () => {
     expect(packageJson.scripts["cf:cutover:staging"]).toBe(
-      "node scripts/assert-fiscal-cutover.mjs && node scripts/assert-runtime-branding-logo.mjs --env staging && npm run cf:migrate:staging && npm run cf:deploy:staging"
+      "node scripts/assert-fiscal-cutover.mjs && node scripts/assert-release-provenance.mjs --env staging && node scripts/assert-runtime-branding-logo.mjs --env staging && npm run cf:migrate:staging && npm run cf:deploy:staging"
     );
     expect(
       existsSync(resolve(import.meta.dirname, "../../scripts/assert-fiscal-cutover.mjs"))
@@ -116,13 +138,13 @@ describe("remote deploy and migration scripts", () => {
 
   it("runs preflight and compatibility migration in the exact staging order", () => {
     expect(packageJson.scripts["cf:migrate:staging"]).toBe(
-      "node scripts/d1-migration-preflight.mjs --binding DB --env staging && node scripts/d1-schema-compatibility.mjs migrate --binding DB --env staging"
+      "node scripts/assert-release-provenance.mjs --env staging && node scripts/d1-migration-preflight.mjs --binding DB --env staging && node scripts/d1-schema-compatibility.mjs migrate --binding DB --env staging"
     );
   });
 
   it("keeps the fiscal assertion first, then preflight and compatibility migration in production", () => {
     expect(packageJson.scripts["cf:migrate:prod"]).toBe(
-      "node scripts/assert-fiscal-cutover.mjs && node scripts/d1-migration-preflight.mjs --binding DB --env production && node scripts/d1-schema-compatibility.mjs migrate --binding DB --env production"
+      "node scripts/assert-fiscal-cutover.mjs && node scripts/assert-release-provenance.mjs --env production && node scripts/d1-migration-preflight.mjs --binding DB --env production && node scripts/d1-schema-compatibility.mjs migrate --binding DB --env production"
     );
   });
 

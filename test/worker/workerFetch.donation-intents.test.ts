@@ -1104,6 +1104,33 @@ describe("donation intents", () => {
       complemento: "Colonia Escalón, San Salvador"
     };
 
+    it("rejects unsafe datos mutations before spending their dedicated IP budget", async () => {
+      const db = new InMemoryD1();
+      await seedDraft(db);
+      const simple = await worker.fetch(
+        datosRequest("di_draft_1", validDatos, {
+          "Content-Type": "text/plain;charset=UTF-8",
+          Origin: "https://attacker.example",
+          "Sec-Fetch-Site": "cross-site",
+          "X-Donation-Datos-Token": DATOS_TOKEN
+        }),
+        env(db)
+      );
+      const mismatchedOrigin = await worker.fetch(
+        datosRequest("di_draft_1", validDatos, {
+          Origin: "https://attacker.example",
+          "Sec-Fetch-Site": "same-site",
+          "X-Donation-Datos-Token": DATOS_TOKEN
+        }),
+        env(db)
+      );
+
+      expect(simple.status).toBe(415);
+      expect(mismatchedOrigin.status).toBe(403);
+      expect(db.securityRateLimitClaims.filter((claim) => claim.scope === "donation_datos")).toHaveLength(0);
+      expect(db.donationIntents[0].donor_document).toBeNull();
+    });
+
     it("attaches donor data to a minted draft without a Wompi call or an amount/gift change", async () => {
       const db = new InMemoryD1();
       await seedDraft(db);

@@ -5,6 +5,20 @@ import {
   preparePrivateWranglerConfig,
   resolvePrivateWranglerConfig
 } from "./private-wrangler-config.mjs";
+import { assertReleaseProvenance } from "./assert-release-provenance.mjs";
+
+const TARGETED_REMOTE_COMMANDS = new Set([
+  "deploy",
+  "tail",
+  "d1",
+  "r2",
+  "queues",
+  "secret",
+  "versions",
+  "rollback",
+  "delete",
+  "triggers"
+]);
 
 class WranglerCommandError extends Error {
   constructor(message, { kind, exitCode, signal } = {}) {
@@ -31,7 +45,8 @@ export function createPrivateWranglerRunner({
   env = process.env,
   configPath,
   migrationsDirOverride,
-  spawnImpl = spawn
+  spawnImpl = spawn,
+  assertProvenanceImpl = assertReleaseProvenance
 } = {}) {
   const preparedConfig = preparePrivateWranglerConfig(
     configPath ?? resolvePrivateWranglerConfig({ env, repositoryRoot }),
@@ -54,6 +69,19 @@ export function createPrivateWranglerRunner({
       }
       if (activeChild) {
         return Promise.reject(new Error("The private Wrangler runner is already active"));
+      }
+      let releaseTarget;
+      try {
+        releaseTarget = releaseTargetForWranglerArgs(args);
+        if (releaseTarget) {
+          assertProvenanceImpl({
+            target: releaseTarget,
+            env,
+            repositoryRoot
+          });
+        }
+      } catch (error) {
+        return Promise.reject(error);
       }
 
       return new Promise((resolve, reject) => {
@@ -128,6 +156,28 @@ export function createPrivateWranglerRunner({
       preparedConfig.cleanup();
     }
   };
+}
+
+export function releaseTargetForWranglerArgs(args) {
+  const targets = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index];
+    if (value === "--env") {
+      targets.push(args[index + 1]);
+      index += 1;
+    } else if (value?.startsWith("--env=")) {
+      targets.push(value.slice("--env=".length));
+    }
+  }
+  const command = args.find((value) => TARGETED_REMOTE_COMMANDS.has(value));
+  if (!TARGETED_REMOTE_COMMANDS.has(command)) return null;
+  if (
+    targets.length !== 1 ||
+    (targets[0] !== "staging" && targets[0] !== "production")
+  ) {
+    throw new Error("Remote Wrangler commands require one explicit staging or production target");
+  }
+  return targets[0];
 }
 
 async function runCli() {

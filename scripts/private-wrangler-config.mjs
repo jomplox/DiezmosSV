@@ -162,6 +162,63 @@ export function assertPrivateWranglerEmailBindings(rawConfig) {
   }
 }
 
+export function assertPrivateWranglerTargetManifest(rawConfig, target, manifest) {
+  const environments = ownValue(rawConfig, "env");
+  const selected = ownValue(environments, target);
+  if (!isObject(selected)) {
+    throw new Error("The selected private Wrangler config does not match the target resource manifest");
+  }
+  const vars = ownValue(selected, "vars");
+  const d1 = exactBinding(ownValue(selected, "d1_databases"), "binding", "DB", 1);
+  const r2 = exactBinding(ownValue(selected, "r2_buckets"), "binding", "ARCHIVE", 1);
+  const queues = ownValue(selected, "queues");
+  const producer = exactBinding(
+    ownValue(queues, "producers"),
+    "binding",
+    "ISSUANCE_QUEUE",
+    1
+  );
+  const consumers = ownValue(queues, "consumers");
+  const mainConsumer = exactBinding(
+    consumers,
+    "queue",
+    manifest.resourceManifest.queueName,
+    2
+  );
+  const dlqConsumer = exactBinding(
+    consumers,
+    "queue",
+    manifest.resourceManifest.queueDlqName,
+    2
+  );
+  const workersDev = ownValue(selected, "workers_dev") ?? ownValue(rawConfig, "workers_dev") ?? true;
+  const accountId = ownValue(selected, "account_id") ?? ownValue(rawConfig, "account_id");
+  const matches =
+    ownValue(selected, "name") === manifest.workerName &&
+    accountId === manifest.resourceManifest.accountId &&
+    ownValue(vars, "APP_ENV") === manifest.resourceManifest.appEnv &&
+    ownValue(vars, "APP_ORIGIN") === manifest.origin &&
+    ownValue(vars, "CLOUDFLARE_SCRIPT_NAME") === manifest.workerName &&
+    ownValue(d1, "database_name") === manifest.resourceManifest.d1DatabaseName &&
+    ownValue(d1, "database_id") === manifest.resourceManifest.d1DatabaseId &&
+    ownValue(r2, "bucket_name") === manifest.resourceManifest.r2BucketName &&
+    ownValue(producer, "queue") === manifest.resourceManifest.queueName &&
+    ownValue(mainConsumer, "dead_letter_queue") === manifest.resourceManifest.queueDlqName &&
+    Boolean(dlqConsumer) &&
+    workersDev === manifest.resourceManifest.workersDev;
+  if (!matches) {
+    throw new Error("The selected private Wrangler config does not match the target resource manifest");
+  }
+}
+
+function exactBinding(value, key, expected, expectedCount) {
+  if (!Array.isArray(value) || value.length !== expectedCount) return undefined;
+  const matches = value.filter(
+    (entry) => isObject(entry) && ownValue(entry, key) === expected
+  );
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
 function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }

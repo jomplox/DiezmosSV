@@ -11,14 +11,20 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { runPrivateBuild } from "../../scripts/run-private-build.mjs";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { runPrivateBuild as runPrivateBuildProduction } from "../../scripts/run-private-build.mjs";
 import { pngBytes as generatePngBytes } from "../worker/support/rasterFixtures";
 
 const pngBytes = Buffer.from(generatePngBytes(2, 2, { red: 20, green: 60, blue: 200 }));
 const givebutterFundFixtures = { tithe: "731902", offering: "842013" } as const;
 const dotenvFundFixtures = { tithe: "519753", offering: "628401" } as const;
 const roots: string[] = [];
+const runPrivateBuild = (
+  options: Parameters<typeof runPrivateBuildProduction>[0]
+) => runPrivateBuildProduction({
+  assertProvenanceImpl: () => ({ sha: "a".repeat(40) }),
+  ...options
+});
 
 afterEach(() => {
   for (const root of roots.splice(0)) {
@@ -27,6 +33,28 @@ afterEach(() => {
 });
 
 describe("private release builds", () => {
+  it("checks release provenance before starting the build process", async () => {
+    const fixture = deploymentFixture("staging");
+    const { calls, spawnImpl } = recordingSpawn(0);
+    const assertProvenanceImpl = vi.fn(() => {
+      expect(calls).toHaveLength(0);
+      return { sha: "a".repeat(40) };
+    });
+
+    await runPrivateBuild({
+      target: "staging",
+      env: { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath },
+      repositoryRoot: fixture.repositoryRoot,
+      spawnImpl,
+      assertProvenanceImpl
+    });
+
+    expect(assertProvenanceImpl).toHaveBeenCalledWith(expect.objectContaining({
+      target: "staging",
+      repositoryRoot: fixture.repositoryRoot
+    }));
+    expect(calls).toHaveLength(1);
+  });
   it.each(["staging", "production"] as const)(
     "builds %s while injecting only the validated public Givebutter configuration into the client environment",
     async (target) => {
@@ -373,6 +401,16 @@ function deploymentFixture(target: "staging" | "production"): Fixture {
     configPath,
     [
       `DIEZMOSSV_DEPLOY_TARGET=${target}`,
+      `DIEZMOSSV_WORKER_NAME=diezmos-sv-${target}`,
+      "DIEZMOSSV_GITHUB_REPOSITORY=jomplox/DiezmosSV",
+      "DIEZMOSSV_CLOUDFLARE_ACCOUNT_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      `DIEZMOSSV_APP_ENV=${target}`,
+      `DIEZMOSSV_D1_DATABASE_NAME=diezmos-sv-${target}-db`,
+      `DIEZMOSSV_D1_DATABASE_ID=${target === "staging" ? "11111111-1111-1111-1111-111111111111" : "22222222-2222-2222-2222-222222222222"}`,
+      `DIEZMOSSV_R2_BUCKET_NAME=diezmos-sv-${target}-archive`,
+      `DIEZMOSSV_QUEUE_NAME=diezmos-sv-${target}-issuance`,
+      `DIEZMOSSV_QUEUE_DLQ_NAME=diezmos-sv-${target}-issuance-dlq`,
+      "DIEZMOSSV_WORKERS_DEV=true",
       "VITE_GIVEBUTTER_CAMPAIGN=campaign-fixture",
       `VITE_GIVEBUTTER_TITHE_FUND_ID=${givebutterFundFixtures.tithe}`,
       `VITE_GIVEBUTTER_OFFERING_FUND_ID=${givebutterFundFixtures.offering}`,

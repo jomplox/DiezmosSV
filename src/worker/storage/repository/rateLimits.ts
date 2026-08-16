@@ -164,6 +164,56 @@ export async function claimDonationDatosRateLimit(
   return row?.id ?? null;
 }
 
+export async function claimStripePortalRateLimit(
+  db: D1Database,
+  input: {
+    ipKeyHash: string;
+    customerKeyHash: string;
+    now: string;
+    cutoff: string;
+    expiresAt: string;
+    ipLimit: number;
+    customerLimit: number;
+    aggregateLimit: number;
+  }
+): Promise<string | null> {
+  const id = newId("stripe_portal_rate");
+  const row = await db.prepare(
+    `INSERT INTO stripe_portal_rate_limit_claims (
+       id, ip_key_hash, customer_key_hash, claimed_at, expires_at
+     )
+     SELECT ?, ?, ?, ?, ?
+      WHERE (
+        SELECT COUNT(*) FROM stripe_portal_rate_limit_claims
+         WHERE ip_key_hash = ? AND claimed_at >= ?
+      ) < ?
+        AND (
+          SELECT COUNT(*) FROM stripe_portal_rate_limit_claims
+           WHERE customer_key_hash = ? AND claimed_at >= ?
+        ) < ?
+        AND (
+          SELECT COUNT(*) FROM stripe_portal_rate_limit_claims
+           WHERE claimed_at >= ?
+        ) < ?
+     RETURNING id`
+  ).bind(
+    id,
+    input.ipKeyHash,
+    input.customerKeyHash,
+    input.now,
+    input.expiresAt,
+    input.ipKeyHash,
+    input.cutoff,
+    input.ipLimit,
+    input.customerKeyHash,
+    input.cutoff,
+    input.customerLimit,
+    input.cutoff,
+    input.aggregateLimit
+  ).first<{ id: string }>();
+  return row?.id ?? null;
+}
+
 export async function claimPasswordResetBudgets(
   db: D1Database,
   pairKeyHash: string,
@@ -289,5 +339,8 @@ export async function deleteExpiredSecurityRateLimitClaims(
     .run();
   await db.prepare(
     "DELETE FROM stripe_provider_recovery_reads WHERE expires_at <= ? AND status <> 'PROCESSING'"
+  ).bind(now).run();
+  await db.prepare(
+    "DELETE FROM stripe_portal_rate_limit_claims WHERE expires_at <= ?"
   ).bind(now).run();
 }

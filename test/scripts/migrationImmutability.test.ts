@@ -40,10 +40,13 @@ function copiedMigrations(): string {
 }
 
 describe("migration immutability checker", () => {
-  it("pins the complete canonical name and SHA-256 ledger through 0029", async () => {
+  it("pins the complete canonical name and SHA-256 ledger through the current migration", async () => {
     const { IMMUTABLE_MIGRATION_SHA256, assertImmutableMigrations } =
       await loadChecker();
 
+    expect(Object.keys(IMMUTABLE_MIGRATION_SHA256).at(-1)).toBe(
+      "0044_stripe_portal_capability.sql"
+    );
     expect(Object.keys(IMMUTABLE_MIGRATION_SHA256)).toEqual([
       "0001_init.sql",
       "0002_contingency_batches.sql",
@@ -73,7 +76,22 @@ describe("migration immutability checker", () => {
       "0026_classify_legacy_email_rejections.sql",
       "0027_fiscal_corrections.sql",
       "0028_fiscal_correction_reservations.sql",
-      "0029_wompi_payment_link_dedup.sql"
+      "0029_wompi_payment_link_dedup.sql",
+      "0030_wompi_reconciliation_lifecycle.sql",
+      "0031_repair_wompi_payment_link_backfill.sql",
+      "0032_stripe_us_donations.sql",
+      "0033_stripe_gift_type.sql",
+      "0034_stripe_annual_statements.sql",
+      "0035_stripe_provider_chronology.sql",
+      "0036_stripe_retention_generations.sql",
+      "0037_stripe_delivery_safety.sql",
+      "0038_stripe_integrity_fences.sql",
+      "0039_stripe_donor_contact_evidence.sql",
+      "0040_stripe_payment_method_evidence.sql",
+      "0041_stripe_annual_email_evidence.sql",
+      "0042_stripe_annual_email_evidence_reclaim.sql",
+      "0043_stripe_annual_email_evidence_dispatch_guard.sql",
+      "0044_stripe_portal_capability.sql"
     ]);
     expect(() => assertImmutableMigrations(migrationsDirectory)).not.toThrow();
   });
@@ -86,6 +104,17 @@ describe("migration immutability checker", () => {
 
     expect(() => assertImmutableMigrations(copy)).toThrow(
       /0029_wompi_payment_link_dedup\.sql.*modified/i
+    );
+  });
+
+  it("fails if the newest pre-remediation migration is modified", async () => {
+    const { assertImmutableMigrations } = await loadChecker();
+    const copy = copiedMigrations();
+    const target = join(copy, "0043_stripe_annual_email_evidence_dispatch_guard.sql");
+    writeFileSync(target, `${readFileSync(target, "utf8")}\n-- mutation\n`);
+
+    expect(() => assertImmutableMigrations(copy)).toThrow(
+      /0043_stripe_annual_email_evidence_dispatch_guard\.sql.*modified/i
     );
   });
 
@@ -118,15 +147,22 @@ describe("migration immutability checker", () => {
     writeFileSync(join(copy, name), "SELECT 1;\n");
 
     expect(() => assertImmutableMigrations(copy)).toThrow(
-      new RegExp(`unexpected historical migration ${name}`, "i")
+      new RegExp(`(?:unexpected historical migration ${name}|duplicate migration prefix ${name.slice(0, 4)})`, "i")
     );
   });
 
-  it("accepts additive migration names above the immutable boundary", async () => {
+  it("rejects a duplicate numeric prefix anywhere in the migration directory", async () => {
     const { assertImmutableMigrations } = await loadChecker();
     const copy = copiedMigrations();
-    writeFileSync(join(copy, "0032_future_addition.sql"), "SELECT 1;\n");
-    writeFileSync(join(copy, "0099_future_addition.sql"), "SELECT 1;\n");
+    writeFileSync(join(copy, "0032_duplicate.sql"), "SELECT 1;\n");
+
+    expect(() => assertImmutableMigrations(copy)).toThrow(/duplicate migration prefix 0032/i);
+  });
+
+  it("accepts only the next unique additive migration prefix", async () => {
+    const { assertImmutableMigrations } = await loadChecker();
+    const copy = copiedMigrations();
+    writeFileSync(join(copy, "0045_future_addition.sql"), "SELECT 1;\n");
 
     expect(() => assertImmutableMigrations(copy)).not.toThrow();
   });

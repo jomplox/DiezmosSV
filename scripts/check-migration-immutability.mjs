@@ -32,13 +32,38 @@ export const IMMUTABLE_MIGRATION_SHA256 = Object.freeze({
   "0026_classify_legacy_email_rejections.sql": "af990bad4baf4de3f5cc423ea76c6b613eff6db36279b7500d37370d846d27c6",
   "0027_fiscal_corrections.sql": "8ac14b4353164c01cd39fd823bd58a454e3ddb39ca7bd3dcfac3396f7114257e",
   "0028_fiscal_correction_reservations.sql": "162a6c05e5ce92a678aa1af2770207e47ab43bf0e781bcccd4a517229de64c1a",
-  "0029_wompi_payment_link_dedup.sql": "d2a073cf43587621777edb6f4259d9254f2286f379d7b657291526c905e4b249"
+  "0029_wompi_payment_link_dedup.sql": "d2a073cf43587621777edb6f4259d9254f2286f379d7b657291526c905e4b249",
+  "0030_wompi_reconciliation_lifecycle.sql": "cc99d9c1099cac80173f39bf80f9f12d9ab9c84b202b6d6af6fd59760b87eb19",
+  "0031_repair_wompi_payment_link_backfill.sql": "1df79a331a48b4cecb90907682ad39da205b469fd3997c877af7c4abbc018b00",
+  "0032_stripe_us_donations.sql": "7c161eb30a7c8d068f2faaedd0e1f21f5e5ebda71e8886e82fb76456e3460c98",
+  "0033_stripe_gift_type.sql": "a42e9d74ed4fbbb5b23bfa609a132c67163ab5c7d042fd61f9e6cc8eea6a76fe",
+  "0034_stripe_annual_statements.sql": "133ab5947a8f523f3aa61fd233306e25313af52bef5ffc78ad40fd60970fbdb5",
+  "0035_stripe_provider_chronology.sql": "41862170ee18d46273b0c23acff58347084f10d8fcaf5a5a9eac89a6513239c4",
+  "0036_stripe_retention_generations.sql": "7364055f31bfc1a17be84de2307ebec8d6f9112ee2e19f5fd540de141c91af44",
+  "0037_stripe_delivery_safety.sql": "28c513b90bc41cf2af2dc2cdbd47d5dedc9f25ee84321130fd579a2b22c96df7",
+  "0038_stripe_integrity_fences.sql": "62c11b01aacf353e75131cb21a9373d811a05faa195e397488885cff05dc808f",
+  "0039_stripe_donor_contact_evidence.sql": "f1eb983d2f8e96dff0086c5dbed8d34a77b589c038c8579bf17953f2255aac1a",
+  "0040_stripe_payment_method_evidence.sql": "b77f8e8a807704fc8592a8f6cb3e527a97fd37becb58819cf929a13202374d80",
+  "0041_stripe_annual_email_evidence.sql": "471f4c90154e18b1115aae8a3dbc3a3419b994bf901ce25b23d8f0cc37b68378",
+  "0042_stripe_annual_email_evidence_reclaim.sql": "44277c88b821f7eb2dd3dbeb783d839d6507358ed02d4894a7715ffbfe3fe506",
+  "0043_stripe_annual_email_evidence_dispatch_guard.sql": "dd00177c7dece29d887cfd7913b7b2ca0eecd7e63862c6f09d459a0b2a054714",
+  "0044_stripe_portal_capability.sql": "2a4be49afc5da8201438999cec857978910631ec002084467a50951b5373d1ca"
 });
 
 export function assertImmutableMigrations(
   migrationsDirectory = resolve(process.cwd(), "migrations")
 ) {
   const names = new Set(readdirSync(migrationsDirectory));
+  const prefixOwners = new Map();
+  for (const name of names) {
+    const match = /^(\d{4})_.*\.sql$/u.exec(name);
+    if (!match) continue;
+    const existing = prefixOwners.get(match[1]);
+    if (existing) {
+      throw new Error(`Duplicate migration prefix ${match[1]}: ${existing}, ${name}`);
+    }
+    prefixOwners.set(match[1], name);
+  }
   for (const [name, expectedHash] of Object.entries(
     IMMUTABLE_MIGRATION_SHA256
   )) {
@@ -52,14 +77,18 @@ export function assertImmutableMigrations(
       throw new Error(`Historical migration ${name} was modified`);
     }
   }
+  const latestImmutablePrefix = Math.max(
+    ...Object.keys(IMMUTABLE_MIGRATION_SHA256).map((name) => Number(name.slice(0, 4)))
+  );
   for (const name of names) {
     const match = /^(\d{4})_.*\.sql$/u.exec(name);
-    if (
-      match &&
-      Number(match[1]) <= 29 &&
-      !Object.hasOwn(IMMUTABLE_MIGRATION_SHA256, name)
-    ) {
+    if (!match || Object.hasOwn(IMMUTABLE_MIGRATION_SHA256, name)) continue;
+    const prefix = Number(match[1]);
+    if (prefix <= latestImmutablePrefix) {
       throw new Error(`Unexpected historical migration ${name}`);
+    }
+    if (prefix !== latestImmutablePrefix + 1) {
+      throw new Error(`Unexpected future migration ${name}; next prefix must be ${String(latestImmutablePrefix + 1).padStart(4, "0")}`);
     }
   }
 }
@@ -67,7 +96,7 @@ export function assertImmutableMigrations(
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     assertImmutableMigrations();
-    process.stdout.write("Historical migrations 0001-0029 are immutable.\n");
+    process.stdout.write("Historical migrations 0001-0044 are immutable.\n");
   } catch (error) {
     process.stderr.write(
       `${error instanceof Error ? error.message : String(error)}\n`

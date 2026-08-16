@@ -51,6 +51,19 @@ export function loadPrivateDeployConfig({
   if (!TARGETS.has(configuredTarget) || configuredTarget !== target) {
     throw sanitizedError("The private deploy config does not match the selected target");
   }
+  const workerName = requiredValue(parsed, "DIEZMOSSV_WORKER_NAME", "deploy config");
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(workerName)) {
+    throw sanitizedError("The private deploy config contains an invalid Worker name");
+  }
+  const githubRepository = requiredValue(
+    parsed,
+    "DIEZMOSSV_GITHUB_REPOSITORY",
+    "deploy config"
+  );
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(githubRepository)) {
+    throw sanitizedError("The private deploy config contains an invalid GitHub repository");
+  }
+  const resourceManifest = readResourceManifest(parsed, target);
 
   const campaign = requiredValue(parsed, "VITE_GIVEBUTTER_CAMPAIGN", "deploy config");
   assertDonationLaneConfigured({
@@ -83,6 +96,9 @@ export function loadPrivateDeployConfig({
 
   return {
     target,
+    workerName,
+    githubRepository,
+    resourceManifest,
     campaign,
     givebutterFunds,
     origin,
@@ -93,6 +109,74 @@ export function loadPrivateDeployConfig({
       sha256: createHash("sha256").update(bytes).digest("hex")
     }
   };
+}
+
+export function assertDistinctDeploymentResources(staging, production) {
+  const stagingValues = reusableResourceValues(staging);
+  const productionValues = reusableResourceValues(production);
+  if (stagingValues.some((value) => productionValues.includes(value))) {
+    throw sanitizedError("Staging and production must not reuse a deployment resource");
+  }
+}
+
+function readResourceManifest(parsed, target) {
+  const appEnv = requiredValue(parsed, "DIEZMOSSV_APP_ENV", "deploy config");
+  if (appEnv !== target) {
+    throw sanitizedError("The private deploy config APP_ENV does not match the selected target");
+  }
+  const accountId = requiredValue(
+    parsed,
+    "DIEZMOSSV_CLOUDFLARE_ACCOUNT_ID",
+    "deploy config"
+  );
+  if (!/^[a-f0-9]{32}$/i.test(accountId)) {
+    throw sanitizedError("The private deploy config contains an invalid Cloudflare account identifier");
+  }
+  const d1DatabaseId = requiredValue(parsed, "DIEZMOSSV_D1_DATABASE_ID", "deploy config");
+  if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(d1DatabaseId)) {
+    throw sanitizedError("The private deploy config contains an invalid D1 database identifier");
+  }
+  const d1DatabaseName = deploymentResourceName(parsed, "DIEZMOSSV_D1_DATABASE_NAME");
+  const r2BucketName = deploymentResourceName(parsed, "DIEZMOSSV_R2_BUCKET_NAME");
+  const queueName = deploymentResourceName(parsed, "DIEZMOSSV_QUEUE_NAME");
+  const queueDlqName = deploymentResourceName(parsed, "DIEZMOSSV_QUEUE_DLQ_NAME");
+  if (queueName === queueDlqName) {
+    throw sanitizedError("The private deploy config queue and dead-letter queue must be distinct");
+  }
+  const workersDevValue = requiredValue(parsed, "DIEZMOSSV_WORKERS_DEV", "deploy config");
+  if (workersDevValue !== "true" && workersDevValue !== "false") {
+    throw sanitizedError("The private deploy config workers_dev policy must be true or false");
+  }
+  return {
+    accountId,
+    appEnv,
+    d1DatabaseName,
+    d1DatabaseId,
+    r2BucketName,
+    queueName,
+    queueDlqName,
+    workersDev: workersDevValue === "true"
+  };
+}
+
+function deploymentResourceName(parsed, key) {
+  const value = requiredValue(parsed, key, "deploy config");
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value)) {
+    throw sanitizedError(`The private deploy config contains an invalid resource name for ${key}`);
+  }
+  return value;
+}
+
+function reusableResourceValues(config) {
+  return [
+    config.workerName,
+    config.origin,
+    config.resourceManifest.d1DatabaseName,
+    config.resourceManifest.d1DatabaseId,
+    config.resourceManifest.r2BucketName,
+    config.resourceManifest.queueName,
+    config.resourceManifest.queueDlqName
+  ];
 }
 
 function optionalGivebutterFunds(parsed) {

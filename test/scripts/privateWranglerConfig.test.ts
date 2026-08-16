@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 import {
   assertPrivateWranglerConfig,
   assertPrivateWranglerEmailBindings,
+  assertPrivateWranglerTargetManifest,
   preparePrivateWranglerConfig,
   resolvePrivateWranglerConfig
 } from "../../scripts/private-wrangler-config.mjs";
@@ -42,6 +43,66 @@ const inlineEmailBindings = [
 ].join("\n");
 
 describe("private Wrangler configuration", () => {
+  it("accepts only the exact selected target resource manifest", () => {
+    const rawConfig = targetRawConfig();
+    const manifest = targetManifest();
+
+    expect(() =>
+      assertPrivateWranglerTargetManifest(rawConfig, "staging", manifest)
+    ).not.toThrow();
+
+    rawConfig.env.staging.d1_databases[0].database_id =
+      "22222222-2222-2222-2222-222222222222";
+    expect(() =>
+      assertPrivateWranglerTargetManifest(rawConfig, "staging", manifest)
+    ).toThrow(/resource manifest/i);
+  });
+
+  it.each([
+    ["Worker", (config: ReturnType<typeof targetRawConfig>) => { config.env.staging.name = "other-worker"; }],
+    ["APP_ENV", (config: ReturnType<typeof targetRawConfig>) => { config.env.staging.vars.APP_ENV = "production"; }],
+    ["origin", (config: ReturnType<typeof targetRawConfig>) => { config.env.staging.vars.APP_ORIGIN = "https://other.example.invalid"; }],
+    ["R2", (config: ReturnType<typeof targetRawConfig>) => { config.env.staging.r2_buckets[0].bucket_name = "other-archive"; }],
+    ["queue", (config: ReturnType<typeof targetRawConfig>) => { config.env.staging.queues.producers[0].queue = "other-queue"; }],
+    ["workers_dev", (config: ReturnType<typeof targetRawConfig>) => { config.env.staging.workers_dev = false; }]
+  ] as const)("rejects a mismatched %s target value", (_name, mutate) => {
+    const rawConfig = targetRawConfig();
+    mutate(rawConfig);
+    expect(() =>
+      assertPrivateWranglerTargetManifest(rawConfig, "staging", targetManifest())
+    ).toThrow(/resource manifest/i);
+  });
+
+  it.each([
+    ["D1", (config: ReturnType<typeof targetRawConfig>) => {
+      config.env.staging.d1_databases.push({
+        binding: "EXTRA_DB",
+        database_name: "unexpected-db",
+        database_id: "33333333-3333-3333-3333-333333333333"
+      });
+    }],
+    ["R2", (config: ReturnType<typeof targetRawConfig>) => {
+      config.env.staging.r2_buckets.push({
+        binding: "EXTRA_ARCHIVE",
+        bucket_name: "unexpected-archive"
+      });
+    }],
+    ["queue producer", (config: ReturnType<typeof targetRawConfig>) => {
+      config.env.staging.queues.producers.push({
+        binding: "EXTRA_QUEUE",
+        queue: "unexpected-queue"
+      });
+    }],
+    ["queue consumer", (config: ReturnType<typeof targetRawConfig>) => {
+      config.env.staging.queues.consumers.push({ queue: "unexpected-queue" });
+    }]
+  ] as const)("rejects an extra %s outside the exact target manifest", (_name, mutate) => {
+    const rawConfig = targetRawConfig();
+    mutate(rawConfig);
+    expect(() =>
+      assertPrivateWranglerTargetManifest(rawConfig, "staging", targetManifest())
+    ).toThrow(/resource manifest/i);
+  });
   it("rejects a config stored inside the repository", () => {
     const repositoryRoot = mkdtempSync(join(tmpdir(), "diezmos-repository-"));
     const configPath = join(repositoryRoot, "wrangler.private.toml");
@@ -405,6 +466,56 @@ describe("private Wrangler configuration", () => {
     expect(() => assertPrivateWranglerEmailBindings(root)).not.toThrow();
   });
 });
+
+function targetManifest() {
+  return {
+    workerName: "diezmos-sv-staging",
+    origin: "https://staging.example.invalid",
+    resourceManifest: {
+      accountId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      appEnv: "staging" as const,
+      d1DatabaseName: "diezmos-sv-staging-db",
+      d1DatabaseId: "11111111-1111-1111-1111-111111111111",
+      r2BucketName: "diezmos-sv-staging-archive",
+      queueName: "diezmos-sv-staging-issuance",
+      queueDlqName: "diezmos-sv-staging-issuance-dlq",
+      workersDev: true
+    }
+  };
+}
+
+function targetRawConfig() {
+  return {
+    account_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    env: {
+      staging: {
+        name: "diezmos-sv-staging",
+        workers_dev: true,
+        vars: {
+          APP_ENV: "staging",
+          APP_ORIGIN: "https://staging.example.invalid",
+          CLOUDFLARE_SCRIPT_NAME: "diezmos-sv-staging"
+        },
+        d1_databases: [{
+          binding: "DB",
+          database_name: "diezmos-sv-staging-db",
+          database_id: "11111111-1111-1111-1111-111111111111"
+        }],
+        r2_buckets: [{ binding: "ARCHIVE", bucket_name: "diezmos-sv-staging-archive" }],
+        queues: {
+          producers: [{ binding: "ISSUANCE_QUEUE", queue: "diezmos-sv-staging-issuance" }],
+          consumers: [
+            {
+              queue: "diezmos-sv-staging-issuance",
+              dead_letter_queue: "diezmos-sv-staging-issuance-dlq"
+            },
+            { queue: "diezmos-sv-staging-issuance-dlq" }
+          ]
+        }
+      }
+    }
+  };
+}
 
 const isolatedValidationProgram = String.raw`
   import { existsSync, readdirSync } from "node:fs";
