@@ -1389,6 +1389,27 @@ test("Stripe bounds the rendered frame and preserves native scrolling without an
   expect(viewportMetrics.overflowY).toBe("hidden");
   expect(viewportMetrics.clientHeight).toBeGreaterThanOrEqual(240);
   expect(viewportMetrics.scrollHeight - viewportMetrics.clientHeight).toBeLessThanOrEqual(4);
+  const horizontalClip = await stripeViewport.evaluate((element) => {
+    const frame = element.querySelector("iframe");
+    if (!frame) throw new Error("Stripe iframe is missing");
+    const frameBox = frame.getBoundingClientRect();
+    let visibleLeft = frameBox.left;
+    let visibleRight = frameBox.right;
+    for (let ancestor = frame.parentElement; ancestor; ancestor = ancestor.parentElement) {
+      if (getComputedStyle(ancestor).overflowX === "visible") continue;
+      const ancestorBox = ancestor.getBoundingClientRect();
+      visibleLeft = Math.max(visibleLeft, ancestorBox.left);
+      visibleRight = Math.min(visibleRight, ancestorBox.right);
+    }
+    return {
+      frameLeft: Math.round(frameBox.left),
+      frameRight: Math.round(frameBox.right),
+      visibleLeft: Math.round(visibleLeft),
+      visibleRight: Math.round(visibleRight)
+    };
+  });
+  expect(horizontalClip.visibleLeft).toBeLessThanOrEqual(horizontalClip.frameLeft + 1);
+  expect(horizontalClip.visibleRight).toBeGreaterThanOrEqual(horizontalClip.frameRight - 1);
   const mobileShell = await mobileProviderShellMetrics(stripeViewport);
   expect(mobileShell.pageScrollRange).toBeLessThanOrEqual(1);
   expect(mobileShell.providerBottom).toBeLessThanOrEqual(mobileShell.dockTop);
