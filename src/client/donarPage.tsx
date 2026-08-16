@@ -478,7 +478,7 @@ export function DonarPage() {
   // has to be handed to the TOP of the surface that replaces it. The flag keeps the
   // initial mount of Paso 2 alone — only a real switch moves focus.
   const stripeIntroRef = useRef<HTMLParagraphElement | null>(null);
-  const stripeReturnRef = useRef<HTMLButtonElement | null>(null);
+  const givebutterIntroRef = useRef<HTMLParagraphElement | null>(null);
   const usProviderSwitchedRef = useRef(false);
 
   // When to render the Stripe wizard instead of the SV fiscal steps: the EE.
@@ -663,11 +663,9 @@ export function DonarPage() {
       return;
     }
     usProviderSwitchedRef.current = false;
-    // Givebutter's surface opens on its own return control; Stripe's opens on the step
-    // intro that sits above its form. The Givebutter choice is NOT the Stripe landing:
-    // it lives below the form, so focusing it would scroll the donor past the very
-    // thing they asked for and hand a screen reader the Givebutter alternative first.
-    const target = usProvider === "givebutter" ? stripeReturnRef.current : stripeIntroRef.current;
+    // Each provider opens at its own explanatory text rather than the alternative
+    // control below the form, so focus never scrolls past the surface just requested.
+    const target = usProvider === "givebutter" ? givebutterIntroRef.current : stripeIntroRef.current;
     target?.focus();
   }, [usProvider]);
 
@@ -1346,7 +1344,7 @@ export function DonarPage() {
         {/* US Stripe step — our Spanish composition stays on this page while Stripe
             owns the embedded form and dynamically renders eligible methods. */}
         {step === 2 && usDonation && (
-          <div className={`donar-stripe donar-step${usProvider === "stripe" && givebutterAvailable ? " donar-stripe-has-provider-dock" : ""}`}>
+          <div className={`donar-stripe donar-step${givebutterAvailable ? " donar-stripe-has-provider-dock" : ""}`}>
             {summary}
             <div className="donar-handoff">
               {/* tabIndex={-1} makes this programmatically focusable without adding a
@@ -1402,23 +1400,7 @@ export function DonarPage() {
               )}
               {usProvider === "givebutter" && givebutterFrameUrl && givebutterHostedPageUrl && (
                 <div className="donar-givebutter-surface">
-                  <button
-                    ref={stripeReturnRef}
-                    type="button"
-                    className="donar-provider-choice donar-provider-choice-stripe"
-                    onClick={() => {
-                      usProviderSwitchedRef.current = true;
-                      setUsProvider("stripe");
-                    }}
-                  >
-                    <span className="donar-provider-stripe-mark" aria-hidden="true" />
-                    <span className="donar-provider-choice-copy">
-                      <strong>Volver a Stripe</strong>
-                      <small>(Con formulario en español)</small>
-                    </span>
-                    <span className="donar-provider-choice-arrow" aria-hidden="true">←</span>
-                  </button>
-                  <p className="donar-givebutter-confirmation">
+                  <p className="donar-givebutter-confirmation" ref={givebutterIntroRef} tabIndex={-1}>
                     Confirme en Givebutter el tipo de entrega, el monto y la frecuencia antes de continuar; estos datos se envían solo como valores iniciales.
                   </p>
                   {/* The single escape hatch stays above the bounded frame: a donor staring
@@ -1455,6 +1437,24 @@ export function DonarPage() {
                       allow="payment; clipboard-write"
                       onLoad={() => setGivebutterFrameLoaded(true)}
                     />
+                  </div>
+                  <div className="donar-provider-dock">
+                    <button
+                      type="button"
+                      className="donar-provider-choice donar-provider-choice-stripe"
+                      onClick={() => {
+                        usProviderSwitchedRef.current = true;
+                        setUsProvider("stripe");
+                      }}
+                    >
+                      <span className="donar-provider-stripe-mark" aria-hidden="true" />
+                      <span className="donar-provider-choice-copy">
+                        <strong>Volver a Stripe</strong>
+                        <small>(Con formulario en español)</small>
+                      </span>
+                      <span className="donar-provider-choice-arrow" aria-hidden="true">←</span>
+                    </button>
+                    <DonarSupport supportEmail={branding.supportEmail} />
                   </div>
                 </div>
               )}
@@ -1507,7 +1507,7 @@ export function DonarPage() {
           </div>
         )}
 
-        {!(step === 2 && usDonation && usProvider === "stripe" && givebutterAvailable) && (
+        {!(step === 2 && usDonation && givebutterAvailable) && (
           <DonarSupport supportEmail={branding.supportEmail} />
         )}
       </div>

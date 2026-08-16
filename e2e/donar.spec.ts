@@ -805,7 +805,19 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
     return route.fulfill({
       status: 200,
       contentType: "text/html; charset=utf-8",
-      body: "<html lang=\"en\"><body>Givebutter test form</body></html>"
+      body: `<!doctype html>
+        <html lang="en">
+          <head>
+            <style>
+              html, body { margin: 0; }
+              body { min-height: 1400px; }
+            </style>
+          </head>
+          <body>
+            <p>Givebutter test form</p>
+            <p style="margin-top: 1250px">Givebutter test form end</p>
+          </body>
+        </html>`
     });
   });
   await page.route("**/api/donations/stripe/checkout", async (route) => {
@@ -982,11 +994,13 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   // offering member of the pair without reading or printing any deployment value.
   expect(givebutterEmbedRequest.searchParams.get("fund")).toBe("842013");
   expect(givebutterEmbedRequest.searchParams.get("goalBar")).toBe("false");
-  await expect(page.getByText(
+  const givebutterConfirmation = page.getByText(
     "Confirme en Givebutter el tipo de entrega, el monto y la frecuencia antes de continuar; estos datos se envían solo como valores iniciales."
-  )).toBeVisible();
+  );
+  await expect(givebutterConfirmation).toBeVisible();
+  await expect(givebutterConfirmation).toBeFocused();
   // One escape hatch out of a non-rendering embed — never a hint and a button to the
-  // same hosted page — and it sits above the 760px frame, so a donor facing a blank
+  // same hosted page — and it sits above the bounded frame, so a donor facing a blank
   // box never has to scroll past it to find the way out. The delayed class records
   // that the render budget elapsed without changing the donor-visible help text.
   const givebutterHatch = page.locator(".donar-givebutter-hint");
@@ -1009,12 +1023,6 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   expect(hatchBox).not.toBeNull();
   expect(frameBox).not.toBeNull();
   expect(hatchBox!.y).toBeLessThan(frameBox!.y);
-  const givebutterSupport = page.locator(".donar-support");
-  await expect(givebutterSupport).toHaveCount(1);
-  const givebutterSupportBox = await givebutterSupport.boundingBox();
-  expect(givebutterSupportBox).not.toBeNull();
-  expect(givebutterSupportBox!.y).toBeGreaterThanOrEqual(frameBox!.y + frameBox!.height);
-  expect(givebutterSupportBox!.y - (frameBox!.y + frameBox!.height)).toBeLessThanOrEqual(32);
   const givebutterHelpText = "¿Problemas con el formulario? Abrir Givebutter";
   await expect(givebutterHatch).toHaveText(givebutterHelpText);
   await expect(givebutterHatch).toHaveClass(/\bdonar-givebutter-fallback\b/, {
@@ -1041,6 +1049,57 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
     name: /^Volver a Stripe\s+\(Con formulario en español\)$/i
   });
   await expect(stripeReturn.locator(".donar-provider-stripe-mark")).toBeVisible();
+
+  // On desktop the return path follows the bounded provider form in document flow.
+  // On mobile the same return path and the single support contact form a fixed dock,
+  // while the Givebutter document itself remains independently scrollable.
+  const givebutterProviderDock = page.locator(".donar-provider-dock");
+  await expect(givebutterProviderDock).toBeVisible();
+  await expect(givebutterProviderDock.getByRole("button", {
+    name: /^Volver a Stripe\s+\(Con formulario en español\)$/i
+  })).toBeVisible();
+  await expect(givebutterProviderDock.getByText("¿Dudas o necesita ayuda?", { exact: false })).toBeVisible();
+  await expect(page.locator(".donar-support")).toHaveCount(1);
+  expect(await givebutterProviderDock.evaluate((element) => getComputedStyle(element).position)).toBe("static");
+  const desktopGivebutterDockBox = await givebutterProviderDock.boundingBox();
+  expect(desktopGivebutterDockBox).not.toBeNull();
+  expect(desktopGivebutterDockBox!.y).toBeGreaterThanOrEqual(frameBox!.y + frameBox!.height);
+
+  const mobileViewport = { width: 393, height: 852 };
+  await page.setViewportSize(mobileViewport);
+  const mobileGivebutterDockLayout = await givebutterProviderDock.evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    return {
+      position: getComputedStyle(element).position,
+      bottom: Math.round(window.innerHeight - box.bottom),
+      height: Math.round(box.height)
+    };
+  });
+  expect(mobileGivebutterDockLayout.position).toBe("fixed");
+  expect(Math.abs(mobileGivebutterDockLayout.bottom)).toBeLessThanOrEqual(1);
+  expect(mobileGivebutterDockLayout.height).toBeGreaterThanOrEqual(80);
+  expect(await page.locator(".donar-stripe-has-provider-dock").evaluate((element) => (
+    Number.parseFloat(getComputedStyle(element).paddingBottom)
+  ))).toBeGreaterThanOrEqual(mobileGivebutterDockLayout.height);
+
+  await givebutterFrame.scrollIntoViewIfNeeded();
+  const mobileGivebutterFrameBox = await givebutterFrame.boundingBox();
+  expect(mobileGivebutterFrameBox).not.toBeNull();
+  const givebutterContent = page.frames().find((frame) => frame.url().startsWith("https://givebutter.com/"));
+  expect(givebutterContent).toBeDefined();
+  expect(await givebutterContent!.evaluate(() => document.documentElement.scrollHeight)).toBeGreaterThan(
+    mobileGivebutterFrameBox!.height
+  );
+  const givebutterScrollBefore = await givebutterContent!.evaluate(() => window.scrollY);
+  await page.mouse.move(
+    mobileGivebutterFrameBox!.x + mobileGivebutterFrameBox!.width / 2,
+    mobileGivebutterFrameBox!.y + Math.min(180, mobileGivebutterFrameBox!.height / 2)
+  );
+  await page.mouse.wheel(0, 360);
+  await expect.poll(async () => await givebutterContent!.evaluate(() => window.scrollY)).toBeGreaterThan(
+    givebutterScrollBefore
+  );
+
   await stripeReturn.click();
   await expect(givebutterFrame).toHaveCount(0);
   await expect(page.locator(".donar-stripe-embedded")).toBeVisible();
@@ -1051,8 +1110,6 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   // provider-owned content inside that boundary differs.
   await expect(page.locator(".donar-stripe > .donar-handoff")).toBeVisible();
   const stripeEmbed = page.locator(".donar-stripe-embedded");
-  const mobileViewport = { width: 393, height: 852 };
-  await page.setViewportSize(mobileViewport);
   const mobileStripeBox = await stripeEmbed.boundingBox();
   expect(mobileStripeBox).not.toBeNull();
   expect(mobileStripeBox!.x).toBeCloseTo(0, 1);

@@ -1261,14 +1261,17 @@ describe("Stripe donar page source contract", () => {
 
   it("keeps focus and screen-reader context across both US provider switches", () => {
     expect(pageSource).toContain("usProviderSwitchedRef.current = true;");
-    // Each switch lands on the TOP of the surface it opened. Givebutter's own return
-    // control is that top; Stripe's is the step intro above its form — never the
-    // Givebutter choice, which now sits BELOW the form the donor just came back to.
+    // Each switch lands on the TOP of the surface it opened. Givebutter's confirmation
+    // sits above its form; Stripe's step intro sits above its own form. Neither switch
+    // focuses the alternative control that now lives below the active provider.
     expect(pageSource).toContain(
-      'const target = usProvider === "givebutter" ? stripeReturnRef.current : stripeIntroRef.current;'
+      'const target = usProvider === "givebutter" ? givebutterIntroRef.current : stripeIntroRef.current;'
     );
     expect(pageSource).toContain('<p className="donar-intro" ref={stripeIntroRef} tabIndex={-1}>');
-    expect(pageSource).toContain("ref={stripeReturnRef}");
+    expect(pageSource).toContain(
+      '<p className="donar-givebutter-confirmation" ref={givebutterIntroRef} tabIndex={-1}>'
+    );
+    expect(pageSource).not.toContain("stripeReturnRef");
     // The retired ref leaves no dead wiring behind.
     expect(donarSource).not.toContain("givebutterChoiceRef");
     // The provider-switch announcement is a bare live region, leaving role=status to
