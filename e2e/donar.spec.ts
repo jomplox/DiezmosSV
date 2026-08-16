@@ -905,8 +905,18 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   await expect(page.getByText("Paso 2 de 2")).toBeVisible();
   await expect(page.getByText("Su entrega", { exact: true })).toBeVisible();
   await expect(page.getByText("Ofrenda · Mensual · $100.00")).toBeVisible();
+  const legalOrganizationLink = page.getByRole("link", {
+    name: `Friends of ${BRANDING_DISPLAY_NAME}`,
+    exact: true
+  });
+  await expect(legalOrganizationLink).toHaveAttribute(
+    "href",
+    "https://givebutter.com/amigos-de-elim/about"
+  );
+  await expect(legalOrganizationLink).toHaveAttribute("target", "_blank");
+  await expect(legalOrganizationLink).toHaveAttribute("rel", "noopener noreferrer");
   await expect(page.locator(".donar-intro")).toHaveText(
-    `Su diezmo u ofrenda apoya a ${BRANDING_DISPLAY_NAME} en El Salvador. Se procesa en EE. UU. a través de Friends of ${BRANDING_DISPLAY_NAME} (501c3) y recibirá un recibo deducible de impuestos en EE. UU. por correo.`
+    `Su aporte apoya a ${BRANDING_DISPLAY_NAME} en El Salvador y se procesa en EE. UU. por Friends of ${BRANDING_DISPLAY_NAME} (501c3).`
   );
   const introFlag = page.locator(".donar-intro .donar-flag");
   await expect(introFlag).toBeVisible();

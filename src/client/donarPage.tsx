@@ -42,6 +42,7 @@ import {
   DONAR_WIDGET_LOADING_MESSAGE,
   DONAR_WIDGET_VERIFYING_MESSAGE,
   DONAR_WOMPI_CHECKOUT_ORIGIN,
+  GIVEBUTTER_ABOUT_URL,
   GIVEBUTTER_LOADING_MESSAGE,
   GIVEBUTTER_RENDER_TIMEOUT_MS,
   STRIPE_CANCELED_MESSAGE,
@@ -1356,8 +1357,22 @@ export function DonarPage() {
               {/* tabIndex={-1} makes this programmatically focusable without adding a
                   tab stop: it is the landing point when the donor returns to Stripe. */}
               <p className="donar-intro" ref={stripeIntroRef} tabIndex={-1}>
-                {stripeIntroduction.beneficiary}<span className="donar-intro-flag"><DonarFlagBadge country="sv" /></span>.{" "}
+                {stripeIntroduction.beneficiary}<span className="donar-intro-flag"><DonarFlagBadge country="sv" /></span>{" "}
                 {stripeIntroduction.processing}
+                {stripeIntroduction.legalOrganizationName && (
+                  <>
+                    {" "}
+                    <a
+                      className="donar-intro-organization-link"
+                      href={GIVEBUTTER_ABOUT_URL}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      {stripeIntroduction.legalOrganizationName}
+                    </a>{" "}
+                    {stripeIntroduction.legalOrganizationQualifier}
+                  </>
+                )}
               </p>
               {/* One persistent live region for the whole step: visibility changes are
                   silent otherwise because both loaded provider trees remain mounted. */}

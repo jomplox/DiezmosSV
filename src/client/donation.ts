@@ -109,6 +109,7 @@ export const GIVEBUTTER_CAMPAIGN =
   buildEnv.VITE_GIVEBUTTER_CAMPAIGN?.trim() || GIVEBUTTER_CAMPAIGN_FALLBACK;
 export const GIVEBUTTER_EMBED_BASE_URL =
   `https://givebutter.com/embed/c/${GIVEBUTTER_CAMPAIGN}`;
+export const GIVEBUTTER_ABOUT_URL = "https://givebutter.com/amigos-de-elim/about";
 export const GIVEBUTTER_RENDER_TIMEOUT_MS = 4_000;
 export const GIVEBUTTER_LOADING_MESSAGE = "Preparando su formulario seguro con Givebutter…";
 export const US_PROVIDER_PRECONNECT_ORIGINS = [
@@ -176,28 +177,35 @@ export function givebutterHostedUrl(
   return params ? `https://givebutter.com/${GIVEBUTTER_CAMPAIGN}?${params.toString()}` : null;
 }
 
-// Keep the named introduction aligned with the established production donor copy.
-// The unnamed fallback stays generic because it has no church name to interpolate.
 export function stripeIntroSegments(organizationName: string | null): {
   beneficiary: string;
   processing: string;
+  legalOrganizationName: string | null;
+  legalOrganizationQualifier: string;
 } {
   const name = organizationName?.trim();
   if (!name) {
     return {
-      beneficiary: "Su diezmo u ofrenda apoya a esta iglesia en El Salvador",
-      processing: "Se procesa en EE. UU. a través de una organización estadounidense 501c3 y recibirá un recibo deducible de impuestos en EE. UU. por correo."
+      beneficiary: "Su aporte apoya a esta iglesia en El Salvador",
+      processing: "y se procesa en EE. UU. por una organización estadounidense 501c3.",
+      legalOrganizationName: null,
+      legalOrganizationQualifier: ""
     };
   }
   return {
-    beneficiary: `Su diezmo u ofrenda apoya a ${name} en El Salvador`,
-    processing: `Se procesa en EE. UU. a través de Friends of ${name} (501c3) y recibirá un recibo deducible de impuestos en EE. UU. por correo.`
+    beneficiary: `Su aporte apoya a ${name} en El Salvador`,
+    processing: "y se procesa en EE. UU. por",
+    legalOrganizationName: `Friends of ${name}`,
+    legalOrganizationQualifier: "(501c3)."
   };
 }
 
 export function stripeIntro(organizationName: string | null): string {
-  const { beneficiary, processing } = stripeIntroSegments(organizationName);
-  return `${beneficiary}. ${processing}`;
+  const { beneficiary, processing, legalOrganizationName, legalOrganizationQualifier } =
+    stripeIntroSegments(organizationName);
+  return [beneficiary, processing, legalOrganizationName, legalOrganizationQualifier]
+    .filter(Boolean)
+    .join(" ");
 }
 
 export function stripeCheckoutBody(input: {

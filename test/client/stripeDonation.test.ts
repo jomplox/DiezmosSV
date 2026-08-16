@@ -95,18 +95,22 @@ describe("Stripe donor browser contract", () => {
     expect(STRIPE_FREQ_ONCE_LABEL).toBe("Única");
     expect(STRIPE_FREQ_MONTHLY_LABEL).toBe("Mensual");
     expect(stripeIntro("Iglesia Ejemplo Central")).toBe(
-      "Su diezmo u ofrenda apoya a Iglesia Ejemplo Central en El Salvador. Se procesa en EE. UU. a través de Friends of Iglesia Ejemplo Central (501c3) y recibirá un recibo deducible de impuestos en EE. UU. por correo."
+      "Su aporte apoya a Iglesia Ejemplo Central en El Salvador y se procesa en EE. UU. por Friends of Iglesia Ejemplo Central (501c3)."
     );
     expect(stripeIntro(null)).toBe(
-      "Su diezmo u ofrenda apoya a esta iglesia en El Salvador. Se procesa en EE. UU. a través de una organización estadounidense 501c3 y recibirá un recibo deducible de impuestos en EE. UU. por correo."
+      "Su aporte apoya a esta iglesia en El Salvador y se procesa en EE. UU. por una organización estadounidense 501c3."
     );
     expect(stripeIntroSegments("Iglesia Ejemplo Central")).toEqual({
-      beneficiary: "Su diezmo u ofrenda apoya a Iglesia Ejemplo Central en El Salvador",
-      processing: "Se procesa en EE. UU. a través de Friends of Iglesia Ejemplo Central (501c3) y recibirá un recibo deducible de impuestos en EE. UU. por correo."
+      beneficiary: "Su aporte apoya a Iglesia Ejemplo Central en El Salvador",
+      processing: "y se procesa en EE. UU. por",
+      legalOrganizationName: "Friends of Iglesia Ejemplo Central",
+      legalOrganizationQualifier: "(501c3)."
     });
     expect(stripeIntroSegments(null)).toEqual({
-      beneficiary: "Su diezmo u ofrenda apoya a esta iglesia en El Salvador",
-      processing: "Se procesa en EE. UU. a través de una organización estadounidense 501c3 y recibirá un recibo deducible de impuestos en EE. UU. por correo."
+      beneficiary: "Su aporte apoya a esta iglesia en El Salvador",
+      processing: "y se procesa en EE. UU. por una organización estadounidense 501c3.",
+      legalOrganizationName: null,
+      legalOrganizationQualifier: ""
     });
   });
 

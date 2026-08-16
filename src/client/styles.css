@@ -3718,6 +3718,12 @@ pre {
   text-align: center;
 }
 
+.donar-intro-organization-link {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
 /* Tells the donor that name + email are collected on Wompi's sheet, not this form. */
 .donar-note {
   color: #595959;
