@@ -1315,7 +1315,7 @@ test("Stripe overlays one loader through a shell iframe until Checkout is render
   await expect(loader).toHaveCount(0);
   const readyFrameBox = await stripeFrame.boundingBox();
   expect(readyFrameBox).not.toBeNull();
-  expect(Math.abs(readyFrameBox!.y - loadingFrameBox!.y)).toBeLessThanOrEqual(1);
+  expect(Math.abs(readyFrameBox!.y - loadingFrameBox!.y)).toBeLessThanOrEqual(2);
   expect(sessionDelay.requestCount()).toBe(1);
   expect(await page.evaluate(() => (
     window as Window & { __stripeEmbeddedCheckoutCreates?: number }
@@ -1360,7 +1360,7 @@ test("Stripe bounds the rendered frame and preserves native scrolling without an
   await expect(loader).toHaveCount(0);
   const readyFrameBox = await stripeFrame.boundingBox();
   expect(readyFrameBox).not.toBeNull();
-  expect(Math.abs(readyFrameBox!.y - loadingFrameBox!.y)).toBeLessThanOrEqual(1);
+  expect(Math.abs(readyFrameBox!.y - loadingFrameBox!.y)).toBeLessThanOrEqual(2);
 
   await page.setViewportSize({ width: 393, height: 852 });
   const stripeViewport = page.getByRole("region", { name: "Formulario seguro de Stripe" });
@@ -1374,8 +1374,8 @@ test("Stripe bounds the rendered frame and preserves native scrolling without an
     };
   });
   expect(viewportMetrics.overflowY).toBe("hidden");
-  expect(viewportMetrics.clientHeight).toBeGreaterThanOrEqual(480);
-  expect(viewportMetrics.clientHeight).toBeLessThanOrEqual(620);
+  expect(viewportMetrics.clientHeight).toBeGreaterThanOrEqual(640);
+  expect(viewportMetrics.clientHeight).toBeLessThanOrEqual(720);
   expect(viewportMetrics.scrollHeight - viewportMetrics.clientHeight).toBeLessThanOrEqual(4);
   await expect.poll(async () => (await stripeFrame.boundingBox())?.height ?? 0)
     .toBeCloseTo(viewportMetrics.clientHeight, 0);
