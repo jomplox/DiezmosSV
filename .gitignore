@@ -21,6 +21,12 @@ dist/
 /playwright/.cache/
 /e2e/.auth/
 
+# Generated PDF and Playwright output from local runs.
+/output/
+
+# Private legal correspondence kept beside the working tree; never publish it.
+/Legal/
+
 # Never publish real credentials, private keys, live certificates, or local MH exports.
 DTE/Credentials/
 
