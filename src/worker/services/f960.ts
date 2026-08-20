@@ -156,7 +156,7 @@ function csvFields(row: F960Row): string[] {
   return [
     row.tipoOperacion,
     row.nit,
-    row.nombre,
+    row.nombre.toUpperCase(),
     row.codigoActividad,
     row.tipoDonacion,
     row.sello,

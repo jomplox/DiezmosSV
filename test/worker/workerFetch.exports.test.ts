@@ -8,11 +8,17 @@ import { installWorkerFetchGlobals } from "./support/workerFetchGlobals";
 installWorkerFetchGlobals();
 
 describe("F960 CSV export", () => {
-  it("returns accepted CDEs for a date range in the real F960 semicolon format", async () => {
+  it("exports donor names in Hacienda-required uppercase while preserving Spanish accents", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    const includedDocument = testDocument();
+    const includedPayload = JSON.parse(includedDocument.plain_json) as {
+      receptor: { nombre: string };
+    };
+    includedPayload.receptor.nombre = "José Ángel Peña de León";
+    includedDocument.plain_json = JSON.stringify(includedPayload);
     db.documents.push(
-      testDocument(),
+      includedDocument,
       {
         ...testDocument(),
         id: "doc_may",
@@ -48,7 +54,7 @@ describe("F960 CSV export", () => {
     expect(response.headers.get("Content-Type")).toBe("text/csv; charset=utf-8");
     expect(response.headers.get("Content-Disposition")).toBe('attachment; filename="f960-20260601-20260630.csv"');
     await expect(response.text()).resolves.toBe(
-      "1;;Example Person;9300;4;20269A41C96A1C404F2D8CFA1E1FD32DD5BBBGQE;6CAE5F7EA59045738EF2FE48B14796C4;100.00;100000001;062026\r\n"
+      "1;;JOSÉ ÁNGEL PEÑA DE LEÓN;9300;4;20269A41C96A1C404F2D8CFA1E1FD32DD5BBBGQE;6CAE5F7EA59045738EF2FE48B14796C4;100.00;100000001;062026\r\n"
     );
   });
 
@@ -79,10 +85,10 @@ describe("F960 CSV export", () => {
     );
 
     expect(response.status).toBe(200);
-    // The =HYPERLINK name gets a leading apostrophe (then quoted for the embedded "),
-    // the @PAYLOAD document gets one too; benign numeric/hex fields stay bare.
+    // The uppercased =HYPERLINK name gets a leading apostrophe (then quoted for the
+    // embedded "), the @PAYLOAD document gets one too; benign fields stay bare.
     await expect(response.text()).resolves.toBe(
-      `1;;"'=HYPERLINK(""https://evil.example"",A1)";9300;4;20269A41C96A1C404F2D8CFA1E1FD32DD5BBBGQE;6CAE5F7EA59045738EF2FE48B14796C4;100.00;'@PAYLOAD;062026\r\n`
+      `1;;"'=HYPERLINK(""HTTPS://EVIL.EXAMPLE"",A1)";9300;4;20269A41C96A1C404F2D8CFA1E1FD32DD5BBBGQE;6CAE5F7EA59045738EF2FE48B14796C4;100.00;'@PAYLOAD;062026\r\n`
     );
   });
 
