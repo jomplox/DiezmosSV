@@ -117,7 +117,7 @@ import { MhClient, MhPreDispatchError } from "./services/mhClient";
 import { IssuancePipeline } from "./services/pipeline";
 import { loadPdfBrandingLogo, renderDtePdf } from "./services/pdf";
 import { auditContextFrom } from "./services/requestContext";
-import { projectAuditRows } from "./services/auditProjection";
+import { hasAccountAuditAudience, projectAuditRows, projectContingencyEvents } from "./services/auditProjection";
 import { BackupArchiveTooLargeError, BACKUP_MONTH_DOWNLOAD_MAX_BYTES, collectBackupMonthObjects, manifestedBackupTableKey, listBackupMonths, verifyBackupMonth } from "./services/backups";
 import { zipStored } from "./utils/zip";
 import { previousElSalvadorMonth, retentionManifestKey, runRetentionExport } from "./services/retention";
@@ -3151,6 +3151,9 @@ async function handleAudit(ctx: ApiRouteContext): Promise<Response> {
   const actor = ctx.actor!;
   const entityType = ctx.url.searchParams.get("entityType");
   const entityId = ctx.url.searchParams.get("entityId");
+  if (entityType === "user" && !hasAccountAuditAudience(actor.role)) {
+    return jsonResponse({ error: "account_audit_forbidden" }, { status: 403 });
+  }
   if (entityType && entityId) {
     // Entity-scoped history keeps its original (uncapped-page) shape.
     return jsonResponse({ audit: await listAuditForUser(ctx.repo, actor, entityType, entityId), nextCursor: null });
@@ -4095,7 +4098,7 @@ async function contingencyState(repo: Repository, user: AuthUser): Promise<Recor
     : (await repo.listDteDocuments({ status: "CONTINGENCY_PENDING", limit: 100 })).documents;
   const batches = activeRaw ? await repo.listContingencyBatches(String(activeRaw.id)) : await repo.listContingencyBatches();
   const batchLines = activeRaw ? await repo.listContingencyBatchLines({ periodId: String(activeRaw.id) }) : await repo.listContingencyBatchLines();
-  const events = await repo.listDteEventsByType("CONTINGENCIA");
+  const events = projectContingencyEvents(await repo.listDteEventsByType("CONTINGENCIA"), user.role);
   const periods = periodsRaw.map(contingencyPeriodView);
   const active = activeRaw ? contingencyPeriodView(activeRaw) : null;
   const countPeriodStatus = (status: string) => periods.filter((period) => period.status === status).length;
