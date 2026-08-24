@@ -2213,6 +2213,26 @@ describe("previousElSalvadorMonth (UTC/El Salvador day seam)", () => {
 });
 
 describe("retention restore guidance", () => {
+  it("keeps the documented object-layout digest order aligned with the canonical manifest", () => {
+    const guidance = readFileSync(
+      resolve(import.meta.dirname, "../../docs/retention-restore.md"),
+      "utf8"
+    );
+    const layoutHeading = guidance.indexOf("## Object layout");
+    const layoutFenceStart = guidance.indexOf("```", layoutHeading);
+    const layoutFenceEnd = guidance.indexOf("```", layoutFenceStart + 3);
+    const documentedTables = guidance
+      .slice(layoutFenceStart + 3, layoutFenceEnd)
+      .split("\n")
+      .map((line) => line.match(/\/([^/]+)\.ndjson$/)?.[1] ?? null)
+      .filter((table): table is string => table !== null);
+
+    expect(layoutHeading).toBeGreaterThanOrEqual(0);
+    expect(layoutFenceStart).toBeGreaterThan(layoutHeading);
+    expect(layoutFenceEnd).toBeGreaterThan(layoutFenceStart);
+    expect(documentedTables).toEqual([...RETENTION_CANONICAL_TABLES]);
+  });
+
   it("keeps the Wrangler restore file free of nested transaction statements", () => {
     const protocol = RETENTION_FOREIGN_KEY_PROTOCOL as unknown as {
       wranglerFile: {
