@@ -542,6 +542,18 @@ describe("donation intents", () => {
       await expect(response.json()).resolves.toMatchObject({ error: "wompi_link_failed" });
       expect(db.donationIntents).toHaveLength(1);
       expect(db.donationIntents[0].status).toBe("PENDING");
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      const [tokenUrl, tokenInit] = fetchSpy.mock.calls[0];
+      expect(tokenUrl).toBe("https://id.wompi.sv/connect/token");
+      expect(tokenInit?.method).toBe("POST");
+      const [linkUrl, linkInit] = fetchSpy.mock.calls[1];
+      expect(linkUrl).toBe("https://api.wompi.sv/EnlacePago");
+      expect(linkInit?.method).toBe("POST");
+      expect(linkInit?.headers).toMatchObject({ authorization: "Bearer wompi-token" });
+      expect(JSON.parse(String(linkInit?.body))).toMatchObject({
+        identificadorEnlaceComercio: expect.stringMatching(/^di_/),
+        monto: 25.5
+      });
     } finally {
       fetchSpy.mockRestore();
     }

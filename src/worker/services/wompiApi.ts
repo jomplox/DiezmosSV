@@ -151,7 +151,7 @@ export class WompiApiService {
       // The PUT replaces the whole object, so formaPago and configuracion must be
       // resent or Wompi would re-enable every payment method / re-email the donor.
       formaPago: this.linkFormaPago(),
-      configuracion: await this.linkConfiguracion()
+      configuracion: await this.linkConfiguracion(requireSecret(this.env, "APP_ORIGIN"))
     };
 
     const response = await this.authorizedFetch(`${ENLACE_PAGO_URL}/${intent.wompi_id_enlace}`, "PUT", body);
@@ -178,10 +178,16 @@ export class WompiApiService {
   }
 
   private async linkPreflight(): Promise<Awaited<ReturnType<WompiApiService["linkConfiguracion"]>>> {
+    const origin = await this.assertLinkConfiguration();
+    return this.linkConfiguracion(origin);
+  }
+
+  private async assertLinkConfiguration(): Promise<string> {
     try {
       await assertFiscalCollectionReady(this.env);
+      const origin = requireSecret(this.env, "APP_ORIGIN");
       this.wompiCredentials();
-      return await this.linkConfiguracion();
+      return origin;
     } catch {
       throw wompiConfigurationError();
     }
@@ -207,7 +213,7 @@ export class WompiApiService {
     };
   }
 
-  private async linkConfiguracion(): Promise<{
+  private async linkConfiguracion(origin: string): Promise<{
     urlRedirect: string;
     urlWebhook: string;
     esMontoEditable: false;
@@ -217,7 +223,6 @@ export class WompiApiService {
     notificarTransaccionCliente: boolean;
     duracionInterfazIntentoMinutos: number;
   }> {
-    const origin = requireSecret(this.env, "APP_ORIGIN");
     // These values live in D1 and are intentionally read for every link. An owner
     // can change notification targets without rotating secrets or redeploying.
     const notifications = await loadWompiNotificationSettings(this.repo);

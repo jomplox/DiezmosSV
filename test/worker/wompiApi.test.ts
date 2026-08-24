@@ -27,10 +27,27 @@ const CARDS_ONLY_FORMA_PAGO = {
   permitePagoNequi: false
 };
 
+const WOMPI_CONFIGURATION_ERROR = "No se pudo preparar la configuración de Wompi";
+const INTERNAL_CONFIGURATION_TEXT = [
+  "EMISOR_CONFIG_JSON",
+  "MH_CERT_XML",
+  "MH_CERT_PASSWORD",
+  "MH_USER_TEST",
+  "MH_PASSWORD_TEST",
+  "MH_AUTH_URL_TEST",
+  "MH_RECEPCION_URL_TEST",
+  "MH_ANULACION_URL_TEST",
+  "El certificado del Ministerio de Hacienda",
+  "La contraseña de la llave privada",
+  "not-a-pkcs8-key",
+  "99999999999999"
+];
+
 // Minimal in-memory D1 covering exactly the two app_settings statements
 // Repository.getSetting/setSetting issue, so the token cache has real storage.
 class FakeD1 {
   readonly settings = new Map<string, string>();
+  getSettingFault: Error | null = null;
   prepare(sql: string) {
     return new FakeStatement(this, sql);
   }
@@ -45,6 +62,9 @@ class FakeStatement {
   }
   async first<T>(): Promise<T | null> {
     if (this.sql.includes("SELECT value FROM app_settings WHERE key = ?")) {
+      if (this.db.getSettingFault) {
+        throw this.db.getSettingFault;
+      }
       const value = this.db.settings.get(String(this.args[0]));
       return value === undefined ? null : ({ value } as T);
     }
@@ -246,8 +266,7 @@ describe("Wompi API service", () => {
 
     const error = await new WompiApiService(env).createPaymentLink(intent()).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(WompiApiError);
-    expect((error as WompiApiError).message).toBe("No se pudo preparar la configuración de Wompi");
-    expect((error as WompiApiError).message).not.toContain("EMISOR_CONFIG_JSON");
+    expectSafeConfigurationError(error);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -256,28 +275,32 @@ describe("Wompi API service", () => {
     ["mismatched", (env: Env) => { env.MH_CERT_XML = signingCertificateXml.replace("10000000000001", "99999999999999"); }],
     ["inactive", (env: Env) => { env.MH_CERT_XML = signingCertificateXml.replace("<activo>true</activo>", "<activo>false</activo>"); }],
     ["unimportable", (env: Env) => { env.MH_CERT_XML = signingCertificateXml.replace(/<privateKey><encodied>[\s\S]*?<\/encodied>/, "<privateKey><encodied>not-a-pkcs8-key</encodied>"); }]
-  ])("fails closed before Wompi when MH signing material is %s", async (_label, makeInvalid) => {
+  ])("returns a safe typed error before Wompi when MH signing material is %s", async (_label, makeInvalid) => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     const env = realEnv();
     makeInvalid(env);
 
-    await expect(new WompiApiService(env).createPaymentLink(intent())).rejects.toThrow();
+    const error = await new WompiApiService(env).createPaymentLink(intent()).catch((caught: unknown) => caught);
+    expectSafeConfigurationError(error);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it.each([
-    ["credentials", (env: Env) => { delete env.MH_USER_TEST; }],
+    ["certificate password", (env: Env) => { delete env.MH_CERT_PASSWORD; }],
+    ["credential user", (env: Env) => { delete env.MH_USER_TEST; }],
+    ["credential password", (env: Env) => { delete env.MH_PASSWORD_TEST; }],
     ["authentication endpoint", (env: Env) => { delete env.MH_AUTH_URL_TEST; }],
     ["reception endpoint", (env: Env) => { delete env.MH_RECEPCION_URL_TEST; }],
     ["invalidation endpoint", (env: Env) => { delete env.MH_ANULACION_URL_TEST; }]
-  ])("fails closed before Wompi when the MH TEST %s is missing", async (_label, makeInvalid) => {
+  ])("returns a safe typed error before Wompi when the MH TEST %s is missing", async (_label, makeInvalid) => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     const env = realEnv();
     makeInvalid(env);
 
-    await expect(new WompiApiService(env).createPaymentLink(intent())).rejects.toThrow();
+    const error = await new WompiApiService(env).createPaymentLink(intent()).catch((caught: unknown) => caught);
+    expectSafeConfigurationError(error);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -292,8 +315,7 @@ describe("Wompi API service", () => {
     makeInvalid(env);
 
     const error = await new WompiApiService(env).createPaymentLink(intent()).catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(WompiApiError);
-    expect((error as WompiApiError).message).toBe("No se pudo preparar la configuración de Wompi");
+    expectSafeConfigurationError(error);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -309,8 +331,20 @@ describe("Wompi API service", () => {
     delete env.MH_USER_PROD;
 
     const error = await new WompiApiService(env).createPaymentLink(intent()).catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(WompiApiError);
-    expect((error as WompiApiError).message).toBe("No se pudo preparar la configuración de Wompi");
+    expectSafeConfigurationError(error);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not reclassify a notification D1 fault as Wompi configuration", async () => {
+    const db = new FakeD1();
+    const fault = new Error("synthetic D1 notification read fault");
+    db.getSettingFault = fault;
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await new WompiApiService(realEnv(db)).createPaymentLink(intent()).catch((caught: unknown) => caught);
+    expect(error).toBe(fault);
+    expect(error).not.toBeInstanceOf(WompiApiError);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -793,6 +827,15 @@ function emisorConfig() {
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+}
+
+function expectSafeConfigurationError(error: unknown): void {
+  expect(error).toBeInstanceOf(WompiApiError);
+  const message = (error as WompiApiError).message;
+  expect(message).toBe(WOMPI_CONFIGURATION_ERROR);
+  for (const forbidden of INTERNAL_CONFIGURATION_TEXT) {
+    expect(message).not.toContain(forbidden);
+  }
 }
 
 async function generatedCertificateXml(password: string): Promise<string> {
