@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { getEmisorConfig, getMhCertificateXml, isMockMode } from "../../src/worker/config";
+import {
+  getEmisorConfig,
+  getMhCertificateXml,
+  isMockMode,
+  mhEndpoint,
+  resolveMhTestAuthFallbackEndpoint
+} from "../../src/worker/config";
 import type { Env } from "../../src/worker/types";
 import { emisorConfig } from "./fixtures";
 
@@ -14,6 +20,10 @@ describe("mock mode", () => {
 
   it("performs real external calls when MOCK_EXTERNAL_SERVICES is \"false\"", () => {
     expect(isMockMode(env({ MOCK_EXTERNAL_SERVICES: "false" }))).toBe(false);
+  });
+
+  it("rejects shared mock mode in production", () => {
+    expect(() => isMockMode(env({ APP_ENV: "production", MOCK_EXTERNAL_SERVICES: "true" }))).toThrow(/mock/i);
   });
 });
 
@@ -55,6 +65,54 @@ describe("worker config", () => {
         })
       )
     ).toThrow(/CAT-013/i);
+  });
+});
+
+describe("MH endpoints", () => {
+  it.each([
+    ["auth", "00", "MH_AUTH_URL_TEST", "https://apitest.dtes.mh.gob.sv/seguridad/auth"],
+    ["recepcion", "00", "MH_RECEPCION_URL_TEST", "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"],
+    ["anulacion", "00", "MH_ANULACION_URL_TEST", "https://apitest.dtes.mh.gob.sv/fesv/anulardte"],
+    ["auth", "01", "MH_AUTH_URL_PROD", "https://api.dtes.mh.gob.sv/seguridad/auth"],
+    ["recepcion", "01", "MH_RECEPCION_URL_PROD", "https://api.dtes.mh.gob.sv/fesv/recepciondte"],
+    ["anulacion", "01", "MH_ANULACION_URL_PROD", "https://api.dtes.mh.gob.sv/fesv/anulardte"]
+  ] as const)("accepts the %s endpoint for MH lane %s", (name, ambiente, key, endpoint) => {
+    expect(mhEndpoint(env({ [key]: endpoint }), name, ambiente)).toBe(endpoint);
+  });
+
+  it.each([
+    ["HTTP", "auth", "00", "MH_AUTH_URL_TEST", "http://apitest.dtes.mh.gob.sv/seguridad/auth"],
+    ["production lane", "recepcion", "00", "MH_RECEPCION_URL_TEST", "https://api.dtes.mh.gob.sv/fesv/recepciondte"],
+    ["wrong service path", "anulacion", "01", "MH_ANULACION_URL_PROD", "https://api.dtes.mh.gob.sv/fesv/recepciondte"]
+  ] as const)("rejects an %s %s endpoint outside the requested lane", (_label, name, ambiente, key, endpoint) => {
+    expect(() => mhEndpoint(env({ [key]: endpoint }), name, ambiente)).toThrow(/MH endpoint/i);
+  });
+
+  it.each([
+    ["an omitted value", undefined, null],
+    ["an empty value", "", null],
+    ["the official TEST endpoint", "https://apitest.dtes.mh.gob.sv/seguridad/auth", null],
+    [
+      "the official central endpoint",
+      "https://api.dtes.mh.gob.sv/seguridad/auth",
+      "https://api.dtes.mh.gob.sv/seguridad/auth"
+    ]
+  ] as const)("resolves %s as a safe TEST authentication fallback", (_label, value, expected) => {
+    expect(resolveMhTestAuthFallbackEndpoint(env({ MH_AUTH_URL_TEST_FALLBACK: value }))).toBe(expected);
+  });
+
+  it.each([
+    "https://credentials.example/collect",
+    "http://api.dtes.mh.gob.sv/seguridad/auth",
+    "https://user:password@api.dtes.mh.gob.sv/seguridad/auth",
+    "https://api.dtes.mh.gob.sv:444/seguridad/auth",
+    "https://api.dtes.mh.gob.sv/seguridad/auth?next=evil",
+    "https://api.dtes.mh.gob.sv/seguridad/auth#fragment",
+    " https://api.dtes.mh.gob.sv/seguridad/auth",
+    "https://api.dtes.mh.gob.sv/seguridad/auth "
+  ])("rejects a non-official TEST authentication fallback before credentials can be sent: %s", (value) => {
+    expect(() => resolveMhTestAuthFallbackEndpoint(env({ MH_AUTH_URL_TEST_FALLBACK: value })))
+      .toThrow(/MH_AUTH_URL_TEST_FALLBACK/);
   });
 });
 

@@ -7,7 +7,9 @@ import {
   STRIPE_RETENTION_SNAPSHOT_TABLES
 } from "../../src/worker/storage/repository";
 import {
+  RETENTION_CANONICAL_TABLES,
   RETENTION_FOREIGN_KEY_PROTOCOL,
+  parseRetentionManifest,
   previousElSalvadorMonth,
   runRetentionExport
 } from "../../src/worker/services/retention";
@@ -813,6 +815,90 @@ function restoreArchivedRows(
     ).run(...Object.values(row));
   }
 }
+
+function exactManifestFixture(month = "2026-06") {
+  const runId = "11111111-1111-4111-8111-111111111111";
+  const tables = Object.fromEntries(
+    RETENTION_CANONICAL_TABLES.map((table) => [
+      table,
+      {
+        key: `retention/${month.slice(0, 4)}/${month}/runs/${runId}/${table}.ndjson`,
+        rowCount: 0,
+        sha256: "a".repeat(64)
+      }
+    ])
+  );
+  return {
+    version: 2,
+    runId,
+    month,
+    generatedAt: "2026-07-01T09:00:03.512Z",
+    tables
+  };
+}
+
+describe("parseRetentionManifest", () => {
+  it("defines the complete 18-table legal-retention contract once", () => {
+    expect(RETENTION_CANONICAL_TABLES).toEqual([
+      "dte_documents",
+      "fiscal_corrections",
+      "donation_intents",
+      "dte_events",
+      "email_deliveries",
+      "audit_logs",
+      "fiscal_corrections_latest",
+      "wompi_events",
+      "contingency_periods",
+      "contingency_batches",
+      "contingency_batch_lines",
+      "document_sequences",
+      "stripe_checkout_sessions",
+      "stripe_webhook_events",
+      "stripe_gifts",
+      "stripe_invoice_settlements",
+      "stripe_acknowledgment_deliveries",
+      "stripe_annual_statement_deliveries"
+    ]);
+  });
+
+  it("returns one deterministic canonical v2 manifest for the exact table set", () => {
+    const source = exactManifestFixture();
+    source.tables = Object.fromEntries(Object.entries(source.tables).reverse());
+
+    const parsed = parseRetentionManifest(source, "2026-06");
+
+    expect(parsed).not.toBeNull();
+    expect(Object.keys(parsed!.tables)).toEqual(RETENTION_CANONICAL_TABLES);
+    expect(parsed).not.toBe(source);
+  });
+
+  it.each([
+    ["empty table set", (manifest: ReturnType<typeof exactManifestFixture>) => { manifest.tables = {}; }],
+    ["partial table set", (manifest: ReturnType<typeof exactManifestFixture>) => { delete manifest.tables.audit_logs; }],
+    ["extra table", (manifest: ReturnType<typeof exactManifestFixture>) => { manifest.tables.debug_dump = manifest.tables.audit_logs; }],
+    ["missing root field", (manifest: ReturnType<typeof exactManifestFixture>) => { delete (manifest as Partial<typeof manifest>).generatedAt; }],
+    ["extra root field", (manifest: ReturnType<typeof exactManifestFixture>) => { Object.assign(manifest, { note: "unexpected" }); }],
+    ["malformed root value", (manifest: ReturnType<typeof exactManifestFixture>) => { (manifest as { version: unknown }).version = 1; }],
+    ["wrong month", (manifest: ReturnType<typeof exactManifestFixture>) => { manifest.month = "2026-05"; }],
+    ["malformed generatedAt", (manifest: ReturnType<typeof exactManifestFixture>) => { manifest.generatedAt = "2026-07-01"; }],
+    ["impossible generatedAt", (manifest: ReturnType<typeof exactManifestFixture>) => { manifest.generatedAt = "2026-99-99T99:99:99.999Z"; }],
+    ["unsafe runId", (manifest: ReturnType<typeof exactManifestFixture>) => { manifest.runId = "../escape"; }],
+    ["wrong run-scoped key", (manifest: ReturnType<typeof exactManifestFixture>) => { manifest.tables.audit_logs.key = manifest.tables.audit_logs.key.replace(manifest.runId, "other-run"); }],
+    ["missing entry field", (manifest: ReturnType<typeof exactManifestFixture>) => { delete (manifest.tables.audit_logs as Partial<typeof manifest.tables.audit_logs>).key; }],
+    ["extra entry field", (manifest: ReturnType<typeof exactManifestFixture>) => { Object.assign(manifest.tables.audit_logs, { size: 12 }); }],
+    ["negative row count", (manifest: ReturnType<typeof exactManifestFixture>) => { manifest.tables.audit_logs.rowCount = -1; }],
+    ["fractional row count", (manifest: ReturnType<typeof exactManifestFixture>) => { manifest.tables.audit_logs.rowCount = 0.5; }],
+    ["unsafe row count", (manifest: ReturnType<typeof exactManifestFixture>) => { manifest.tables.audit_logs.rowCount = Number.MAX_SAFE_INTEGER + 1; }],
+    ["string row count", (manifest: ReturnType<typeof exactManifestFixture>) => { (manifest.tables.audit_logs as { rowCount: unknown }).rowCount = "0"; }],
+    ["uppercase digest", (manifest: ReturnType<typeof exactManifestFixture>) => { manifest.tables.audit_logs.sha256 = "A".repeat(64); }],
+    ["short digest", (manifest: ReturnType<typeof exactManifestFixture>) => { manifest.tables.audit_logs.sha256 = "a".repeat(63); }]
+  ])("rejects a manifest with %s", (_name, mutate) => {
+    const manifest = exactManifestFixture();
+    mutate(manifest);
+
+    expect(parseRetentionManifest(manifest, "2026-06")).toBeNull();
+  });
+});
 
 describe("runRetentionExport", () => {
   it("exports the previous El Salvador calendar month for windowed tables into NDJSON keyed objects", async () => {
@@ -1768,7 +1854,7 @@ describe("runRetentionExport", () => {
     }));
   });
 
-  it("audits RETENTION_EXPORT_COMPLETED with month and total rows", async () => {
+  it("anchors RETENTION_EXPORT_COMPLETED to the exact in-memory manifest and canonical digest", async () => {
     const db = new InMemoryRetentionD1();
     db.dteDocuments.push(row({ id: "dte_1", created_at: "2026-06-10T00:00:00.000Z" }));
     db.wompiEvents.push(row({ id: "wompi_1", created_at: undefined, received_at: "2026-06-11T00:00:00.000Z" }));
@@ -1781,6 +1867,18 @@ describe("runRetentionExport", () => {
     expect(completed).toBeTruthy();
     expect(String(completed?.summary)).toContain("2026-06");
     expect(String(completed?.summary)).toMatch(/\b2\b/);
+    const manifest = JSON.parse(new TextDecoder().decode(
+      archive.objects.get("retention/2026/2026-06/manifest.json")!.body
+    )) as ReturnType<typeof exactManifestFixture>;
+    const metadata = JSON.parse(String(completed!.metadata_json)) as Record<string, unknown>;
+    expect(metadata).toEqual({
+      month: manifest.month,
+      runId: manifest.runId,
+      generatedAt: manifest.generatedAt,
+      totalRows: 2,
+      tables: manifest.tables,
+      manifestSha256: await sha256Hex(utf8Bytes(JSON.stringify(manifest)))
+    });
   });
 
   it("skips and audits RETENTION_EXPORT_SKIPPED when the manifest already exists (idempotent)", async () => {
@@ -1788,7 +1886,10 @@ describe("runRetentionExport", () => {
     db.dteDocuments.push(row({ id: "dte_1", created_at: "2026-06-10T00:00:00.000Z" }));
     const archive = new FakeArchiveBucket();
     // Pre-seed the manifest as if a previous run already completed.
-    archive.objects.set("retention/2026/2026-06/manifest.json", { key: "retention/2026/2026-06/manifest.json", body: utf8Bytes("{}") });
+    archive.objects.set("retention/2026/2026-06/manifest.json", {
+      key: "retention/2026/2026-06/manifest.json",
+      body: utf8Bytes(JSON.stringify(exactManifestFixture()))
+    });
     const env = envWithArchive(db, archive);
 
     const result = await runRetentionExport(env, new Date("2026-07-04T15:00:00.000Z"));
@@ -1796,6 +1897,7 @@ describe("runRetentionExport", () => {
     expect(result.status).toBe("skipped");
     expect(archive.putCalls).toHaveLength(0); // no re-export, no re-write of manifest
     expect(db.audits.find((audit) => audit.action === "RETENTION_EXPORT_SKIPPED")).toBeTruthy();
+    expect(db.audits.find((audit) => audit.action === "RETENTION_EXPORT_COMPLETED")).toBeUndefined();
   });
 
   it("supports exporting an explicit month for the manual verification endpoint", async () => {
@@ -2111,6 +2213,26 @@ describe("previousElSalvadorMonth (UTC/El Salvador day seam)", () => {
 });
 
 describe("retention restore guidance", () => {
+  it("keeps the documented object-layout digest order aligned with the canonical manifest", () => {
+    const guidance = readFileSync(
+      resolve(import.meta.dirname, "../../docs/retention-restore.md"),
+      "utf8"
+    );
+    const layoutHeading = guidance.indexOf("## Object layout");
+    const layoutFenceStart = guidance.indexOf("```", layoutHeading);
+    const layoutFenceEnd = guidance.indexOf("```", layoutFenceStart + 3);
+    const documentedTables = guidance
+      .slice(layoutFenceStart + 3, layoutFenceEnd)
+      .split("\n")
+      .map((line) => line.match(/\/([^/]+)\.ndjson$/)?.[1] ?? null)
+      .filter((table): table is string => table !== null);
+
+    expect(layoutHeading).toBeGreaterThanOrEqual(0);
+    expect(layoutFenceStart).toBeGreaterThan(layoutHeading);
+    expect(layoutFenceEnd).toBeGreaterThan(layoutFenceStart);
+    expect(documentedTables).toEqual([...RETENTION_CANONICAL_TABLES]);
+  });
+
   it("keeps the Wrangler restore file free of nested transaction statements", () => {
     const protocol = RETENTION_FOREIGN_KEY_PROTOCOL as unknown as {
       wranglerFile: {
@@ -2151,7 +2273,7 @@ describe("retention restore guidance", () => {
     expect(guidance).toContain("latest `wompi_events.ndjson` snapshot");
     expect(guidance).toContain("latest `document_sequences.ndjson` snapshot");
     expect(guidance.toLowerCase()).toMatch(
-      /archives created before\s+`document_sequences\.ndjson`/
+      /historical artifacts created before\s+`document_sequences\.ndjson`/
     );
     expect(guidance).toContain(
       "MAX(snapshot `next_value`, restored document maximum + 1, restored Wompi reservation maximum + 1, restored fiscal-correction reservation maximum + 1)"
@@ -2413,7 +2535,7 @@ describe("retention restore guidance", () => {
       "CREATE TRIGGER trg_fiscal_correction_reserve_sequence"
     );
     expect(guidance).toContain(
-      "Archives created before `fiscal_corrections_latest.ndjson`"
+      "Historical artifacts created before `fiscal_corrections_latest.ndjson`"
     );
   });
 });

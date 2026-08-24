@@ -59,6 +59,28 @@ describe("private Wrangler configuration", () => {
   });
 
   it.each([
+    ["enabled", "true"],
+    ["omitted", undefined]
+  ])("rejects a production target manifest with shared mock mode %s", (_label, mockExternalServices) => {
+    const rawConfig = productionTargetRawConfig();
+    if (mockExternalServices === undefined) {
+      Reflect.deleteProperty(rawConfig.env.production.vars, "MOCK_EXTERNAL_SERVICES");
+    } else {
+      rawConfig.env.production.vars.MOCK_EXTERNAL_SERVICES = mockExternalServices;
+    }
+
+    expect(() =>
+      assertPrivateWranglerTargetManifest(rawConfig, "production", productionTargetManifest())
+    ).toThrow(/resource manifest/i);
+  });
+
+  it("accepts a production target manifest only when shared mock mode is the literal false string", () => {
+    expect(() =>
+      assertPrivateWranglerTargetManifest(productionTargetRawConfig(), "production", productionTargetManifest())
+    ).not.toThrow();
+  });
+
+  it.each([
     ["Worker", (config: ReturnType<typeof targetRawConfig>) => { config.env.staging.name = "other-worker"; }],
     ["APP_ENV", (config: ReturnType<typeof targetRawConfig>) => { config.env.staging.vars.APP_ENV = "production"; }],
     ["origin", (config: ReturnType<typeof targetRawConfig>) => { config.env.staging.vars.APP_ORIGIN = "https://other.example.invalid"; }],
@@ -510,6 +532,57 @@ function targetRawConfig() {
               dead_letter_queue: "diezmos-sv-staging-issuance-dlq"
             },
             { queue: "diezmos-sv-staging-issuance-dlq" }
+          ]
+        }
+      }
+    }
+  };
+}
+
+function productionTargetManifest() {
+  return {
+    workerName: "diezmos-sv-production",
+    origin: "https://donar.example.invalid",
+    resourceManifest: {
+      accountId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      appEnv: "production" as const,
+      d1DatabaseName: "diezmos-sv-production-db",
+      d1DatabaseId: "44444444-4444-4444-4444-444444444444",
+      r2BucketName: "diezmos-sv-production-archive",
+      queueName: "diezmos-sv-production-issuance",
+      queueDlqName: "diezmos-sv-production-issuance-dlq",
+      workersDev: false
+    }
+  };
+}
+
+function productionTargetRawConfig() {
+  return {
+    account_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    env: {
+      production: {
+        name: "diezmos-sv-production",
+        workers_dev: false,
+        vars: {
+          APP_ENV: "production",
+          APP_ORIGIN: "https://donar.example.invalid",
+          CLOUDFLARE_SCRIPT_NAME: "diezmos-sv-production",
+          MOCK_EXTERNAL_SERVICES: "false"
+        },
+        d1_databases: [{
+          binding: "DB",
+          database_name: "diezmos-sv-production-db",
+          database_id: "44444444-4444-4444-4444-444444444444"
+        }],
+        r2_buckets: [{ binding: "ARCHIVE", bucket_name: "diezmos-sv-production-archive" }],
+        queues: {
+          producers: [{ binding: "ISSUANCE_QUEUE", queue: "diezmos-sv-production-issuance" }],
+          consumers: [
+            {
+              queue: "diezmos-sv-production-issuance",
+              dead_letter_queue: "diezmos-sv-production-issuance-dlq"
+            },
+            { queue: "diezmos-sv-production-issuance-dlq" }
           ]
         }
       }

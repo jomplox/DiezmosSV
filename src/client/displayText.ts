@@ -105,6 +105,8 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   FISCAL_CORRECTION_STARTED: "Corrección fiscal iniciada",
   LOGIN: "Inicio de sesión",
   LOGIN_FAILED: "Inicio de sesión fallido",
+  LOGIN_MFA_CHALLENGE_ISSUED: "Código de inicio de sesión enviado",
+  LOGIN_MFA_EMAIL_FAILED: "Envío del código de inicio de sesión fallido",
   OWNER_BOOTSTRAPPED: "Propietario inicial creado",
   PASSWORD_RESET_COMPLETED: "Contraseña restablecida por enlace",
   PASSWORD_RESET_EMAIL_FAILED: "Correo de restablecimiento fallido",

@@ -5,8 +5,10 @@ import {
   createAudit as createAuditRepository,
   createAuditIfAbsent as createAuditIfAbsentRepository,
   ensurePostAcceptAudit as ensurePostAcceptAuditRepository,
+  getLatestRetentionExportCompletionAudit as getLatestRetentionExportCompletionAuditRepository,
   listAudit as listAuditRepository,
-  listAuditPage as listAuditPageRepository
+  listAuditPage as listAuditPageRepository,
+  type RetentionExportCompletionAudit
 } from "./repository/audit";
 import {
   getOpenContingency as getOpenContingencyRepository,
@@ -19,14 +21,19 @@ import {
 import {
   countUsers as countUsersRepository,
   createInitialOwner as createInitialOwnerRepository,
+  createLoginStepUpChallenge as createLoginStepUpChallengeRepository,
   createPasswordResetToken as createPasswordResetTokenRepository,
   createSessionIfCredentialsCurrent as createSessionIfCredentialsCurrentRepository,
   createUser as createUserRepository,
+  consumeLoginStepUpChallenge as consumeLoginStepUpChallengeRepository,
+  deleteExpiredLoginStepUpChallenges as deleteExpiredLoginStepUpChallengesRepository,
   getActivePasswordResetUser as getActivePasswordResetUserRepository,
   getSessionUser as getSessionUserRepository,
   getUserForLogin as getUserForLoginRepository,
   getUserRole as getUserRoleRepository,
   invalidatePasswordResetToken as invalidatePasswordResetTokenRepository,
+  invalidateLoginStepUpChallenge as invalidateLoginStepUpChallengeRepository,
+  incrementLoginStepUpFailure as incrementLoginStepUpFailureRepository,
   listUsers as listUsersRepository,
   resetPasswordWithToken as resetPasswordWithTokenRepository,
   revokeSession as revokeSessionRepository,
@@ -35,15 +42,18 @@ import {
   updateUserPasswordHashIfCurrent as updateUserPasswordHashIfCurrentRepository
 } from "./repository/identity";
 import {
+  claimProviderCreationBudget as claimProviderCreationBudgetRepository,
   claimDonationDatosRateLimit as claimDonationDatosRateLimitRepository,
   claimDonationIntentRateLimit as claimDonationIntentRateLimitRepository,
   claimStripePortalRateLimit as claimStripePortalRateLimitRepository,
   claimStripeProviderRecoveryRead as claimStripeProviderRecoveryReadRepository,
   claimLoginAttempt as claimLoginAttemptRepository,
   claimPasswordResetBudgets as claimPasswordResetBudgetsRepository,
+  countRecentAccountLoginFailures as countRecentAccountLoginFailuresRepository,
   deleteExpiredLoginRateLimits as deleteExpiredLoginRateLimitsRepository,
   deleteExpiredSecurityRateLimitClaims as deleteExpiredSecurityRateLimitClaimsRepository,
   finalizeStripeProviderRecoveryRead as finalizeStripeProviderRecoveryReadRepository,
+  releaseUnusedProviderCreationClaim as releaseUnusedProviderCreationClaimRepository,
   releaseUnusedDonationIntentRateLimitClaim as releaseUnusedDonationIntentRateLimitClaimRepository
 } from "./repository/rateLimits";
 import {
@@ -194,7 +204,8 @@ import {
   markWompiIssuanceProcessing as markWompiIssuanceProcessingRepository,
   recordWompiIssuanceFailure as recordWompiIssuanceFailureRepository,
   releaseWompiEventIssuance as releaseWompiEventIssuanceRepository,
-  reserveWompiDocumentIdentifiers as reserveWompiDocumentIdentifiersRepository
+  reserveWompiDocumentIdentifiers as reserveWompiDocumentIdentifiersRepository,
+  type WompiEventInsertResult
 } from "./repository/wompiIssuance";
 import {
   claimDocumentInvalidation as claimDocumentInvalidationRepository,
@@ -588,7 +599,7 @@ export class Repository {
     return finalizeStripeAnnualStatementDeliveryRepository(this.db, input);
   }
 
-  async insertWompiEvent(payload: WompiWebhook, rawBody: string, headers: Record<string, string>, environment: Ambiente): Promise<{ record: WompiEventRecord; inserted: boolean }> {
+  async insertWompiEvent(payload: WompiWebhook, rawBody: string, headers: Record<string, string>, environment: Ambiente): Promise<WompiEventInsertResult> {
     return insertWompiEventRepository(this.db, this, payload, rawBody, headers, environment);
   }
 
@@ -1423,6 +1434,12 @@ export class Repository {
     return createAuditRepository(this.db, this.auditContext, input);
   }
 
+  async getLatestRetentionExportCompletionAudit(
+    month: string
+  ): Promise<RetentionExportCompletionAudit | null> {
+    return getLatestRetentionExportCompletionAuditRepository(this.db, month);
+  }
+
   async ensurePostAcceptAudit(input: {
     auditId: string;
     documentId: string;
@@ -1610,6 +1627,16 @@ export class Repository {
     );
   }
 
+  async claimProviderCreationBudget(
+    input: Parameters<typeof claimProviderCreationBudgetRepository>[1]
+  ): ReturnType<typeof claimProviderCreationBudgetRepository> {
+    return claimProviderCreationBudgetRepository(this.db, input);
+  }
+
+  async releaseUnusedProviderCreationClaim(id: string): Promise<void> {
+    return releaseUnusedProviderCreationClaimRepository(this.db, id);
+  }
+
   async releaseUnusedDonationIntentRateLimitClaim(id: string): Promise<void> {
     return releaseUnusedDonationIntentRateLimitClaimRepository(this.db, id);
   }
@@ -1689,6 +1716,10 @@ export class Repository {
     );
   }
 
+  async countRecentAccountLoginFailures(normalizedEmail: string, sinceIso: string): Promise<number> {
+    return countRecentAccountLoginFailuresRepository(this.db, normalizedEmail, sinceIso);
+  }
+
   async deleteExpiredLoginRateLimits(now: string): Promise<void> {
     return deleteExpiredLoginRateLimitsRepository(this.db, now);
   }
@@ -1707,6 +1738,41 @@ export class Repository {
     expiresAt: string;
   }): Promise<boolean> {
     return createSessionIfCredentialsCurrentRepository(this.db, input);
+  }
+
+  async createLoginStepUpChallenge(
+    input: Parameters<typeof createLoginStepUpChallengeRepository>[1]
+  ): Promise<string | null> {
+    return createLoginStepUpChallengeRepository(this.db, input);
+  }
+
+  async consumeLoginStepUpChallenge(
+    input: Parameters<typeof consumeLoginStepUpChallengeRepository>[1]
+  ): ReturnType<typeof consumeLoginStepUpChallengeRepository> {
+    return consumeLoginStepUpChallengeRepository(this.db, input);
+  }
+
+  async incrementLoginStepUpFailure(
+    input: Parameters<typeof incrementLoginStepUpFailureRepository>[1]
+  ): Promise<boolean> {
+    return incrementLoginStepUpFailureRepository(this.db, input);
+  }
+
+  async invalidateLoginStepUpChallenge(
+    challengeId: string,
+    continuationTokenHash: string,
+    invalidatedAt: string
+  ): Promise<void> {
+    return invalidateLoginStepUpChallengeRepository(
+      this.db,
+      challengeId,
+      continuationTokenHash,
+      invalidatedAt
+    );
+  }
+
+  async deleteExpiredLoginStepUpChallenges(now: string): Promise<void> {
+    return deleteExpiredLoginStepUpChallengesRepository(this.db, now);
   }
 
   async getSessionUser(tokenHash: string): Promise<Record<string, string> | null> {

@@ -13,7 +13,7 @@ import {
 } from "../storage/repository";
 import type { Env } from "../types";
 import { EL_SALVADOR_TIME_ZONE } from "../../shared/legalWindows";
-import { hexFromBytes, utf8Bytes } from "../utils/encoding";
+import { hexFromBytes, sha256Hex, utf8Bytes } from "../utils/encoding";
 import { sendOperationalAlert } from "./alerts";
 import { logWorkerError } from "./observability";
 
@@ -28,14 +28,14 @@ export interface RetentionExportResult {
 }
 
 interface TableManifestEntry {
-  key?: string;
+  key: string;
   rowCount: number;
   sha256: string;
 }
 
 export interface RetentionManifest {
-  version?: 1 | 2;
-  runId?: string;
+  version: 2;
+  runId: string;
   month: string;
   generatedAt: string;
   tables: Record<string, TableManifestEntry>;
@@ -62,6 +62,21 @@ interface RetentionSuspendedTrigger {
 
 export const FISCAL_CORRECTION_LATEST_SNAPSHOT = "fiscal_corrections_latest";
 export const DOCUMENT_SEQUENCES_SNAPSHOT = "document_sequences";
+
+const NON_STRIPE_RETENTION_SNAPSHOT_TABLES = RETENTION_SNAPSHOT_TABLES.filter(
+  (table) => !(STRIPE_RETENTION_SNAPSHOT_TABLES as readonly string[]).includes(table)
+);
+
+// Ordered source of truth for both production export and every manifest consumer.
+// The two special snapshots deliberately sit between the windowed, non-Stripe,
+// and fenced Stripe sections so serialization and object reads are deterministic.
+export const RETENTION_CANONICAL_TABLES = Object.freeze([
+  ...RETENTION_WINDOWED_TABLES,
+  FISCAL_CORRECTION_LATEST_SNAPSHOT,
+  ...NON_STRIPE_RETENTION_SNAPSHOT_TABLES,
+  DOCUMENT_SEQUENCES_SNAPSHOT,
+  ...STRIPE_RETENTION_SNAPSHOT_TABLES
+]);
 
 const FISCAL_CORRECTION_RESTORE_UPDATE_COLUMNS = [
   "request_id",
@@ -227,7 +242,7 @@ export const RETENTION_FOREIGN_KEY_PROTOCOL: {
 // Single source of truth for the R2 archive key layout, shared with the backups
 // service so month listing/verification/download derive keys the same way the
 // export writes them. Version 2 manifests stay canonical at the month root and
-// name immutable run-scoped table objects; retentionTableKey remains the v1 fallback.
+// name immutable run-scoped table objects.
 export const RETENTION_KEY_ROOT = "retention";
 
 function retentionMonthPrefix(month: string): string {
@@ -238,8 +253,94 @@ export function retentionManifestKey(month: string): string {
   return `${retentionMonthPrefix(month)}/manifest.json`;
 }
 
-export function retentionTableKey(month: string, table: string): string {
-  return `${retentionMonthPrefix(month)}/${table}.ndjson`;
+const RETENTION_MANIFEST_ROOT_FIELDS = ["version", "runId", "month", "generatedAt", "tables"] as const;
+const RETENTION_MANIFEST_ENTRY_FIELDS = ["key", "rowCount", "sha256"] as const;
+const RETENTION_MONTH_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/;
+const RETENTION_RUN_ID_PATTERN = /^[A-Za-z0-9_-]{1,100}$/;
+const RETENTION_SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const RETENTION_ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+export function parseRetentionManifest(value: unknown, expectedMonth: string): RetentionManifest | null {
+  if (!hasExactFields(value, RETENTION_MANIFEST_ROOT_FIELDS)) return null;
+  if (value.version !== 2) return null;
+  if (typeof value.month !== "string" || !RETENTION_MONTH_PATTERN.test(value.month) || value.month !== expectedMonth) {
+    return null;
+  }
+  if (typeof value.runId !== "string" || !RETENTION_RUN_ID_PATTERN.test(value.runId)) return null;
+  if (typeof value.generatedAt !== "string" || !RETENTION_ISO_TIMESTAMP_PATTERN.test(value.generatedAt)) {
+    return null;
+  }
+  const generatedAt = new Date(value.generatedAt);
+  if (Number.isNaN(generatedAt.getTime()) || generatedAt.toISOString() !== value.generatedAt) {
+    return null;
+  }
+  if (!isRecord(value.tables)) return null;
+  const sourceTables = value.tables;
+  const tableNames = Object.keys(sourceTables);
+  if (
+    tableNames.length !== RETENTION_CANONICAL_TABLES.length
+    || RETENTION_CANONICAL_TABLES.some((table) => !Object.hasOwn(sourceTables, table))
+  ) {
+    return null;
+  }
+
+  const tables: RetentionManifest["tables"] = {};
+  for (const table of RETENTION_CANONICAL_TABLES) {
+    const entry = sourceTables[table];
+    if (!hasExactFields(entry, RETENTION_MANIFEST_ENTRY_FIELDS)) return null;
+    const expectedKey = `${RETENTION_KEY_ROOT}/${value.month.slice(0, 4)}/${value.month}/runs/${value.runId}/${table}.ndjson`;
+    if (entry.key !== expectedKey) return null;
+    if (!Number.isSafeInteger(entry.rowCount) || Number(entry.rowCount) < 0) return null;
+    if (typeof entry.sha256 !== "string" || !RETENTION_SHA256_PATTERN.test(entry.sha256)) return null;
+    tables[table] = {
+      key: entry.key,
+      rowCount: Number(entry.rowCount),
+      sha256: entry.sha256
+    };
+  }
+
+  return {
+    version: 2,
+    runId: value.runId,
+    month: value.month,
+    generatedAt: value.generatedAt,
+    tables
+  };
+}
+
+// Canonical digest payload: compact JSON; fixed root field order above; canonical
+// table order; and key,rowCount,sha256 entry order. It intentionally differs from
+// the human-readable, indented R2 representation.
+export function canonicalRetentionManifestJson(manifest: RetentionManifest): string {
+  const tables: RetentionManifest["tables"] = {};
+  for (const table of RETENTION_CANONICAL_TABLES) {
+    const entry = manifest.tables[table];
+    tables[table] = {
+      key: entry.key,
+      rowCount: entry.rowCount,
+      sha256: entry.sha256
+    };
+  }
+  return JSON.stringify({
+    version: manifest.version,
+    runId: manifest.runId,
+    month: manifest.month,
+    generatedAt: manifest.generatedAt,
+    tables
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactFields<const Fields extends readonly string[]>(
+  value: unknown,
+  fields: Fields
+): value is Record<Fields[number], unknown> {
+  return isRecord(value)
+    && Object.keys(value).length === fields.length
+    && fields.every((field) => Object.hasOwn(value, field));
 }
 
 // Every month, snapshot all legal records into R2 so they survive D1 loss, an
@@ -276,38 +377,52 @@ export async function runRetentionExport(env: Env, now: Date, options: { month?:
     let totalRows = 0;
 
     const { startIso, endIso } = elSalvadorMonthWindow(month);
-    for (const table of RETENTION_WINDOWED_TABLES) {
-      const entry = await exportWindowedTable(env, repo, table, prefix, startIso, endIso);
+    let stripeFence: StripeRetentionFence | null = null;
+    for (const table of RETENTION_CANONICAL_TABLES) {
+      let entry: TableManifestEntry;
+      if ((RETENTION_WINDOWED_TABLES as readonly string[]).includes(table)) {
+        entry = await exportWindowedTable(
+          env,
+          repo,
+          table as RetentionTable,
+          prefix,
+          startIso,
+          endIso
+        );
+      } else if (table === FISCAL_CORRECTION_LATEST_SNAPSHOT) {
+        entry = await exportFiscalCorrectionSnapshot(env, prefix);
+      } else if (table === DOCUMENT_SEQUENCES_SNAPSHOT) {
+        entry = await exportDocumentSequences(env, repo, prefix);
+      } else {
+        const isStripeTable = (STRIPE_RETENTION_SNAPSHOT_TABLES as readonly string[]).includes(table);
+        // The canonical order places the six Stripe streams last, so this fence
+        // is captured immediately before their first D1 read.
+        if (isStripeTable && !stripeFence) {
+          stripeFence = await repo.captureStripeRetentionFence();
+        }
+        entry = await exportSnapshotTable(
+          env,
+          repo,
+          table as RetentionSnapshotTable,
+          prefix,
+          isStripeTable ? stripeFence ?? undefined : undefined
+        );
+      }
       manifest.tables[table] = entry;
       totalRows += entry.rowCount;
     }
-    const fiscalCorrectionSnapshotEntry = await exportFiscalCorrectionSnapshot(env, prefix);
-    manifest.tables[FISCAL_CORRECTION_LATEST_SNAPSHOT] = fiscalCorrectionSnapshotEntry;
-    totalRows += fiscalCorrectionSnapshotEntry.rowCount;
-    for (const table of RETENTION_SNAPSHOT_TABLES) {
-      if ((STRIPE_RETENTION_SNAPSHOT_TABLES as readonly string[]).includes(table)) continue;
-      const entry = await exportSnapshotTable(env, repo, table, prefix);
-      manifest.tables[table] = entry;
-      totalRows += entry.rowCount;
-    }
-    const sequenceEntry = await exportDocumentSequences(env, repo, prefix);
-    manifest.tables[DOCUMENT_SEQUENCES_SNAPSHOT] = sequenceEntry;
-    totalRows += sequenceEntry.rowCount;
-
-    // Capture immediately before the six Stripe streams, then prove no
-    // material insert/update/delete occurred before publishing the manifest.
-    const stripeFence = await repo.captureStripeRetentionFence();
-    for (const table of STRIPE_RETENTION_SNAPSHOT_TABLES) {
-      const entry = await exportSnapshotTable(env, repo, table, prefix, stripeFence);
-      manifest.tables[table] = entry;
-      totalRows += entry.rowCount;
+    if (!stripeFence) {
+      throw new Error("retention_stripe_fence_required");
     }
     const completedStripeFence = await repo.captureStripeRetentionFence();
     if (completedStripeFence.materialMutationEpoch !== stripeFence.materialMutationEpoch) {
       throw new Error("retention_stripe_material_epoch_changed");
     }
 
-    // Manifest last: its existence is the idempotency/completion marker.
+    const manifestSha256 = await sha256Hex(utf8Bytes(canonicalRetentionManifestJson(manifest)));
+
+    // Publish the immutable manifest conditionally, then anchor that winning
+    // in-memory manifest in D1. A crash between the two steps fails verification.
     const published = await env.ARCHIVE.put(
       manifestKey,
       utf8Bytes(JSON.stringify(manifest, null, 2)),
@@ -329,7 +444,14 @@ export async function runRetentionExport(env: Env, now: Date, options: { month?:
       entityType: "retention_export",
       entityId: month,
       summary: `Exportación de retención ${month} completada: ${totalRows} filas`,
-      metadata: { month, totalRows, tables: manifest.tables }
+      metadata: {
+        month,
+        runId: manifest.runId,
+        generatedAt: manifest.generatedAt,
+        totalRows,
+        tables: manifest.tables,
+        manifestSha256
+      }
     });
     return { status: "completed", month, totalRows };
   } catch (error) {
