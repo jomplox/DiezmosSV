@@ -17,6 +17,9 @@ const MH_SECRET_TOKEN_PERCENT = "bEaReR%20cache%20token%2Bcredential%2F%25%3F%20
 const MH_SECRET_TOKEN_FORM = "bEaReR+cache+token%2Bcredential%2F%25%3F+canary";
 const MH_SECRET_TOKEN_PERCENT_SEPARATOR = `bEaReR%20${MH_BEARER_CREDENTIAL}`;
 const MH_SECRET_TOKEN_FORM_SEPARATOR = `bEaReR+${MH_BEARER_CREDENTIAL}`;
+const MH_OWS_SECRET_TOKEN = ` \t${MH_SECRET_TOKEN}\t `;
+const MH_OWS_SECRET_TOKEN_PERCENT = "%20%09bEaReR%20cache%20token%2Bcredential%2F%25%3F%20canary%09%20";
+const MH_OWS_SECRET_TOKEN_FORM = "+%09bEaReR+cache+token%2Bcredential%2F%25%3F+canary%09+";
 
 const MH_SECRET_VARIANTS = [
   MH_SECRET_USER,
@@ -32,7 +35,10 @@ const MH_SECRET_VARIANTS = [
   MH_SECRET_TOKEN_PERCENT,
   MH_SECRET_TOKEN_FORM,
   MH_SECRET_TOKEN_PERCENT_SEPARATOR,
-  MH_SECRET_TOKEN_FORM_SEPARATOR
+  MH_SECRET_TOKEN_FORM_SEPARATOR,
+  MH_OWS_SECRET_TOKEN,
+  MH_OWS_SECRET_TOKEN_PERCENT,
+  MH_OWS_SECRET_TOKEN_FORM
 ];
 
 describe("MH client", () => {
@@ -267,6 +273,44 @@ describe("MH client", () => {
     expectNoMhSecrets(JSON.stringify(result));
   });
 
+  it("sanitizes cached authorization after Fetch removes outer HTTP whitespace", async () => {
+    const { environment, cacheStatement } = cachedTokenEnv("00", "staging", MH_OWS_SECRET_TOKEN);
+    let sentAuthorization: string | null = null;
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      sentAuthorization = new Request(input, init).headers.get("Authorization");
+      return jsonResponse({
+        estado: "RECHAZADO",
+        selloRecibido: null,
+        observaciones: [
+          `credential=${MH_BEARER_CREDENTIAL}`,
+          `credential-percent=${MH_BEARER_CREDENTIAL_PERCENT}`,
+          `credential-form=${MH_BEARER_CREDENTIAL_FORM}`,
+          `authorization=${MH_SECRET_TOKEN}`,
+          `authorization-percent=${MH_SECRET_TOKEN_PERCENT}`,
+          `authorization-form=${MH_SECRET_TOKEN_FORM}`,
+          `stored-authorization=${MH_OWS_SECRET_TOKEN}`,
+          `stored-percent=${MH_OWS_SECRET_TOKEN_PERCENT}`,
+          `stored-form=${MH_OWS_SECRET_TOKEN_FORM}`
+        ],
+        nested: [{ [`provider-${MH_BEARER_CREDENTIAL_PERCENT}-key`]: `prefix-${MH_SECRET_TOKEN_FORM}-suffix` }]
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await transmitTestDte(new MhClient(environment));
+
+    expect(result).toMatchObject({
+      accepted: false,
+      estado: "RECHAZADO",
+      selloRecibido: null
+    });
+    expect(sentAuthorization).toBe(MH_SECRET_TOKEN);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(cacheStatement.first).toHaveBeenCalledTimes(1);
+    expect(cacheStatement.run).not.toHaveBeenCalled();
+    expectNoMhSecrets(JSON.stringify(result));
+  });
+
   it("bounds an arbitrary indeterminate estado and sanitizes a plain-text reception response", async () => {
     const environment = testEnv();
     environment.MH_USER_TEST = MH_SECRET_USER;
@@ -357,7 +401,8 @@ function testEnv(): Env {
 
 function cachedTokenEnv(
   ambiente: "00" | "01",
-  appEnv: "staging" | "production"
+  appEnv: "staging" | "production",
+  token = MH_SECRET_TOKEN
 ): {
   environment: Env;
   cacheStatement: {
@@ -369,7 +414,7 @@ function cachedTokenEnv(
   const cacheStatement = {
     bind: vi.fn().mockReturnThis(),
     first: vi.fn().mockResolvedValue({
-      token: MH_SECRET_TOKEN,
+      token,
       token_type: "Bearer",
       expires_at: "2099-01-01T00:00:00.000Z"
     }),

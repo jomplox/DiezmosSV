@@ -38,6 +38,9 @@ const PIPELINE_MH_SECRET_TOKEN_PERCENT = "bEaReR%20cache%20token%2Bcredential%2F
 const PIPELINE_MH_SECRET_TOKEN_FORM = "bEaReR+cache+token%2Bcredential%2F%25%3F+canary";
 const PIPELINE_MH_SECRET_TOKEN_PERCENT_SEPARATOR = `bEaReR%20${PIPELINE_MH_BEARER_CREDENTIAL}`;
 const PIPELINE_MH_SECRET_TOKEN_FORM_SEPARATOR = `bEaReR+${PIPELINE_MH_BEARER_CREDENTIAL}`;
+const PIPELINE_MH_OWS_SECRET_TOKEN = ` \t${PIPELINE_MH_SECRET_TOKEN}\t `;
+const PIPELINE_MH_OWS_SECRET_TOKEN_PERCENT = "%20%09bEaReR%20cache%20token%2Bcredential%2F%25%3F%20canary%09%20";
+const PIPELINE_MH_OWS_SECRET_TOKEN_FORM = "+%09bEaReR+cache+token%2Bcredential%2F%25%3F+canary%09+";
 
 const PIPELINE_MH_SECRET_VARIANTS = [
   PIPELINE_MH_SECRET_USER,
@@ -53,7 +56,10 @@ const PIPELINE_MH_SECRET_VARIANTS = [
   PIPELINE_MH_SECRET_TOKEN_PERCENT,
   PIPELINE_MH_SECRET_TOKEN_FORM,
   PIPELINE_MH_SECRET_TOKEN_PERCENT_SEPARATOR,
-  PIPELINE_MH_SECRET_TOKEN_FORM_SEPARATOR
+  PIPELINE_MH_SECRET_TOKEN_FORM_SEPARATOR,
+  PIPELINE_MH_OWS_SECRET_TOKEN,
+  PIPELINE_MH_OWS_SECRET_TOKEN_PERCENT,
+  PIPELINE_MH_OWS_SECRET_TOKEN_FORM
 ];
 
 const INTENT_ADDRESS = {
@@ -433,10 +439,12 @@ describe("IssuancePipeline.processWompiEvent rejection", () => {
     const runtime = await pipelineRuntime(db, sent);
     runtime.MH_USER_TEST = PIPELINE_MH_SECRET_USER;
     runtime.MH_PASSWORD_TEST = PIPELINE_MH_SECRET_PASSWORD;
-    const cacheStatement = installCachedMhToken(db, PIPELINE_MH_SECRET_TOKEN);
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+    const cacheStatement = installCachedMhToken(db, PIPELINE_MH_OWS_SECRET_TOKEN);
+    let sentAuthorization: string | null = null;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes("recepciondte")) {
+        sentAuthorization = new Request(input, init).headers.get("Authorization");
         return jsonResponse({
           estado: "RECHAZADO",
           selloRecibido: null,
@@ -450,7 +458,10 @@ describe("IssuancePipeline.processWompiEvent rejection", () => {
             `authorization-percent=${PIPELINE_MH_SECRET_TOKEN_PERCENT}`,
             `authorization-form=${PIPELINE_MH_SECRET_TOKEN_FORM}`,
             `separator-percent=${PIPELINE_MH_SECRET_TOKEN_PERCENT_SEPARATOR}`,
-            `separator-form=${PIPELINE_MH_SECRET_TOKEN_FORM_SEPARATOR}`
+            `separator-form=${PIPELINE_MH_SECRET_TOKEN_FORM_SEPARATOR}`,
+            `stored-authorization=${PIPELINE_MH_OWS_SECRET_TOKEN}`,
+            `stored-percent=${PIPELINE_MH_OWS_SECRET_TOKEN_PERCENT}`,
+            `stored-form=${PIPELINE_MH_OWS_SECRET_TOKEN_FORM}`
           ],
           descripcionMsg: `description ${PIPELINE_MH_SECRET_PASSWORD_PERCENT}`,
           estadoDetalle: `state ${PIPELINE_MH_SECRET_USER_FORM}`,
@@ -481,7 +492,7 @@ describe("IssuancePipeline.processWompiEvent rejection", () => {
     expect(JSON.parse(String(record!.mh_observaciones_json))[2]).toBe("authorization=[REDACTED]");
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0][0]).toBe("https://apitest.dtes.mh.gob.sv/fesv/recepciondte");
-    expect(fetchMock.mock.calls[0][1]?.headers).toMatchObject({ Authorization: PIPELINE_MH_SECRET_TOKEN });
+    expect(sentAuthorization).toBe(PIPELINE_MH_SECRET_TOKEN);
     expect(cacheStatement.first).toHaveBeenCalledTimes(1);
     expect(cacheStatement.run).not.toHaveBeenCalled();
     expectNoPipelineMhSecrets(JSON.stringify({

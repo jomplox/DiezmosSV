@@ -241,8 +241,10 @@ function providerRedactions(
     addProviderRedactionVariants(values, credential);
   }
   addProviderRedactionVariants(values, authorization);
-  const bearer = authorization.match(/^(Bearer)[ \t]+(.+)$/i);
-  const bearerCredential = bearer?.[2]?.trim();
+  const transmittedAuthorization = authorization.replace(/^[ \t]+|[ \t]+$/g, "");
+  addProviderRedactionVariants(values, transmittedAuthorization);
+  const bearer = transmittedAuthorization.match(/^(Bearer)[ \t]+(.+)$/i);
+  const bearerCredential = bearer?.[2]?.replace(/^[ \t]+|[ \t]+$/g, "");
   if (bearer && bearerCredential) {
     addProviderRedactionVariants(values, bearerCredential);
     values.add(`${bearer[1]}%20${bearerCredential}`);
