@@ -18,7 +18,11 @@ export function isMockMode(env: Env): boolean {
   // Explicit opt-in: external services are only mocked when MOCK_EXTERNAL_SERVICES
   // is exactly "true". Any other value — including unset — performs real calls, so
   // a forgotten flag fails safe toward production behavior rather than silent mocks.
-  return env.MOCK_EXTERNAL_SERVICES === "true";
+  const enabled = env.MOCK_EXTERNAL_SERVICES === "true";
+  if (enabled && env.APP_ENV?.trim().toLowerCase() === "production") {
+    throw new Error("MOCK_EXTERNAL_SERVICES no puede habilitarse en producción");
+  }
+  return enabled;
 }
 
 export function getEmisorConfig(env: Env): EmisorConfig {

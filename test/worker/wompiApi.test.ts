@@ -1,11 +1,18 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { WompiApiError, WompiApiService } from "../../src/worker/services/wompiApi";
 import { CHECKOUT_WINDOW_MINUTES, WOMPI_INTERFAZ_MAX_MINUTES, WOMPI_INTERFAZ_MIN_MINUTES } from "../../src/shared/checkout";
 import type { DonationIntentRecord, Env } from "../../src/worker/types";
+import { bytesToBase64, hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
 
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+let signingCertificateXml: string;
+
+beforeAll(async () => {
+  signingCertificateXml = await generatedCertificateXml("test-certificate-password");
 });
 
 // The cards-only forma de pago every create/deactivate body must carry. The
@@ -239,6 +246,70 @@ describe("Wompi API service", () => {
 
     await expect(new WompiApiService(env).createPaymentLink(intent())).rejects.toThrow(/EMISOR_CONFIG_JSON/);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["missing", (env: Env) => { delete env.MH_CERT_XML; }],
+    ["mismatched", (env: Env) => { env.MH_CERT_XML = signingCertificateXml.replace("10000000000001", "99999999999999"); }],
+    ["inactive", (env: Env) => { env.MH_CERT_XML = signingCertificateXml.replace("<activo>true</activo>", "<activo>false</activo>"); }],
+    ["unimportable", (env: Env) => { env.MH_CERT_XML = signingCertificateXml.replace(/<privateKey><encodied>[\s\S]*?<\/encodied>/, "<privateKey><encodied>not-a-pkcs8-key</encodied>"); }]
+  ])("fails closed before Wompi when MH signing material is %s", async (_label, makeInvalid) => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const env = realEnv();
+    makeInvalid(env);
+
+    await expect(new WompiApiService(env).createPaymentLink(intent())).rejects.toThrow();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["credentials", (env: Env) => { delete env.MH_USER_TEST; }],
+    ["authentication endpoint", (env: Env) => { delete env.MH_AUTH_URL_TEST; }],
+    ["reception endpoint", (env: Env) => { delete env.MH_RECEPCION_URL_TEST; }]
+  ])("fails closed before Wompi when the MH TEST %s is missing", async (_label, makeInvalid) => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const env = realEnv();
+    makeInvalid(env);
+
+    await expect(new WompiApiService(env).createPaymentLink(intent())).rejects.toThrow();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("uses the production MH credential lane before contacting Wompi in production", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const env = realEnv();
+    env.APP_ENV = "production";
+    env.MH_USER_PROD = "production-mh-user";
+    env.MH_PASSWORD_PROD = "production-mh-password";
+    env.MH_AUTH_URL_PROD = "https://api.dtes.mh.gob.sv/seguridad/auth";
+    env.MH_RECEPCION_URL_PROD = "https://api.dtes.mh.gob.sv/fesv/recepciondte";
+    delete env.MH_USER_PROD;
+
+    await expect(new WompiApiService(env).createPaymentLink(intent())).rejects.toThrow(/MH_USER_PROD/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a non-object response", []],
+    ["a non-positive link id", { idEnlace: 0, urlEnlace: "https://s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
+    ["an unexpected short-link host", { idEnlace: 1, urlEnlace: "https://evil.example/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
+    ["a short link with a mismatched id", { idEnlace: 1, urlEnlace: "https://s.wompi.sv/2", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
+    ["a short link with a query", { idEnlace: 1, urlEnlace: "https://s.wompi.sv/1?next=evil", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
+    ["a short link with userinfo", { idEnlace: 1, urlEnlace: "https://user@s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
+    ["a short link with an alternate port", { idEnlace: 1, urlEnlace: "https://s.wompi.sv:444/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
+    ["a long link with an unexpected query parameter", { idEnlace: 1, urlEnlace: "https://s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1&next=evil" }],
+    ["a long link with a fragment", { idEnlace: 1, urlEnlace: "https://s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=1#fragment" }]
+  ])("rejects %s from Wompi without returning a provider URL", async (_label, responseBody) => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ access_token: "wompi-access-token", expires_in: 3600, token_type: "Bearer" }))
+      .mockResolvedValueOnce(jsonResponse(responseBody));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(new WompiApiService(realEnv()).createPaymentLink(intent())).rejects.toBeInstanceOf(WompiApiError);
   });
 
   it("throws a typed error with the response text on a non-2xx link response", async () => {
@@ -652,11 +723,18 @@ function realEnv(db: FakeD1 = new FakeD1()): Env {
     ISSUANCE_QUEUE: {} as Queue,
     ASSETS: {} as Fetcher,
     ARCHIVE: {} as R2Bucket,
+    APP_ENV: "local",
     MOCK_EXTERNAL_SERVICES: "false",
     APP_ORIGIN: "https://app.example.org",
     WOMPI_CLIENT_ID: "test-client-id",
     WOMPI_CLIENT_SECRET: "test-client-secret",
-    EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig())
+    EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+    MH_CERT_XML: signingCertificateXml,
+    MH_CERT_PASSWORD: "test-certificate-password",
+    MH_USER_TEST: "test-mh-user",
+    MH_PASSWORD_TEST: "test-mh-password",
+    MH_AUTH_URL_TEST: "https://apitest.dtes.mh.gob.sv/seguridad/auth",
+    MH_RECEPCION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"
   };
 }
 
@@ -692,4 +770,21 @@ function emisorConfig() {
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+}
+
+async function generatedCertificateXml(password: string): Promise<string> {
+  const pair = (await crypto.subtle.generateKey(
+    {
+      name: "RSASSA-PKCS1-v1_5",
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: "SHA-512"
+    },
+    true,
+    ["sign", "verify"]
+  )) as CryptoKeyPair;
+  const pkcs8 = new Uint8Array((await crypto.subtle.exportKey("pkcs8", pair.privateKey)) as ArrayBuffer);
+  const spki = new Uint8Array((await crypto.subtle.exportKey("spki", pair.publicKey)) as ArrayBuffer);
+  const passwordHash = hexFromBytes(new Uint8Array(await crypto.subtle.digest("SHA-512", utf8Bytes(password))));
+  return `<CertificadoMH><nit>10000000000001</nit><publicKey><encodied>${bytesToBase64(spki)}</encodied></publicKey><privateKey><encodied>${bytesToBase64(pkcs8)}</encodied><clave>${passwordHash}</clave></privateKey><activo>true</activo></CertificadoMH>`;
 }

@@ -15,6 +15,10 @@ describe("mock mode", () => {
   it("performs real external calls when MOCK_EXTERNAL_SERVICES is \"false\"", () => {
     expect(isMockMode(env({ MOCK_EXTERNAL_SERVICES: "false" }))).toBe(false);
   });
+
+  it("rejects shared mock mode in production", () => {
+    expect(() => isMockMode(env({ APP_ENV: "production", MOCK_EXTERNAL_SERVICES: "true" }))).toThrow(/mock/i);
+  });
 });
 
 describe("worker config", () => {

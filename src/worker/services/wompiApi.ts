@@ -1,9 +1,10 @@
 import { CHECKOUT_WINDOW_MINUTES } from "../../shared/checkout";
-import { getEmisorConfig, isMockMode, requireSecret } from "../config";
+import { isMockMode, requireSecret } from "../config";
 import { Repository } from "../storage/repository";
 import type { DonationIntentRecord, Env, WompiPaymentLink } from "../types";
 import { addHours, addMinutes, nowIso } from "../utils/dates";
 import { loadWompiNotificationSettings } from "./wompiNotifications";
+import { assertFiscalCollectionReady } from "./environmentPolicy";
 
 const TOKEN_URL = "https://id.wompi.sv/connect/token";
 const ENLACE_PAGO_URL = "https://api.wompi.sv/EnlacePago";
@@ -36,12 +37,6 @@ interface WompiTokenResponse {
   access_token: string;
   expires_in: number;
   token_type: string;
-}
-
-interface WompiEnlacePagoResponse {
-  idEnlace: number;
-  urlEnlace: string;
-  urlEnlaceLargo: string;
 }
 
 export interface WompiPaymentLinkTransaction {
@@ -83,7 +78,7 @@ export class WompiApiService {
     // A real link can accept an irreversible entrega before the asynchronous CDE
     // pipeline runs. Validate the issuer now so configuration errors fail before
     // Wompi receives a link request rather than after the donor has completed it.
-    getEmisorConfig(this.env);
+    await assertFiscalCollectionReady(this.env);
 
     const start = nowIso();
     const body = {
@@ -109,8 +104,8 @@ export class WompiApiService {
     if (!response.ok) {
       throw new WompiApiError(`Wompi rechazó la creación del enlace de pago: ${response.status} ${await response.text()}`);
     }
-    const data = (await response.json()) as WompiEnlacePagoResponse;
-    return { idEnlace: data.idEnlace, urlEnlace: data.urlEnlace, urlEnlaceLargo: data.urlEnlaceLargo };
+    const data: unknown = await response.json();
+    return parseWompiPaymentLink(data);
   }
 
   async getPaymentLink(id: number): Promise<WompiPaymentLinkDetail> {
@@ -326,4 +321,56 @@ function mockLinkId(intentId: string): number {
     hash = (hash * 31 + intentId.charCodeAt(i)) % 1_000_000_007;
   }
   return hash + 1;
+}
+
+function parseWompiPaymentLink(value: unknown): WompiPaymentLink {
+  if (!isRecord(value)) {
+    throw new WompiApiError("Wompi devolvió un enlace de pago inválido");
+  }
+  const { idEnlace, urlEnlace, urlEnlaceLargo } = value;
+  if (typeof idEnlace !== "number" || !Number.isSafeInteger(idEnlace) || idEnlace <= 0 || typeof urlEnlace !== "string" || typeof urlEnlaceLargo !== "string") {
+    throw new WompiApiError("Wompi devolvió un enlace de pago inválido");
+  }
+  if (!isWompiShortLink(urlEnlace, idEnlace) || !isWompiLongLink(urlEnlaceLargo)) {
+    throw new WompiApiError("Wompi devolvió URLs de enlace no permitidas");
+  }
+  return { idEnlace, urlEnlace, urlEnlaceLargo };
+}
+
+function isWompiShortLink(value: string, idEnlace: number): boolean {
+  try {
+    const url = new URL(value);
+    return isApprovedWompiUrl(url, "s.wompi.sv")
+      && url.pathname === `/${idEnlace}`
+      && url.search === "";
+  } catch {
+    return false;
+  }
+}
+
+function isWompiLongLink(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const parameters = [...url.searchParams.entries()];
+    return isApprovedWompiUrl(url, "pagos.wompi.sv")
+      && (url.pathname === "/IntentoPago/Redirect" || url.pathname === "/L")
+      && parameters.length === 1
+      && parameters[0]?.[0] === "id"
+      && parameters[0]?.[1].length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function isApprovedWompiUrl(url: URL, host: string): boolean {
+  return url.protocol === "https:"
+    && url.hostname === host
+    && url.port === ""
+    && url.username === ""
+    && url.password === ""
+    && url.hash === "";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

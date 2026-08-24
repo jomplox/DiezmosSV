@@ -1,4 +1,6 @@
 import type { Ambiente, Env } from "../types";
+import { getEmisorConfig, getMhCertificateXml, mhEndpoint, requireSecret } from "../config";
+import { assertMhSigningMaterialReady } from "../domain/signer";
 
 type DeploymentAppEnvironment = "local" | "staging" | "production" | "unknown";
 
@@ -60,4 +62,26 @@ export function assertDeploymentCanCollectPayments(env: Pick<Env, "APP_ENV">): A
     throw new PaymentCollectionDisabledError(policy);
   }
   return policy.allowedAmbiente;
+}
+
+export async function assertFiscalCollectionReady(env: Env): Promise<Ambiente> {
+  const ambiente = assertDeploymentCanCollectPayments(env);
+  const emisor = getEmisorConfig(env);
+  const credentialLane = ambiente === "01" ? "PROD" : "TEST";
+  requireSecret(env, `MH_USER_${credentialLane}` as keyof Env);
+  requireSecret(env, `MH_PASSWORD_${credentialLane}` as keyof Env);
+  mhEndpoint(env, "auth", ambiente);
+  mhEndpoint(env, "recepcion", ambiente);
+  const certificate = await assertMhSigningMaterialReady(
+    getMhCertificateXml(env),
+    requireSecret(env, "MH_CERT_PASSWORD")
+  );
+  if (digits(emisor.numDocumento) !== digits(certificate.nit)) {
+    throw new Error("El NIT del certificado del Ministerio de Hacienda no coincide con el emisor configurado");
+  }
+  return ambiente;
+}
+
+function digits(value: string): string {
+  return value.replace(/\D/g, "");
 }
