@@ -497,7 +497,7 @@ export class Statement {
       this.sql.includes("SET consumed_at = ?") &&
       this.sql.includes("RETURNING id, user_id")
     ) {
-      const [consumedAt, challengeId, continuationTokenHash, codeHash, now, maxWrongAttempts] = this.args;
+      const [consumedAt, challengeId, continuationTokenHash, codeHash, now, aggregateNow, maxWrongAttempts] = this.args;
       const challenge = this.db.loginStepUpChallenges.find(
         (row) =>
           row.id === challengeId &&
@@ -505,9 +505,19 @@ export class Statement {
           row.code_hash === codeHash &&
           row.consumed_at === null &&
           row.invalidated_at === null &&
-          row.expires_at > String(now) &&
-          row.failed_attempts < Number(maxWrongAttempts)
+          row.expires_at > String(now)
       );
+      const aggregateAttempts = challenge
+        ? this.db.loginStepUpChallenges
+          .filter((row) =>
+            row.user_id === challenge.user_id &&
+            row.expected_auth_generation === challenge.expected_auth_generation &&
+            row.consumed_at === null &&
+            row.invalidated_at === null &&
+            row.expires_at > String(aggregateNow)
+          )
+          .reduce((sum, row) => sum + row.failed_attempts, 0)
+        : Number(maxWrongAttempts);
       const user = challenge && this.db.users.find(
         (row) =>
           row.id === challenge.user_id &&
@@ -517,7 +527,7 @@ export class Statement {
           row.password_hash === challenge.expected_password_hash &&
           row.password_salt === challenge.expected_password_salt
       );
-      if (!challenge || !user) return null;
+      if (!challenge || !user || aggregateAttempts >= Number(maxWrongAttempts)) return null;
       challenge.consumed_at = String(consumedAt);
       return {
         id: challenge.id,
@@ -533,7 +543,7 @@ export class Statement {
       this.sql.includes("SET failed_attempts = failed_attempts + 1") &&
       this.sql.includes("RETURNING id")
     ) {
-      const [challengeId, continuationTokenHash, submittedCodeHash, now, maxWrongAttempts] = this.args;
+      const [challengeId, continuationTokenHash, submittedCodeHash, now, aggregateNow, maxWrongAttempts] = this.args;
       const challenge = this.db.loginStepUpChallenges.find(
         (row) =>
           row.id === challengeId &&
@@ -541,9 +551,19 @@ export class Statement {
           row.code_hash !== submittedCodeHash &&
           row.consumed_at === null &&
           row.invalidated_at === null &&
-          row.expires_at > String(now) &&
-          row.failed_attempts < Number(maxWrongAttempts)
+          row.expires_at > String(now)
       );
+      const aggregateAttempts = challenge
+        ? this.db.loginStepUpChallenges
+          .filter((row) =>
+            row.user_id === challenge.user_id &&
+            row.expected_auth_generation === challenge.expected_auth_generation &&
+            row.consumed_at === null &&
+            row.invalidated_at === null &&
+            row.expires_at > String(aggregateNow)
+          )
+          .reduce((sum, row) => sum + row.failed_attempts, 0)
+        : Number(maxWrongAttempts);
       const user = challenge && this.db.users.find(
         (row) =>
           row.id === challenge.user_id &&
@@ -553,7 +573,7 @@ export class Statement {
           row.password_hash === challenge.expected_password_hash &&
           row.password_salt === challenge.expected_password_salt
       );
-      if (!challenge || !user) return null;
+      if (!challenge || !user || aggregateAttempts >= Number(maxWrongAttempts)) return null;
       challenge.failed_attempts += 1;
       return { id: challenge.id } as T;
     }

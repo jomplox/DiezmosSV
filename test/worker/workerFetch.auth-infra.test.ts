@@ -171,6 +171,70 @@ describe("login step-up migration", () => {
       database.close();
     }
   });
+
+  it("atomically caps cumulative SQLite guesses across active reissued challenges", async () => {
+    const database = migratedDatabase();
+    try {
+      const repo = new Repository(sqliteD1(database));
+      const snapshot = {
+        userId: "user_operator",
+        expectedEmail: "operator@example.org",
+        expectedAuthGeneration: 0,
+        expectedPasswordHash: "hash",
+        expectedPasswordSalt: "salt"
+      };
+      const firstId = await repo.createLoginStepUpChallenge({
+        ...snapshot,
+        continuationTokenHash: "1".repeat(64),
+        codeHash: "2".repeat(64),
+        expiresAt: "2026-07-04T12:10:00.000Z"
+      });
+      const secondId = await repo.createLoginStepUpChallenge({
+        ...snapshot,
+        continuationTokenHash: "3".repeat(64),
+        codeHash: "4".repeat(64),
+        expiresAt: "2026-07-04T12:10:00.000Z"
+      });
+
+      const attempts = await Promise.all(
+        Array.from({ length: 6 }, (_, index) => repo.incrementLoginStepUpFailure({
+          challengeId: index % 2 === 0 ? firstId! : secondId!,
+          continuationTokenHash: (index % 2 === 0 ? "1" : "3").repeat(64),
+          submittedCodeHash: "5".repeat(64),
+          now: "2026-07-04T12:00:00.000Z",
+          maxWrongAttempts: 5
+        }))
+      );
+
+      expect(attempts.filter(Boolean)).toHaveLength(5);
+      expect(database.prepare(
+        "SELECT SUM(failed_attempts) AS attempts FROM login_step_up_challenges WHERE consumed_at IS NULL AND invalidated_at IS NULL"
+      ).get()).toEqual({ attempts: 5 });
+      await expect(repo.consumeLoginStepUpChallenge({
+        challengeId: secondId!,
+        continuationTokenHash: "3".repeat(64),
+        codeHash: "4".repeat(64),
+        now: "2026-07-04T12:00:00.000Z",
+        maxWrongAttempts: 5
+      })).resolves.toBeNull();
+
+      const afterExpiryId = await repo.createLoginStepUpChallenge({
+        ...snapshot,
+        continuationTokenHash: "6".repeat(64),
+        codeHash: "7".repeat(64),
+        expiresAt: "2026-07-04T12:20:00.000Z"
+      });
+      await expect(repo.consumeLoginStepUpChallenge({
+        challengeId: afterExpiryId!,
+        continuationTokenHash: "6".repeat(64),
+        codeHash: "7".repeat(64),
+        now: "2026-07-04T12:10:00.001Z",
+        maxWrongAttempts: 5
+      })).resolves.toMatchObject(snapshot);
+    } finally {
+      database.close();
+    }
+  });
 });
 
 describe("request body limits", () => {
@@ -601,16 +665,13 @@ describe("auth rate limiting", () => {
     }
   }
 
-  async function seededStepUp(input: {
-    db: InMemoryD1;
-    email?: string;
-    password?: string;
-    send?: (message: unknown) => Promise<{ messageId: string }>;
-  }) {
-    const email = input.email ?? "operator@example.org";
-    const password = input.password ?? "Valid#Pass2026";
+  async function seedStepUpAccount(
+    db: InMemoryD1,
+    email = "operator@example.org",
+    password = "Valid#Pass2026"
+  ): Promise<void> {
     const hashed = await hashPassword(password, "fixed-salt", { enforcePolicy: false });
-    input.db.users.push({
+    db.users.push({
       id: "user_operator",
       email,
       name: "Operator",
@@ -620,20 +681,47 @@ describe("auth rate limiting", () => {
       auth_generation: 0,
       disabled_at: ""
     });
-    seedDistributedFailures(input.db, email);
+    seedDistributedFailures(db, email);
+  }
+
+  function stepUpEmailRuntime(
+    db: InMemoryD1,
+    sentMessages: unknown[],
+    send?: (message: unknown) => Promise<{ messageId: string }>
+  ) {
+    return env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "security@example.org",
+      EMAIL: {
+        send: async (message: unknown) => {
+          sentMessages.push(message);
+          return send ? send(message) : { messageId: "login-step-up-code" };
+        }
+      } as SendEmail
+    });
+  }
+
+  function codeFromMessage(message: unknown): string {
+    return String((message as { text?: string }).text).match(/\b(\d{6})\b/)?.[1] ?? "";
+  }
+
+  function differentCode(code: string): string {
+    return code === "000000" ? "000001" : "000000";
+  }
+
+  async function seededStepUp(input: {
+    db: InMemoryD1;
+    email?: string;
+    password?: string;
+    send?: (message: unknown) => Promise<{ messageId: string }>;
+  }) {
+    const email = input.email ?? "operator@example.org";
+    const password = input.password ?? "Valid#Pass2026";
+    await seedStepUpAccount(input.db, email, password);
     const sentMessages: unknown[] = [];
     const response = await worker.fetch(
       loginRequestFrom(email, password, "198.51.100.90"),
-      env(input.db, {
-        MOCK_EXTERNAL_SERVICES: "false",
-        EMAIL_FROM: "security@example.org",
-        EMAIL: {
-          send: async (message: unknown) => {
-            sentMessages.push(message);
-            return input.send ? input.send(message) : { messageId: "login-step-up-code" };
-          }
-        } as SendEmail
-      })
+      stepUpEmailRuntime(input.db, sentMessages, input.send)
     );
     return { response, sentMessages };
   }
@@ -1114,6 +1202,177 @@ describe("auth rate limiting", () => {
     expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "LOGIN", entity_id: "user_victim" }));
   });
 
+  it("atomically caps concurrent challenge issuance across rotating IPs without creating a session", async () => {
+    const db = new InMemoryD1();
+    await seedStepUpAccount(db);
+    const currentStoredPassword = await hashForStorage("Valid#Pass2026", { enforcePolicy: false });
+    db.users[0].password_hash = currentStoredPassword.hash;
+    db.users[0].password_salt = currentStoredPassword.salt;
+    const sentMessages: unknown[] = [];
+    const runtime = stepUpEmailRuntime(db, sentMessages);
+
+    const responses = await Promise.all(
+      Array.from({ length: 6 }, (_, index) => worker.fetch(
+        loginRequestFrom("operator@example.org", "Valid#Pass2026", `198.51.100.${100 + index}`),
+        runtime
+      ))
+    );
+
+    expect(responses.map((response) => response.status).sort()).toEqual([202, 202, 202, 202, 202, 503]);
+    const limited = responses.find((response) => response.status === 503);
+    await expect(limited?.json()).resolves.toEqual({
+      error: "login_mfa_unavailable",
+      message: "No se pudo enviar el código de verificación. Intente de nuevo en unos minutos."
+    });
+    expect(db.loginStepUpChallenges).toHaveLength(5);
+    expect(sentMessages).toHaveLength(5);
+    expect(db.sessions).toHaveLength(0);
+    expect(db.audits.filter((audit) => audit.action === "LOGIN_FAILED")).toHaveLength(5);
+    expect([...db.loginRateLimits.values()].filter((row) => row.attempt_count === 5)).toHaveLength(1);
+
+    const auditJson = JSON.stringify(db.audits);
+    for (const response of responses.filter((candidate) => candidate.status === 202)) {
+      const challenge = await response.json() as { continuationToken: string };
+      expect(auditJson).not.toContain(challenge.continuationToken);
+    }
+    for (const message of sentMessages) {
+      expect(auditJson).not.toContain(codeFromMessage(message));
+    }
+
+    db.users[0].auth_generation = 1;
+    const afterGenerationChange = await worker.fetch(
+      loginRequestFrom("operator@example.org", "Valid#Pass2026", "198.51.100.106"),
+      runtime
+    );
+    expect(afterGenerationChange.status).toBe(202);
+    expect(sentMessages).toHaveLength(6);
+    expect(db.loginStepUpChallenges).toHaveLength(6);
+    expect(db.sessions).toHaveLength(0);
+  });
+
+  it("shares one five-guess budget across concurrent submissions to multiple active challenges", async () => {
+    const db = new InMemoryD1();
+    await seedStepUpAccount(db);
+    const sentMessages: unknown[] = [];
+    const runtime = stepUpEmailRuntime(db, sentMessages);
+    const issuedResponses = [
+      await worker.fetch(loginRequestFrom("operator@example.org", "Valid#Pass2026", "198.51.100.110"), runtime),
+      await worker.fetch(loginRequestFrom("operator@example.org", "Valid#Pass2026", "198.51.100.111"), runtime)
+    ];
+    const challenges = await Promise.all(issuedResponses.map((response) => response.json())) as Array<{
+      challengeId: string;
+      continuationToken: string;
+    }>;
+    const codes = sentMessages.map(codeFromMessage);
+
+    const wrongResponses = await Promise.all(
+      Array.from({ length: 6 }, (_, index) => {
+        const challengeIndex = index % 2;
+        return worker.fetch(loginMfaRequest({
+          ...challenges[challengeIndex],
+          code: differentCode(codes[challengeIndex])
+        }), env(db));
+      })
+    );
+
+    expect(wrongResponses.every((response) => response.status === 400)).toBe(true);
+    expect(db.loginStepUpChallenges.reduce((sum, challenge) => sum + challenge.failed_attempts, 0)).toBe(5);
+    const correctAfterExhaustion = await worker.fetch(
+      loginMfaRequest({ ...challenges[1], code: codes[1] }),
+      env(db)
+    );
+    expect(correctAfterExhaustion.status).toBe(400);
+    expect(db.sessions).toHaveLength(0);
+  });
+
+  it("does not regain code guesses by exhausting one challenge and reissuing another", async () => {
+    const db = new InMemoryD1();
+    await seedStepUpAccount(db);
+    const sentMessages: unknown[] = [];
+    const runtime = stepUpEmailRuntime(db, sentMessages);
+    const firstResponse = await worker.fetch(
+      loginRequestFrom("operator@example.org", "Valid#Pass2026", "198.51.100.120"),
+      runtime
+    );
+    const first = await firstResponse.json() as { challengeId: string; continuationToken: string };
+    const firstCode = codeFromMessage(sentMessages[0]);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const wrong = await worker.fetch(
+        loginMfaRequest({ ...first, code: differentCode(firstCode) }),
+        env(db)
+      );
+      expect(wrong.status).toBe(400);
+    }
+
+    const secondResponse = await worker.fetch(
+      loginRequestFrom("operator@example.org", "Valid#Pass2026", "198.51.100.121"),
+      runtime
+    );
+    expect(secondResponse.status).toBe(202);
+    const second = await secondResponse.json() as { challengeId: string; continuationToken: string };
+    const secondCode = codeFromMessage(sentMessages[1]);
+    const bypass = await worker.fetch(loginMfaRequest({ ...second, code: secondCode }), env(db));
+
+    expect(bypass.status).toBe(400);
+    expect(db.sessions).toHaveLength(0);
+  });
+
+  it("resets the aggregate guess budget only after expiry or a new auth generation", async () => {
+    const expiredDb = new InMemoryD1();
+    const expiredIssued = await seededStepUp({ db: expiredDb });
+    const expiredChallenge = await expiredIssued.response.json() as { challengeId: string; continuationToken: string };
+    const expiredCode = codeFromMessage(expiredIssued.sentMessages[0]);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await worker.fetch(loginMfaRequest({ ...expiredChallenge, code: differentCode(expiredCode) }), env(expiredDb));
+    }
+    vi.setSystemTime(new Date("2026-07-04T12:10:00.001Z"));
+    for (let index = 0; index < 5; index += 1) {
+      seedAudit(
+        expiredDb,
+        "LOGIN_FAILED",
+        "operator@example.org",
+        `2026-07-04T12:0${5 + index}:00.000Z`,
+        `203.0.113.${30 + index}`
+      );
+    }
+    const freshMessages: unknown[] = [];
+    const freshRuntime = stepUpEmailRuntime(expiredDb, freshMessages);
+    const freshResponse = await worker.fetch(
+      loginRequestFrom("operator@example.org", "Valid#Pass2026", "198.51.100.130"),
+      freshRuntime
+    );
+    expect(freshResponse.status).toBe(202);
+    const freshChallenge = await freshResponse.json() as { challengeId: string; continuationToken: string };
+    const afterExpiry = await worker.fetch(
+      loginMfaRequest({ ...freshChallenge, code: codeFromMessage(freshMessages[0]) }),
+      env(expiredDb)
+    );
+    expect(afterExpiry.status).toBe(200);
+
+    vi.setSystemTime(new Date("2026-07-04T12:00:00.000Z"));
+    const generationDb = new InMemoryD1();
+    const generationIssued = await seededStepUp({ db: generationDb });
+    const generationChallenge = await generationIssued.response.json() as { challengeId: string; continuationToken: string };
+    const generationCode = codeFromMessage(generationIssued.sentMessages[0]);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await worker.fetch(loginMfaRequest({ ...generationChallenge, code: differentCode(generationCode) }), env(generationDb));
+    }
+    generationDb.users[0].auth_generation = 1;
+    const nextGenerationMessages: unknown[] = [];
+    const nextGenerationRuntime = stepUpEmailRuntime(generationDb, nextGenerationMessages);
+    const nextGenerationResponse = await worker.fetch(
+      loginRequestFrom("operator@example.org", "Valid#Pass2026", "198.51.100.131"),
+      nextGenerationRuntime
+    );
+    expect(nextGenerationResponse.status).toBe(202);
+    const nextGenerationChallenge = await nextGenerationResponse.json() as { challengeId: string; continuationToken: string };
+    const afterGenerationChange = await worker.fetch(
+      loginMfaRequest({ ...nextGenerationChallenge, code: codeFromMessage(nextGenerationMessages[0]) }),
+      env(generationDb)
+    );
+    expect(afterGenerationChange.status).toBe(200);
+  });
+
   it("completes the emailed challenge once and rejects a replay generically", async () => {
     const db = new InMemoryD1();
     const { response, sentMessages } = await seededStepUp({ db });
@@ -1198,6 +1457,28 @@ describe("auth rate limiting", () => {
     expect(changedDb.sessions).toHaveLength(0);
   });
 
+  it.each([
+    ["email", (user: Record<string, unknown>) => { user.email = "changed@example.org"; }],
+    ["password hash", (user: Record<string, unknown>) => { user.password_hash = "changed-hash"; }],
+    ["password salt", (user: Record<string, unknown>) => { user.password_salt = "changed-salt"; }],
+    ["disabled state", (user: Record<string, unknown>) => { user.disabled_at = "2026-07-04T12:00:00.000Z"; }]
+  ] as const)("rejects a post-issuance challenge after the user %s changes", async (_field, mutateUser) => {
+    const db = new InMemoryD1();
+    const issued = await seededStepUp({ db });
+    const challenge = await issued.response.json() as { challengeId: string; continuationToken: string };
+    const code = codeFromMessage(issued.sentMessages[0]);
+    mutateUser(db.users[0]);
+
+    const response = await worker.fetch(loginMfaRequest({ ...challenge, code }), env(db));
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "invalid_login_mfa_challenge",
+      message: "El código no es válido o ya expiró. Inicie sesión nuevamente."
+    });
+    expect(db.sessions).toHaveLength(0);
+  });
+
   it("invalidates the challenge and returns a generic 503 when email delivery fails", async () => {
     const db = new InMemoryD1();
     const { response } = await seededStepUp({
@@ -1215,6 +1496,36 @@ describe("auth rate limiting", () => {
     expect(db.sessions).toHaveLength(0);
     expect(db.loginStepUpChallenges).toHaveLength(1);
     expect(db.loginStepUpChallenges[0].invalidated_at).not.toBeNull();
+  });
+
+  it("counts failed deliveries toward the aggregate issuance cap without reopening a flood path", async () => {
+    const db = new InMemoryD1();
+    await seedStepUpAccount(db);
+    const sentMessages: unknown[] = [];
+    const runtime = stepUpEmailRuntime(db, sentMessages, async () => {
+      throw new Error("provider detail must stay private");
+    });
+
+    const responses = [];
+    for (let index = 0; index < 6; index += 1) {
+      responses.push(await worker.fetch(
+        loginRequestFrom("operator@example.org", "Valid#Pass2026", `198.51.100.${140 + index}`),
+        runtime
+      ));
+    }
+
+    expect(responses.every((response) => response.status === 503)).toBe(true);
+    for (const response of responses) {
+      await expect(response.json()).resolves.toEqual({
+        error: "login_mfa_unavailable",
+        message: "No se pudo enviar el código de verificación. Intente de nuevo en unos minutos."
+      });
+    }
+    expect(sentMessages).toHaveLength(5);
+    expect(db.loginStepUpChallenges).toHaveLength(5);
+    expect(db.loginStepUpChallenges.every((challenge) => challenge.invalidated_at !== null)).toBe(true);
+    expect(db.sessions).toHaveLength(0);
+    expect(JSON.stringify(db.audits)).not.toContain("provider detail must stay private");
   });
 
   it("keeps wrong credentials generic and audited after the account threshold", async () => {

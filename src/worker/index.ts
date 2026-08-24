@@ -180,6 +180,7 @@ const WOMPI_RECONCILIATION_RECHECK_MS = 10 * 60 * 1000;
 const AUTH_THROTTLE_WINDOW_MINUTES = 15;
 const LOGIN_FAILED_LIMIT = 5;
 const LOGIN_IP_ATTEMPT_LIMIT = 60;
+const LOGIN_MFA_ISSUANCE_LIMIT = 5;
 const PASSWORD_RESET_PAIR_LIMIT = 3;
 const PASSWORD_RESET_ACCOUNT_LIMIT = 3;
 const BOOTSTRAP_ATTEMPT_LIMIT = 10;
@@ -271,6 +272,16 @@ function authThrottleExpiresIso(): string {
 
 async function rateLimitKey(value: string | null): Promise<string> {
   return sha256Hex(utf8Bytes(value?.trim() || "unknown"));
+}
+
+function loginMfaUnavailableResponse(): Response {
+  return jsonResponse(
+    {
+      error: "login_mfa_unavailable",
+      message: "No se pudo enviar el código de verificación. Intente de nuevo en unos minutos."
+    },
+    { status: 503 }
+  );
 }
 
 function intentThrottleExpiresIso(): string {
@@ -2125,6 +2136,18 @@ async function handleLogin(ctx: ApiRouteContext): Promise<Response> {
   try {
     const credentials = await ctx.auth.verifyLoginCredentials(body.email, body.password);
     if (accountFailures >= LOGIN_FAILED_LIMIT) {
+      const issuanceAccepted = await ctx.repo.claimLoginAttempt(
+        await rateLimitKey(
+          `login-step-up-issuance-v1:${credentials.userId}:${credentials.expectedAuthGeneration}`
+        ),
+        claimNow,
+        authThrottleSinceIso(),
+        authThrottleExpiresIso(),
+        LOGIN_MFA_ISSUANCE_LIMIT
+      );
+      if (!issuanceAccepted) {
+        return loginMfaUnavailableResponse();
+      }
       const issued = await ctx.auth.issueLoginStepUpChallenge(credentials);
       try {
         const branding = await loadEmailBranding(ctx.repo, ctx.env);
@@ -2145,13 +2168,7 @@ async function handleLogin(ctx: ApiRouteContext): Promise<Response> {
           entityId: issued.user.id,
           summary: "No se pudo enviar el código de verificación"
         });
-        return jsonResponse(
-          {
-            error: "login_mfa_unavailable",
-            message: "No se pudo enviar el código de verificación. Intente de nuevo en unos minutos."
-          },
-          { status: 503 }
-        );
+        return loginMfaUnavailableResponse();
       }
       await ctx.repo.createAudit({
         actorType: "USER",

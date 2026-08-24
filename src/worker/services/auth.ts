@@ -13,7 +13,7 @@ export interface AuthUser {
   role: Role;
 }
 
-interface VerifiedLoginCredentials {
+export interface VerifiedLoginCredentials {
   user: AuthUser;
   userId: string;
   expectedPasswordHash: string;

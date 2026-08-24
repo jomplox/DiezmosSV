@@ -31,4 +31,4 @@ CREATE INDEX idx_login_step_up_challenges_expires
   ON login_step_up_challenges(expires_at);
 
 CREATE INDEX idx_login_step_up_challenges_user_expires
-  ON login_step_up_challenges(user_id, expires_at);
+  ON login_step_up_challenges(user_id, expected_auth_generation, expires_at);

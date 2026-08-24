@@ -409,7 +409,15 @@ export async function consumeLoginStepUpChallenge(
           AND consumed_at IS NULL
           AND invalidated_at IS NULL
           AND expires_at > ?
-          AND failed_attempts < ?
+          AND (
+            SELECT COALESCE(SUM(cohort.failed_attempts), 0)
+              FROM login_step_up_challenges AS cohort
+             WHERE cohort.user_id = login_step_up_challenges.user_id
+               AND cohort.expected_auth_generation = login_step_up_challenges.expected_auth_generation
+               AND cohort.consumed_at IS NULL
+               AND cohort.invalidated_at IS NULL
+               AND cohort.expires_at > ?
+          ) < ?
           AND EXISTS (
             SELECT 1 FROM users
              WHERE users.id = login_step_up_challenges.user_id
@@ -427,6 +435,7 @@ export async function consumeLoginStepUpChallenge(
       input.challengeId,
       input.continuationTokenHash,
       input.codeHash,
+      input.now,
       input.now,
       input.maxWrongAttempts
     )
@@ -462,7 +471,15 @@ export async function incrementLoginStepUpFailure(
           AND consumed_at IS NULL
           AND invalidated_at IS NULL
           AND expires_at > ?
-          AND failed_attempts < ?
+          AND (
+            SELECT COALESCE(SUM(cohort.failed_attempts), 0)
+              FROM login_step_up_challenges AS cohort
+             WHERE cohort.user_id = login_step_up_challenges.user_id
+               AND cohort.expected_auth_generation = login_step_up_challenges.expected_auth_generation
+               AND cohort.consumed_at IS NULL
+               AND cohort.invalidated_at IS NULL
+               AND cohort.expires_at > ?
+          ) < ?
           AND EXISTS (
             SELECT 1 FROM users
              WHERE users.id = login_step_up_challenges.user_id
@@ -478,6 +495,7 @@ export async function incrementLoginStepUpFailure(
       input.challengeId,
       input.continuationTokenHash,
       input.submittedCodeHash,
+      input.now,
       input.now,
       input.maxWrongAttempts
     )
