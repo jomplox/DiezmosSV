@@ -5,8 +5,10 @@ import {
   createAudit as createAuditRepository,
   createAuditIfAbsent as createAuditIfAbsentRepository,
   ensurePostAcceptAudit as ensurePostAcceptAuditRepository,
+  getLatestRetentionExportCompletionAudit as getLatestRetentionExportCompletionAuditRepository,
   listAudit as listAuditRepository,
-  listAuditPage as listAuditPageRepository
+  listAuditPage as listAuditPageRepository,
+  type RetentionExportCompletionAudit
 } from "./repository/audit";
 import {
   getOpenContingency as getOpenContingencyRepository,
@@ -1430,6 +1432,12 @@ export class Repository {
     rateLimitClaimId?: string | null;
   }): Promise<void> {
     return createAuditRepository(this.db, this.auditContext, input);
+  }
+
+  async getLatestRetentionExportCompletionAudit(
+    month: string
+  ): Promise<RetentionExportCompletionAudit | null> {
+    return getLatestRetentionExportCompletionAuditRepository(this.db, month);
   }
 
   async ensurePostAcceptAudit(input: {

@@ -61,16 +61,17 @@ infer a failed issuance from an absent field or invent a reservation/error
 during restore.
 
 Every run writes to a fresh immutable `<run-id>` prefix. `manifest.json` is
-published **last** with a conditional create and is the authoritative completion
-marker. If two runs overlap, only one can publish the month manifest; the losing
-run cannot overwrite the winning files because their object keys differ. A later
-re-run skips and audits `RETENTION_EXPORT_SKIPPED`. Version 1 manifests without
-run-scoped keys remain readable for legacy restores. A version 2 manifest looks like:
+published with a conditional create after all table objects. If two runs overlap,
+only one can publish the month manifest; the losing run cannot overwrite the
+winning files because their object keys differ. The winner then appends a live D1
+`RETENTION_EXPORT_COMPLETED` audit from the same in-memory manifest. A later re-run
+skips and audits `RETENTION_EXPORT_SKIPPED`; it never creates or repairs completion
+evidence from R2. A version 2 manifest looks like:
 
 ```json
 {
   "version": 2,
-    "runId": "example-run-id",
+  "runId": "example-run-id",
   "month": "2026-06",
   "generatedAt": "2026-07-01T09:00:03.512Z",
   "tables": {
@@ -88,9 +89,30 @@ run-scoped keys remain readable for legacy restores. A version 2 manifest looks 
 }
 ```
 
-The real manifest contains one keyed entry for every table listed above. Never
-construct a version 2 table path from the month or from an untrusted run ID; use
-the exact `tables.<name>.key` recorded by the canonical manifest.
+The real manifest is an exact version 2 schema: those five root fields and only
+those fields, plus exactly the 18 table entries listed above. Every entry contains
+only `key`, a non-negative safe-integer `rowCount`, and a lowercase 64-hex
+`sha256`. Its key must be exactly
+`retention/<YYYY>/<YYYY-MM>/runs/<runId>/<table>.ndjson`; partial, empty, extra,
+wrong-month, wrong-run, or malformed manifests are invalid. Consumers rebuild the
+table map in the canonical order shown above. Never construct a table path from an
+untrusted run ID; use the exact key only after the whole manifest passes this
+schema.
+
+New completion audits contain `month`, `runId`, `generatedAt`, `totalRows`, the
+same exact `tables` map, and `manifestSha256`. The digest is SHA-256 over compact
+UTF-8 JSON with root fields ordered `version`, `runId`, `month`, `generatedAt`,
+`tables`; tables in the 18-table order above; and entry fields ordered `key`,
+`rowCount`, `sha256`. Historical completion audits shaped exactly as
+`{month,totalRows,tables}` remain acceptable only when the total and the entire
+strict table map match. A present but malformed or mismatched new or historical
+audit fails closed.
+
+The publish/audit order deliberately leaves a fail-closed crash gap: a Worker that
+publishes the immutable manifest and crashes before appending the D1 audit leaves
+R2 objects that listing/download can parse, but verification rejects them as
+unanchored. Do not synthesize an anchor from those objects; investigate the failed
+export and preserve the evidence.
 
 ## 1. List what's in the archive
 
@@ -102,7 +124,16 @@ To list all objects for a given month without downloading each one, use the
 R2 API/dashboard (`wrangler r2 object` operates on a single key at a time) or
 `aws s3 ls` against R2's S3-compatible endpoint if configured.
 
-## 2. Verify manifest hashes match the archived bodies
+## 2. Verify the D1 anchor, then the archived bodies
+
+Use the authenticated admin verification action in the target environment first.
+It parses the exact manifest and looks up the latest live D1
+`RETENTION_EXPORT_COMPLETED` audit for `entity_type=retention_export` and the same
+month. The exact map (and, for new evidence, run ID, timestamp, total, and canonical
+manifest digest) must match before the Worker reads or hashes any table body. No
+anchor, a malformed latest anchor, or any mismatch creates
+`RETENTION_VERIFY_FAILED`, sends an operational alert, and never creates
+`RETENTION_VERIFIED`.
 
 Download each `.ndjson` at the exact `key` referenced in the manifest and confirm its SHA-256
 matches the recorded hash before trusting it for a restore:
@@ -117,6 +148,11 @@ shasum -a 256 dte_documents.ndjson
 Repeat for every table listed in the manifest. If any hash mismatches, the
 object was corrupted or tampered with after being written — do not use it for
 a restore; escalate before proceeding.
+
+Repository tests prove this fail-closed contract with controlled D1/R2 fakes;
+they are not evidence that a particular live R2 bucket or D1 database currently
+contains a valid anchored month. Record the target, time, actor, and resulting
+live `RETENTION_VERIFIED` audit when performing an operational verification.
 
 ## 3. Re-import NDJSON into D1
 
@@ -238,8 +274,10 @@ Stripe snapshots are intended for an empty loss-recovery database. If restoring
 into a database with existing Stripe rows, compare rows by primary/unique key
 and stop for manual review on any difference; never overwrite immutable annual
 snapshot/lineage evidence or turn REVIEW/SENT delivery evidence backward.
-Archives created before these Stripe snapshot files existed remain valid legacy
-archives, but they cannot reconstruct Stripe gifts and no missing row may be
+Historical artifacts created before these Stripe snapshot files existed are not
+exact v2 manifests and the current verifier will not label them archived. If an
+incident requires separate forensic recovery from one, treat it as an incomplete
+historical input: it cannot reconstruct Stripe gifts, and no missing row may be
 manufactured from an audit entry.
 
 Do not concatenate every repeated Wompi snapshot. Restore historical
@@ -306,9 +344,10 @@ rehearsal they belong inside the existing `BEGIN IMMEDIATE` transaction. An
 upsert or trigger-recreation failure must roll back the whole restore; never
 leave the allocation trigger absent.
 
-Archives created before `fiscal_corrections_latest.ndjson` are valid legacy
-archives. Restore their historical `fiscal_corrections.ndjson` rows as they
-exist and do not invent a later outcome. When any newer verified archive
+Historical artifacts created before `fiscal_corrections_latest.ndjson` are not
+exact v2 manifests and require separate forensic review. If independently
+accepted for recovery, restore their historical `fiscal_corrections.ndjson` rows
+as they exist and do not invent a later outcome. When any newer verified archive
 contains the authoritative snapshot, overlay that newest snapshot last. The
 snapshot repeats only the already protected correction row in R2; it does not
 copy receptor JSON into audit metadata, and it remains behind the same audited
@@ -328,10 +367,10 @@ Wompi reservation maximum is the greatest non-null
 fiscal-correction reservation maximum is the greatest non-null
 `fiscal_corrections.reserved_control_sequence` for the same
 environment/`reserved_control_prefix`. If one source has no row, omit that
-term (or treat it as `1`). Archives created before
-`document_sequences.ndjson` existed are valid legacy archives: derive the
-counter from the document, Wompi, and fiscal-correction reservation maxima
-instead of assuming `1`.
+term (or treat it as `1`). Historical artifacts created before
+`document_sequences.ndjson` existed are not exact v2 manifests. If separate
+forensic review accepts one for recovery, derive the counter from the document,
+Wompi, and fiscal-correction reservation maxima instead of assuming `1`.
 
 Never move an existing counter backward. When restoring into a database that
 already has a counter, compare its current `next_value` with the formula above

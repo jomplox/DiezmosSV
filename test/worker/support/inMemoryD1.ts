@@ -26,6 +26,7 @@ export class FakeArchiveBucket {
   readonly contentTypes = new Map<string, string>();
   readonly putCalls: Array<{ key: string; bytes: Uint8Array }> = [];
   readonly headCalls: string[] = [];
+  readonly getCalls: string[] = [];
   readonly deleteCalls: string[] = [];
 
   async put(key: string, value: unknown, options?: { httpMetadata?: { contentType?: string } }): Promise<R2Object> {
@@ -82,6 +83,7 @@ export class FakeArchiveBucket {
   }
 
   async get(key: string): Promise<R2ObjectBody | null> {
+    this.getCalls.push(key);
     const bytes = this.objects.get(key);
     if (!bytes) {
       return null;
@@ -459,6 +461,32 @@ export class Statement {
   }
 
   async first<T>(): Promise<T | null> {
+    if (
+      this.sql.includes("RETENTION_EXPORT_COMPLETED")
+      && this.sql.includes("entity_type = 'retention_export'")
+      && this.sql.includes("ORDER BY created_at DESC, id DESC")
+    ) {
+      const month = String(this.args[0]);
+      const row = this.db.audits
+        .filter(
+          (audit) =>
+            audit.action === "RETENTION_EXPORT_COMPLETED"
+            && audit.entity_type === "retention_export"
+            && audit.entity_id === month
+        )
+        .sort(
+          (left, right) =>
+            String(right.created_at).localeCompare(String(left.created_at))
+            || String(right.id).localeCompare(String(left.id))
+        )[0];
+      return row
+        ? {
+            id: String(row.id),
+            metadataJson: String(row.metadata_json),
+            createdAt: String(row.created_at)
+          } as T
+        : null;
+    }
     if (
       this.sql.includes("INSERT INTO login_step_up_challenges") &&
       this.sql.includes("RETURNING id")
