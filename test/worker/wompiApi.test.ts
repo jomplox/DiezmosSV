@@ -238,13 +238,16 @@ describe("Wompi API service", () => {
   it.each([
     ["missing", undefined],
     ["invalid", "not-json"]
-  ])("rejects %s issuer configuration before contacting Wompi", async (_label, config) => {
+  ])("returns a safe typed error for %s issuer configuration before contacting Wompi", async (_label, config) => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     const env = realEnv();
     env.EMISOR_CONFIG_JSON = config;
 
-    await expect(new WompiApiService(env).createPaymentLink(intent())).rejects.toThrow(/EMISOR_CONFIG_JSON/);
+    const error = await new WompiApiService(env).createPaymentLink(intent()).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(WompiApiError);
+    expect((error as WompiApiError).message).toBe("No se pudo preparar la configuración de Wompi");
+    expect((error as WompiApiError).message).not.toContain("EMISOR_CONFIG_JSON");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -288,7 +291,9 @@ describe("Wompi API service", () => {
     const env = realEnv();
     makeInvalid(env);
 
-    await expect(new WompiApiService(env).createPaymentLink(intent())).rejects.toThrow(/MH endpoint/i);
+    const error = await new WompiApiService(env).createPaymentLink(intent()).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(WompiApiError);
+    expect((error as WompiApiError).message).toBe("No se pudo preparar la configuración de Wompi");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -303,7 +308,9 @@ describe("Wompi API service", () => {
     env.MH_RECEPCION_URL_PROD = "https://api.dtes.mh.gob.sv/fesv/recepciondte";
     delete env.MH_USER_PROD;
 
-    await expect(new WompiApiService(env).createPaymentLink(intent())).rejects.toThrow(/MH_USER_PROD/);
+    const error = await new WompiApiService(env).createPaymentLink(intent()).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(WompiApiError);
+    expect((error as WompiApiError).message).toBe("No se pudo preparar la configuración de Wompi");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

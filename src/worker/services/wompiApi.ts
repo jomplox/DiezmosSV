@@ -67,7 +67,7 @@ export class WompiApiService {
   async createPaymentLink(intent: DonationIntentRecord): Promise<WompiPaymentLink> {
     // Mock mode: deterministic fake link, no network. Mirrors MhClient's
     // isMockMode short-circuit so local dev and CI never reach Wompi.
-    if (isMockMode(this.env)) {
+    if (this.isMockMode()) {
       return {
         idEnlace: mockLinkId(intent.id),
         urlEnlace: `https://mock.wompi.sv/enlace/${intent.id}`,
@@ -78,7 +78,7 @@ export class WompiApiService {
     // A real link can accept an irreversible entrega before the asynchronous CDE
     // pipeline runs. Validate the issuer now so configuration errors fail before
     // Wompi receives a link request rather than after the donor has completed it.
-    await assertFiscalCollectionReady(this.env);
+    const configuracion = await this.linkPreflight();
 
     const start = nowIso();
     const body = {
@@ -97,7 +97,7 @@ export class WompiApiService {
       // esMontoEditable/esCantidadEditable false pins the amount: the donor cannot
       // change the monto or quantity on Wompi's hosted sheet, so the paid amount
       // always matches the intent (and the CDE we later emit).
-      configuracion: await this.linkConfiguracion()
+      configuracion
     };
 
     const response = await this.authorizedFetch(ENLACE_PAGO_URL, "POST", body);
@@ -167,6 +167,24 @@ export class WompiApiService {
   // onto the CDE apéndice, and the legal cuerpoDocumento.descripcion stays "DONACIÓN".
   private productName(): string {
     return PRODUCT_NAME;
+  }
+
+  private isMockMode(): boolean {
+    try {
+      return isMockMode(this.env);
+    } catch {
+      throw wompiConfigurationError();
+    }
+  }
+
+  private async linkPreflight(): Promise<Awaited<ReturnType<WompiApiService["linkConfiguracion"]>>> {
+    try {
+      await assertFiscalCollectionReady(this.env);
+      this.wompiCredentials();
+      return await this.linkConfiguracion();
+    } catch {
+      throw wompiConfigurationError();
+    }
   }
 
   // Cards-only forma de pago. The permitir/permite prefixes are intentionally
@@ -282,11 +300,12 @@ export class WompiApiService {
   // Fetches a fresh client-credentials token and caches it with a safety margin
   // shaved off its lifetime (expiresAt = now + (expires_in - margin)s).
   private async requestToken(): Promise<string> {
+    const credentials = this.wompiCredentials();
     const form = new URLSearchParams();
     form.set("grant_type", "client_credentials");
     form.set("audience", "wompi_api");
-    form.set("client_id", requireSecret(this.env, "WOMPI_CLIENT_ID"));
-    form.set("client_secret", requireSecret(this.env, "WOMPI_CLIENT_SECRET"));
+    form.set("client_id", credentials.clientId);
+    form.set("client_secret", credentials.clientSecret);
     const response = await fetch(TOKEN_URL, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -304,6 +323,13 @@ export class WompiApiService {
     const expiresAt = new Date(Date.now() + lifetimeSeconds * 1000).toISOString();
     await this.repo.setSetting(TOKEN_CACHE_KEY, JSON.stringify({ token: data.access_token, expiresAt } satisfies CachedToken));
     return data.access_token;
+  }
+
+  private wompiCredentials(): { clientId: string; clientSecret: string } {
+    return {
+      clientId: requireSecret(this.env, "WOMPI_CLIENT_ID"),
+      clientSecret: requireSecret(this.env, "WOMPI_CLIENT_SECRET")
+    };
   }
 }
 
@@ -373,4 +399,8 @@ function isApprovedWompiUrl(url: URL, host: string): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function wompiConfigurationError(): WompiApiError {
+  return new WompiApiError("No se pudo preparar la configuración de Wompi");
 }

@@ -4,7 +4,7 @@ import { INTENT_EXPIRY_SWEEP_LIMIT } from "../../src/worker/storage/repository";
 import { utf8Bytes } from "../../src/worker/utils/encoding";
 import type { Env } from "../../src/worker/types";
 import { env, InMemoryD1 } from "./support/inMemoryD1";
-import { emisorConfig } from "./support/dteFixtures";
+import { emisorConfig, generatedCertificateXml } from "./support/dteFixtures";
 import { installWorkerFetchGlobals } from "./support/workerFetchGlobals";
 import { sha256Hex } from "./support/workerFetchHelpers";
 
@@ -510,9 +510,15 @@ describe("donation intents", () => {
     }
   });
 
-  it("returns 502 and leaves the intent PENDING when Wompi link creation fails", async () => {
+  it("returns 502 and leaves the intent PENDING when a fiscally-ready Wompi link request fails", async () => {
     const db = new InMemoryD1();
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("nope", { status: 500 }));
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "wompi-token", expires_in: 3600, token_type: "Bearer" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      }))
+      .mockResolvedValueOnce(new Response("nope", { status: 500 }));
     try {
       const response = await worker.fetch(
         intentRequest(validIntentBody()),
@@ -521,7 +527,14 @@ describe("donation intents", () => {
           APP_ORIGIN: "https://donar.example.org",
           EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
           WOMPI_CLIENT_ID: "id",
-          WOMPI_CLIENT_SECRET: "secret"
+          WOMPI_CLIENT_SECRET: "secret",
+          MH_CERT_XML: await generatedCertificateXml("cert-password"),
+          MH_CERT_PASSWORD: "cert-password",
+          MH_USER_TEST: "test-mh-user",
+          MH_PASSWORD_TEST: "test-mh-password",
+          MH_AUTH_URL_TEST: "https://apitest.dtes.mh.gob.sv/seguridad/auth",
+          MH_RECEPCION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/recepciondte",
+          MH_ANULACION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/anulardte"
         })
       );
 
@@ -529,6 +542,28 @@ describe("donation intents", () => {
       await expect(response.json()).resolves.toMatchObject({ error: "wompi_link_failed" });
       expect(db.donationIntents).toHaveLength(1);
       expect(db.donationIntents[0].status).toBe("PENDING");
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("returns the donor-safe 502 and leaves the intent PENDING when fiscal readiness is invalid", async () => {
+    const db = new InMemoryD1();
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    try {
+      const response = await worker.fetch(
+        intentRequest(validIntentBody()),
+        env(db, {
+          MOCK_EXTERNAL_SERVICES: "false",
+          APP_ORIGIN: "https://donar.example.org"
+        })
+      );
+
+      expect(response.status).toBe(502);
+      await expect(response.json()).resolves.toMatchObject({ error: "wompi_link_failed" });
+      expect(db.donationIntents).toHaveLength(1);
+      expect(db.donationIntents[0].status).toBe("PENDING");
+      expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
       fetchSpy.mockRestore();
     }
