@@ -433,7 +433,7 @@ describe("provider creation budget migration", () => {
         globalLimit: 20
       });
       expect(first.kind).toBe("CLAIMED");
-      expect(second).toEqual({ kind: "LIMITED" });
+      expect(second).toEqual({ kind: "LIMITED", scope: "PROVIDER" });
     } finally {
       database.close();
     }
@@ -465,6 +465,8 @@ describe("provider creation budget repository", () => {
         })
       ));
       expect(clientClaims.filter((claim) => claim.kind === "CLAIMED")).toHaveLength(2);
+      expect(clientClaims.filter((claim) => claim.kind === "LIMITED"))
+        .toEqual(expect.arrayContaining([{ kind: "LIMITED", scope: "CLIENT" }]));
 
       const providerRepo = new Repository(sqliteD1(providerDatabase));
       const providerClaims = await Promise.all(Array.from({ length: 20 }, (_, index) =>
@@ -481,6 +483,8 @@ describe("provider creation budget repository", () => {
         })
       ));
       expect(providerClaims.filter((claim) => claim.kind === "CLAIMED")).toHaveLength(3);
+      expect(providerClaims.filter((claim) => claim.kind === "LIMITED"))
+        .toEqual(expect.arrayContaining([{ kind: "LIMITED", scope: "PROVIDER" }]));
 
       const globalRepo = new Repository(sqliteD1(globalDatabase));
       const globalClaims = await Promise.all(Array.from({ length: 20 }, (_, index) =>
@@ -497,6 +501,8 @@ describe("provider creation budget repository", () => {
         })
       ));
       expect(globalClaims.filter((claim) => claim.kind === "CLAIMED")).toHaveLength(4);
+      expect(globalClaims.filter((claim) => claim.kind === "LIMITED"))
+        .toEqual(expect.arrayContaining([{ kind: "LIMITED", scope: "GLOBAL" }]));
     } finally {
       clientDatabase.close();
       providerDatabase.close();
@@ -523,6 +529,40 @@ describe("provider creation budget repository", () => {
 
     expect(claims.filter((claim) => claim.kind === "CLAIMED")).toHaveLength(4);
     expect(providerClaimsFrom(db)).toHaveLength(4);
+  });
+
+  it("counts legacy per-client claims during the rolling deployment", async () => {
+    const database = migratedDatabase();
+    try {
+      const insert = database.prepare(
+        `INSERT INTO security_rate_limit_claims (
+           id, scope, key_hash, claimed_at, expires_at
+         ) VALUES (?, 'donation_intent', ?, ?, ?)`
+      );
+      for (let index = 0; index < 5; index += 1) {
+        insert.run(`legacy_client_${index}`, "legacy-raw-client-hash", now, expiresAt);
+      }
+      const repo = new Repository(sqliteD1(database));
+
+      const claim = await claimProviderCreationBudgetForTest(repo, {
+        provider: "WOMPI",
+        clientKeyHash: "normalized-client-hash",
+        legacyClientKeyHash: "legacy-raw-client-hash",
+        stripeRequestId: null,
+        now,
+        cutoff,
+        expiresAt,
+        clientLimit: 5,
+        providerLimit: 20,
+        globalLimit: 20
+      });
+
+      expect(claim).toEqual({ kind: "LIMITED", scope: "CLIENT" });
+      expect(database.prepare("SELECT COUNT(*) AS count FROM provider_creation_claims").get())
+        .toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
   });
 
   it("releases only unused claims and preserves attached Wompi and Stripe evidence", async () => {
@@ -627,7 +667,7 @@ describe("provider creation budget repository", () => {
         providerLimit: 1,
         globalLimit: 20
       });
-      expect(legacyStripeProviderClaim).toEqual({ kind: "LIMITED" });
+      expect(legacyStripeProviderClaim).toEqual({ kind: "LIMITED", scope: "PROVIDER" });
 
       const legacyClaim = await claimProviderCreationBudgetForTest(legacyRepo, {
           provider: "WOMPI",
@@ -640,7 +680,7 @@ describe("provider creation budget repository", () => {
           providerLimit: 20,
           globalLimit: 2
       });
-      expect(legacyClaim).toEqual({ kind: "LIMITED" });
+      expect(legacyClaim).toEqual({ kind: "LIMITED", scope: "GLOBAL" });
 
       const attachedRepo = new Repository(sqliteD1(attachedDatabase));
       const first = await claimProviderCreationBudgetForTest(attachedRepo, {
@@ -2630,6 +2670,7 @@ function bootstrapRequest(options: { token?: string; password?: string } = {}, c
 type ProviderBudgetTestInput = {
   provider: "WOMPI" | "STRIPE";
   clientKeyHash: string;
+  legacyClientKeyHash?: string;
   stripeRequestId: string | null;
   now: string;
   cutoff: string;
@@ -2642,7 +2683,7 @@ type ProviderBudgetTestInput = {
 type ProviderBudgetTestResult =
   | { kind: "CLAIMED"; id: string }
   | { kind: "DUPLICATE"; id: string }
-  | { kind: "LIMITED" };
+  | { kind: "LIMITED"; scope: "CLIENT" | "PROVIDER" | "GLOBAL" };
 
 async function claimProviderCreationBudgetForTest(
   repo: Repository,
@@ -2652,8 +2693,11 @@ async function claimProviderCreationBudgetForTest(
     claimProviderCreationBudget?: (value: ProviderBudgetTestInput) => Promise<ProviderBudgetTestResult>;
   }).claimProviderCreationBudget;
   expect(method, "repository exposes the provider creation claim boundary").toBeTypeOf("function");
-  if (!method) return { kind: "LIMITED" };
-  return method.call(repo, input);
+  if (!method) return { kind: "LIMITED", scope: "GLOBAL" };
+  return method.call(repo, {
+    ...input,
+    legacyClientKeyHash: input.legacyClientKeyHash ?? input.clientKeyHash
+  });
 }
 
 async function releaseProviderCreationClaimForTest(

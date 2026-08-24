@@ -279,6 +279,17 @@ async function rateLimitKey(value: string | null): Promise<string> {
   return sha256Hex(utf8Bytes(value?.trim() || "unknown"));
 }
 
+async function providerCreationClientKeys(clientIp: string | null): Promise<{
+  clientKeyHash: string;
+  legacyClientKeyHash: string;
+}> {
+  const [clientKeyHash, legacyClientKeyHash] = await Promise.all([
+    rateLimitKey(providerCreationRateIdentity(clientIp)),
+    rateLimitKey(clientIp)
+  ]);
+  return { clientKeyHash, legacyClientKeyHash };
+}
+
 function loginMfaUnavailableResponse(): Response {
   return jsonResponse(
     {
@@ -293,13 +304,82 @@ function intentThrottleExpiresIso(): string {
   return new Date(Date.now() + INTENT_THROTTLE_WINDOW_MINUTES * 60_000).toISOString();
 }
 
-function providerCreationLimitedResponse(): Response {
+function providerCreationClientLimitedResponse(): Response {
   return jsonResponse(
     {
       error: "too_many_attempts",
       message: "Demasiados intentos. Espere 15 minutos e intente de nuevo."
     },
     { status: 429, headers: { "Cache-Control": "no-store" } }
+  );
+}
+
+async function providerCreationLimitedResponse(
+  ctx: ApiRouteContext,
+  provider: "WOMPI" | "STRIPE",
+  claim: Extract<
+    Awaited<ReturnType<Repository["claimProviderCreationBudget"]>>,
+    { kind: "LIMITED" }
+  >,
+  now: string
+): Promise<Response> {
+  if (claim.scope === "CLIENT") {
+    return providerCreationClientLimitedResponse();
+  }
+  const capacityClaim = claim;
+  const limit = capacityClaim.scope === "GLOBAL"
+    ? PROVIDER_CREATION_GLOBAL_LIMIT
+    : PROVIDER_CREATION_PROVIDER_LIMIT;
+  const windowMs = INTENT_THROTTLE_WINDOW_MINUTES * 60_000;
+  const bucketStart = new Date(
+    Math.floor(Date.parse(now) / windowMs) * windowMs
+  ).toISOString();
+  const entityId = capacityClaim.scope === "GLOBAL"
+    ? `global:${bucketStart}`
+    : `${provider.toLowerCase()}:${bucketStart}`;
+  const evidenceTask = (async () => {
+    try {
+      await ctx.repo.createAuditIfAbsent({
+        action: "PROVIDER_CREATION_CAPACITY_EXHAUSTED",
+        entityType: "provider_creation_capacity",
+        entityId,
+        summary: "Capacidad temporal de creación de entregas agotada",
+        metadata: {
+          scope: capacityClaim.scope,
+          provider,
+          windowMinutes: INTENT_THROTTLE_WINDOW_MINUTES,
+          limit
+        }
+      });
+    } catch (error) {
+      logWorkerError(ctx.env, "provider_creation_capacity_audit_failed", error);
+    }
+    try {
+      await sendOperationalAlert(ctx.env, ctx.repo, {
+        kind: "PROVIDER_CREATION_CAPACITY_EXHAUSTED",
+        title: "Capacidad temporal de entregas agotada",
+        detail: capacityClaim.scope === "GLOBAL"
+          ? `El límite global de ${limit} creaciones en ${INTENT_THROTTLE_WINDOW_MINUTES} minutos fue alcanzado.`
+          : `El límite de ${provider} de ${limit} creaciones en ${INTENT_THROTTLE_WINDOW_MINUTES} minutos fue alcanzado.`,
+        entityType: "provider_creation_capacity",
+        entityId,
+        incidentId: entityId
+      });
+    } catch (error) {
+      logWorkerError(ctx.env, "provider_creation_capacity_alert_failed", error);
+    }
+  })();
+  if (ctx.executionContext) {
+    ctx.executionContext.waitUntil(evidenceTask);
+  } else {
+    await evidenceTask;
+  }
+  return jsonResponse(
+    {
+      error: "donation_service_busy",
+      message: "No pudimos preparar su entrega en este momento. Intente de nuevo en unos minutos."
+    },
+    { status: 503, headers: { "Cache-Control": "no-store" } }
   );
 }
 
@@ -501,7 +581,7 @@ async function handleFetch(request: Request, env: Env, ctx?: ExecutionContext): 
 export default {
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const response = await handleFetch(request, env, ctx);
-    if (env.APP_ENV !== "production") {
+    if (deploymentEnvironmentPolicy(env).appEnv !== "production") {
       return response;
     }
     const wrappedResponse = new Response(response.body, response);
@@ -1381,9 +1461,10 @@ async function handleCreateDonationIntent(ctx: ApiRouteContext): Promise<Respons
     throw error;
   }
   const claimNow = nowIso();
+  const clientKeys = await providerCreationClientKeys(clientIp);
   const providerClaim = await ctx.repo.claimProviderCreationBudget({
     provider: "WOMPI",
-    clientKeyHash: await rateLimitKey(providerCreationRateIdentity(clientIp)),
+    ...clientKeys,
     stripeRequestId: null,
     now: claimNow,
     cutoff: intentThrottleSinceIso(),
@@ -1392,7 +1473,12 @@ async function handleCreateDonationIntent(ctx: ApiRouteContext): Promise<Respons
     providerLimit: PROVIDER_CREATION_PROVIDER_LIMIT,
     globalLimit: PROVIDER_CREATION_GLOBAL_LIMIT
   });
-  if (providerClaim.kind !== "CLAIMED") return providerCreationLimitedResponse();
+  if (providerClaim.kind === "LIMITED") {
+    return providerCreationLimitedResponse(ctx, "WOMPI", providerClaim, claimNow);
+  }
+  if (providerClaim.kind === "DUPLICATE") {
+    throw new Error("Wompi provider creation returned an impossible duplicate claim");
+  }
   try {
     const created = draft
       ? await createDraftDonationIntent(ctx.env, ctx.repo, input as ReturnType<typeof validateDraftIntentInput>, clientIp, providerClaim.id)
@@ -1404,6 +1490,7 @@ async function handleCreateDonationIntent(ctx: ApiRouteContext): Promise<Respons
     await ctx.repo.releaseUnusedProviderCreationClaim(providerClaim.id);
     if (error instanceof IntentLinkError) {
       // Intent stays PENDING and expires harmlessly on the cron sweep.
+      logWorkerError(ctx.env, "wompi_link_create_failed", error.cause ?? error);
       return jsonResponse({ error: "wompi_link_failed", message: "No se pudo generar el enlace de pago. Intente de nuevo en unos minutos." }, { status: 502 });
     }
     throw error;
@@ -1454,9 +1541,10 @@ async function handleCreateStripeCheckout(ctx: ApiRouteContext): Promise<Respons
   } else {
     const clientIp = clientIpFrom(ctx.request);
     const claimNow = nowIso();
+    const clientKeys = await providerCreationClientKeys(clientIp);
     const providerClaim = await ctx.repo.claimProviderCreationBudget({
       provider: "STRIPE",
-      clientKeyHash: await rateLimitKey(providerCreationRateIdentity(clientIp)),
+      ...clientKeys,
       stripeRequestId: input.requestId,
       now: claimNow,
       cutoff: intentThrottleSinceIso(),
@@ -1465,7 +1553,9 @@ async function handleCreateStripeCheckout(ctx: ApiRouteContext): Promise<Respons
       providerLimit: PROVIDER_CREATION_PROVIDER_LIMIT,
       globalLimit: PROVIDER_CREATION_GLOBAL_LIMIT
     });
-    if (providerClaim.kind === "LIMITED") return providerCreationLimitedResponse();
+    if (providerClaim.kind === "LIMITED") {
+      return providerCreationLimitedResponse(ctx, "STRIPE", providerClaim, claimNow);
+    }
     if (providerClaim.kind === "DUPLICATE") {
       const concurrent = await ctx.repo.getStripeCheckoutByRequestId(input.requestId);
       if (!concurrent) return stripeCheckoutCreationInProgressResponse();
@@ -1613,9 +1703,10 @@ async function prepareExistingStripeCheckoutCreation(
   if (definiteFailureRetry) {
     const clientIp = clientIpFrom(ctx.request);
     const claimNow = nowIso();
+    const clientKeys = await providerCreationClientKeys(clientIp);
     const claim = await ctx.repo.claimProviderCreationBudget({
       provider: "STRIPE",
-      clientKeyHash: await rateLimitKey(providerCreationRateIdentity(clientIp)),
+      ...clientKeys,
       stripeRequestId: existing.request_id,
       now: claimNow,
       cutoff: intentThrottleSinceIso(),
@@ -1624,7 +1715,9 @@ async function prepareExistingStripeCheckoutCreation(
       providerLimit: PROVIDER_CREATION_PROVIDER_LIMIT,
       globalLimit: PROVIDER_CREATION_GLOBAL_LIMIT
     });
-    if (claim.kind === "LIMITED") return providerCreationLimitedResponse();
+    if (claim.kind === "LIMITED") {
+      return providerCreationLimitedResponse(ctx, "STRIPE", claim, claimNow);
+    }
     if (
       claim.kind === "DUPLICATE"
       && claim.id !== existing.provider_creation_claim_id

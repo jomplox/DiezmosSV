@@ -76,7 +76,8 @@ const WOMPI_WEBHOOK_RAW_ALIASES: WompiRawAliasSchema = {
     ["Monto", "monto"],
     ["IdTransaccion", "idTransaccion"],
     ["ResultadoTransaccion", "resultadoTransaccion"],
-    ["CodigoAutorizacion", "codigoAutorizacion"],
+    // CodigoAutorizacion is provider-enriched and may legitimately be absent on
+    // the first delivery. The canonical stored payload remains authoritative.
     ["IdIntentoPago", "idIntentoPago"],
     ["Cantidad", "cantidad"],
     ["EsProductiva", "esProductiva"],
@@ -360,7 +361,6 @@ function canonicalizeAliasedObject(
   schema: WompiRawAliasSchema,
   omittedCanonicalKey: string | null = null
 ): Record<string, unknown> {
-  const consumed = new Set<string>();
   const entries: Array<[string, unknown]> = [];
 
   for (const [canonicalKey, ...aliases] of schema.groups) {
@@ -370,7 +370,6 @@ function canonicalizeAliasedObject(
     );
     if (present.length === 1) {
       const sourceKey = present[0];
-      consumed.add(sourceKey);
       if (canonicalKey !== omittedCanonicalKey) {
         entries.push([
           canonicalKey,
@@ -380,7 +379,6 @@ function canonicalizeAliasedObject(
       continue;
     }
     for (const sourceKey of present) {
-      consumed.add(sourceKey);
       // Coexisting documented aliases are distinct evidence. For alternate
       // transactions, omit only the canonical member and preserve every alias.
       if (sourceKey !== omittedCanonicalKey) {
@@ -389,12 +387,6 @@ function canonicalizeAliasedObject(
           canonicalizeRawMember(record[sourceKey], schema.nested?.[canonicalKey])
         ]);
       }
-    }
-  }
-
-  for (const [key, member] of Object.entries(record)) {
-    if (!consumed.has(key) && key !== omittedCanonicalKey) {
-      entries.push([key, canonicalizeRawMember(member)]);
     }
   }
 

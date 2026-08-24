@@ -279,7 +279,7 @@ describe("donation intents", () => {
     vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:00:00.000Z") });
     try {
       const db = new InMemoryD1();
-      for (let index = 0; index < 59; index += 1) {
+      for (let index = 0; index < 599; index += 1) {
         db.donationIntents.push({
           id: `legacy_intent_${index}`,
           client_ip: `198.51.100.${index + 1}`,
@@ -296,10 +296,10 @@ describe("donation intents", () => {
       );
 
       expect(responses.filter((response) => response.status === 201)).toHaveLength(1);
-      expect(responses.filter((response) => response.status === 429)).toHaveLength(19);
-      expect(responses.find((response) => response.status === 429)?.headers.get("Cache-Control"))
+      expect(responses.filter((response) => response.status === 503)).toHaveLength(19);
+      expect(responses.find((response) => response.status === 503)?.headers.get("Cache-Control"))
         .toBe("no-store");
-      expect(db.donationIntents).toHaveLength(60);
+      expect(db.donationIntents).toHaveLength(600);
       expect(providerCreationClaims(db)).toHaveLength(1);
     } finally {
       vi.useRealTimers();
@@ -635,6 +635,36 @@ describe("donation intents", () => {
     }
   });
 
+  it("keeps the legacy per-client budget during an IPv6 rolling deployment", async () => {
+    const clientIp = "2001:db8:abcd:1::1234";
+    const legacyClientKeyHash = await sha256Hex(utf8Bytes(clientIp));
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:00:00.000Z") });
+    try {
+      const db = new InMemoryD1();
+      for (let index = 0; index < 5; index += 1) {
+        db.securityRateLimitClaims.push({
+          id: `legacy_provider_client_${index}`,
+          scope: "donation_intent",
+          key_hash: legacyClientKeyHash,
+          claimed_at: `2026-07-04T11:5${index}:00.000Z`,
+          expires_at: "2026-07-04T12:15:00.000Z"
+        });
+      }
+
+      const response = await worker.fetch(
+        intentRequest(validIntentBody(), { "cf-connecting-ip": clientIp }),
+        env(db)
+      );
+
+      expect(response.status).toBe(429);
+      await expect(response.json()).resolves.toMatchObject({ error: "too_many_attempts" });
+      expect(db.donationIntents).toHaveLength(0);
+      expect(providerCreationClaims(db)).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("returns 502 and leaves the intent PENDING when a fiscally-ready Wompi link request fails", async () => {
     const db = new InMemoryD1();
     const fetchSpy = vi
@@ -690,6 +720,7 @@ describe("donation intents", () => {
   it("returns the donor-safe 502 and leaves the intent PENDING when fiscal readiness is invalid", async () => {
     const db = new InMemoryD1();
     const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
       const response = await worker.fetch(
         intentRequest(validIntentBody()),
@@ -707,8 +738,16 @@ describe("donation intents", () => {
       expect(db.donationIntents[0].provider_creation_claim_id)
         .toBe(providerCreationClaims(db)[0].id);
       expect(fetchSpy).not.toHaveBeenCalled();
+      expect(errorSpy).toHaveBeenCalledWith({
+        event: "wompi_link_create_failed",
+        app_env: "local",
+        error_name: "wompiapierror",
+        error_code: "wompi_configuration_error"
+      });
+      expect(JSON.stringify(errorSpy.mock.calls)).not.toContain("APP_ORIGIN");
     } finally {
       fetchSpy.mockRestore();
+      errorSpy.mockRestore();
     }
   });
 

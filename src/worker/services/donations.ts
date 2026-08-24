@@ -51,8 +51,11 @@ function isGiftType(value: unknown): value is DonationGiftType {
 // distributed callers before they can create durable or third-party state.
 export const PROVIDER_CREATION_WINDOW_MINUTES = 15;
 export const PROVIDER_CREATION_CLIENT_LIMIT = 5;
-export const PROVIDER_CREATION_PROVIDER_LIMIT = 60;
-export const PROVIDER_CREATION_GLOBAL_LIMIT = 100;
+// Capacity ceilings are emergency brakes, not ordinary donor throttles. Keep
+// enough headroom for concentrated giving while retaining a bounded distributed
+// abuse path before durable/provider work.
+export const PROVIDER_CREATION_PROVIDER_LIMIT = 600;
+export const PROVIDER_CREATION_GLOBAL_LIMIT = 1000;
 
 // The datos endpoint keeps its existing D1-only per-IP throttle. These aliases
 // also preserve the established 15-minute donor-facing retry guidance.
@@ -383,8 +386,8 @@ export interface CreatedDraftIntent {
 // Signals that the Wompi API rejected link creation; the route maps this to a 502
 // and leaves the intent PENDING (it expires harmlessly on the cron sweep).
 export class IntentLinkError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = "IntentLinkError";
   }
 }
@@ -408,7 +411,7 @@ async function mintLinkForIntent(env: Env, repo: Repository, intent: DonationInt
     link = await new WompiApiService(env).createPaymentLink(intent);
   } catch (error) {
     if (error instanceof WompiApiError) {
-      throw new IntentLinkError(error.message);
+      throw new IntentLinkError(error.message, { cause: error });
     }
     throw error;
   }

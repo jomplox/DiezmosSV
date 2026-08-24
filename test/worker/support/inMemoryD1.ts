@@ -1037,6 +1037,8 @@ export class Statement {
         countClientKeyHash,
         clientCutoff,
         excludedClientRequestId,
+        legacyClientKeyHash,
+        legacyClientCutoff,
         clientLimit,
         countProvider,
         providerCutoff,
@@ -1072,6 +1074,11 @@ export class Statement {
           claim.client_key_hash === String(countClientKeyHash) &&
           claim.claimed_at >= String(clientCutoff) &&
           includedClaim(claim, excludedClientRequestId)
+      ).length + this.db.securityRateLimitClaims.filter(
+        (claim) =>
+          claim.scope === "donation_intent" &&
+          claim.key_hash === String(legacyClientKeyHash) &&
+          claim.claimed_at >= String(legacyClientCutoff)
       ).length;
       const providerClaimCount = this.db.providerCreationClaims.filter(
         (claim) =>
@@ -1128,6 +1135,77 @@ export class Statement {
       };
       this.db.providerCreationClaims.push(claim);
       return { id: claim.id } as T;
+    }
+    if (
+      this.sql.includes("AS client_count") &&
+      this.sql.includes("AS provider_count") &&
+      this.sql.includes("AS global_count")
+    ) {
+      const [
+        clientKeyHash,
+        clientCutoff,
+        excludedClientRequestId,
+        legacyClientKeyHash,
+        legacyClientCutoff,
+        provider,
+        providerCutoff,
+        excludedProviderRequestId,
+        legacyProvider,
+        donationLegacyCutoff,
+        stripeLegacyCutoff,
+        globalCutoff,
+        excludedGlobalRequestId,
+        globalDonationCutoff,
+        globalStripeCutoff
+      ] = this.args;
+      const includedClaim = (claim: ProviderCreationClaimRow, excludedRequestId: unknown): boolean =>
+        claim.provider !== "STRIPE"
+        || claim.stripe_request_id !== (excludedRequestId == null ? null : String(excludedRequestId));
+      const clientCount = this.db.providerCreationClaims.filter(
+        (claim) =>
+          claim.client_key_hash === String(clientKeyHash) &&
+          claim.claimed_at >= String(clientCutoff) &&
+          includedClaim(claim, excludedClientRequestId)
+      ).length + this.db.securityRateLimitClaims.filter(
+        (claim) =>
+          claim.scope === "donation_intent" &&
+          claim.key_hash === String(legacyClientKeyHash) &&
+          claim.claimed_at >= String(legacyClientCutoff)
+      ).length;
+      const providerCount = this.db.providerCreationClaims.filter(
+        (claim) =>
+          claim.provider === String(provider) &&
+          claim.claimed_at >= String(providerCutoff) &&
+          includedClaim(claim, excludedProviderRequestId)
+      ).length + (String(legacyProvider) === "WOMPI"
+        ? this.db.donationIntents.filter(
+            (intent) =>
+              (intent.provider_creation_claim_id ?? null) === null &&
+              String(intent.created_at) >= String(donationLegacyCutoff)
+          ).length
+        : this.db.stripeCheckoutSessions.filter(
+            (checkout) =>
+              (checkout.provider_creation_claim_id ?? null) === null &&
+              String(checkout.created_at) >= String(stripeLegacyCutoff)
+          ).length);
+      const globalCount = this.db.providerCreationClaims.filter(
+        (claim) =>
+          claim.claimed_at >= String(globalCutoff) &&
+          includedClaim(claim, excludedGlobalRequestId)
+      ).length + this.db.donationIntents.filter(
+        (intent) =>
+          (intent.provider_creation_claim_id ?? null) === null &&
+          String(intent.created_at) >= String(globalDonationCutoff)
+      ).length + this.db.stripeCheckoutSessions.filter(
+        (checkout) =>
+          (checkout.provider_creation_claim_id ?? null) === null &&
+          String(checkout.created_at) >= String(globalStripeCutoff)
+      ).length;
+      return {
+        client_count: clientCount,
+        provider_count: providerCount,
+        global_count: globalCount
+      } as T;
     }
     if (
       this.sql.includes("SELECT id FROM provider_creation_claims") &&

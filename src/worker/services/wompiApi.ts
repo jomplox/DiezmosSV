@@ -27,8 +27,12 @@ const TOKEN_REFRESH_MARGIN_SECONDS = 60;
 // Thrown on any non-2xx from Wompi (token or link creation). The message carries
 // only the HTTP status + response text — never the client credentials.
 export class WompiApiError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(
+    message: string,
+    readonly code = "wompi_provider_error",
+    options?: ErrorOptions
+  ) {
+    super(message, options);
     this.name = "WompiApiError";
   }
 }
@@ -172,8 +176,8 @@ export class WompiApiService {
   private isMockMode(): boolean {
     try {
       return isMockMode(this.env);
-    } catch {
-      throw wompiConfigurationError();
+    } catch (cause) {
+      throw wompiConfigurationError(cause);
     }
   }
 
@@ -188,8 +192,8 @@ export class WompiApiService {
       const origin = requireSecret(this.env, "APP_ORIGIN");
       this.wompiCredentials();
       return origin;
-    } catch {
-      throw wompiConfigurationError();
+    } catch (cause) {
+      throw wompiConfigurationError(cause);
     }
   }
 
@@ -406,6 +410,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function wompiConfigurationError(): WompiApiError {
-  return new WompiApiError("No se pudo preparar la configuración de Wompi");
+function wompiConfigurationError(cause: unknown): WompiApiError {
+  return new WompiApiError(
+    "No se pudo preparar la configuración de Wompi",
+    "wompi_configuration_error",
+    { cause }
+  );
 }

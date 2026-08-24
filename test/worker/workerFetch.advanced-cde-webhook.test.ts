@@ -612,22 +612,11 @@ describe("advanced CDE generation", () => {
 });
 
 describe("Wompi webhook integration", () => {
-  const losslessBodyEdges: Array<{
+  const strictBodyEdges: Array<{
     name: string;
     marker: string;
-    mutateStored?: (raw: Record<string, unknown>) => void;
     mutateIncoming: (raw: Record<string, unknown>) => void;
   }> = [
-    {
-      name: "an unknown nested extra value",
-      marker: "unknown-edge-private-marker",
-      mutateIncoming: (raw) => {
-        raw.ProviderEvidence = {
-          nested: { decision: "unknown-edge-private-marker" },
-          steps: [1, { approved: true }]
-        };
-      }
-    },
     {
       name: "explicit null instead of a missing member",
       marker: "IdExterno",
@@ -648,33 +637,14 @@ describe("Wompi webhook integration", () => {
       mutateIncoming: (raw) => {
         raw.Cantidad = "1";
       }
-    },
-    {
-      name: "a different nested array order",
-      marker: "array-order-private-marker",
-      mutateStored: (raw) => {
-        raw.ProviderEvidence = {
-          history: [1, 2, { note: "array-order-private-marker" }]
-        };
-      },
-      mutateIncoming: (raw) => {
-        raw.ProviderEvidence = {
-          history: [2, 1, { note: "array-order-private-marker" }]
-        };
-      }
     }
   ];
 
   it.each(
     (["same-ID", "alternate-ID"] as const).flatMap((replayKind) =>
-      losslessBodyEdges.map((edge) => ({ replayKind, ...edge }))
+      strictBodyEdges.map((edge) => ({ replayKind, ...edge }))
     )
-  )("rejects a $replayKind replay with $name", async ({
-    replayKind,
-    marker,
-    mutateStored,
-    mutateIncoming
-  }) => {
+  )("rejects a $replayKind replay with $name", async ({ replayKind, marker, mutateIncoming }) => {
     const db = new InMemoryD1();
     seedCollisionIntent(db);
     const alternate = replayKind === "alternate-ID";
@@ -683,7 +653,6 @@ describe("Wompi webhook integration", () => {
     });
     const storedRaw = structuredClone(storedPayload) as unknown as Record<string, unknown>;
     const incomingRaw = structuredClone(storedPayload) as unknown as Record<string, unknown>;
-    mutateStored?.(storedRaw);
     mutateIncoming(incomingRaw);
     if (alternate) {
       incomingRaw.IdTransaccion = "lossless-alternate-transaction";
@@ -718,6 +687,85 @@ describe("Wompi webhook integration", () => {
     const boundedOutput = JSON.stringify({ responseBody, audit });
     expect(boundedOutput).not.toContain(marker);
     expect(boundedOutput).not.toContain(String(incomingRaw.IdTransaccion));
+  });
+
+  it.each(
+    (["same-ID", "alternate-ID"] as const).flatMap((replayKind) => [
+      {
+        replayKind,
+        name: "an added unknown provider field",
+        mutateStored: (_raw: Record<string, unknown>): void => {},
+        mutateIncoming: (raw: Record<string, unknown>) => {
+          raw.ProviderEvidence = {
+            nested: { decision: "provider-added-after-first-delivery" },
+            steps: [1, { approved: true }]
+          };
+        }
+      },
+      {
+        replayKind,
+        name: "changed unknown provider metadata",
+        mutateStored: (raw: Record<string, unknown>) => {
+          raw.ProviderEvidence = { history: [1, 2] };
+        },
+        mutateIncoming: (raw: Record<string, unknown>) => {
+          raw.ProviderEvidence = { history: [2, 1] };
+        }
+      },
+      {
+        replayKind,
+        name: "a later authorization code",
+        mutateStored: (raw: Record<string, unknown>) => {
+          raw.CodigoAutorizacion = null;
+        },
+        mutateIncoming: (raw: Record<string, unknown>) => {
+          raw.CodigoAutorizacion = "provider-filled-later";
+        }
+      }
+    ])
+  )("accepts a $replayKind replay with $name and repairs downstream processing", async ({
+    replayKind,
+    mutateStored,
+    mutateIncoming
+  }) => {
+    const db = new InMemoryD1();
+    seedCollisionIntent(db);
+    const alternate = replayKind === "alternate-ID";
+    const storedPayload = collisionWebhook({
+      IdTransaccion: alternate ? "benign-stored-transaction" : "collision-transaction"
+    });
+    const storedRaw = structuredClone(storedPayload) as unknown as Record<string, unknown>;
+    const incomingRaw = structuredClone(storedPayload) as unknown as Record<string, unknown>;
+    mutateStored(storedRaw);
+    mutateIncoming(incomingRaw);
+    if (alternate) {
+      incomingRaw.IdTransaccion = "benign-alternate-transaction";
+    }
+    const canonicalRawBody = JSON.stringify(storedRaw);
+    seedCanonicalWompiEvent(
+      db,
+      storedPayload,
+      "wompi_benign_canonical",
+      canonicalRawBody
+    );
+    const send = vi.fn();
+
+    const response = await postRawSignedWompi(db, JSON.stringify(incomingRaw), send);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      wompiEventId: "wompi_benign_canonical",
+      inserted: false,
+      queued: true
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(db.donationIntents[0].paid_at).not.toBeNull();
+    expect(db.wompiEvents).toHaveLength(1);
+    expect(db.wompiEvents[0].raw_body).toBe(canonicalRawBody);
+    expect(db.audits.find((row) => row.action === "WOMPI_EVENT_CONFLICT")).toBeUndefined();
+    expect(db.audits.find((row) => row.action === "WOMPI_DUPLICATE")?.entity_id)
+      .toBe("wompi_benign_canonical");
   });
 
   it.each([

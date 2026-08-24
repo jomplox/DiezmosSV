@@ -29,10 +29,15 @@ describe("production HSTS policy", () => {
       new Request("https://example.org/api/health"),
       env(new InMemoryD1(), { APP_ENV: "staging" })
     );
+    const normalizedProductionResponse = await worker.fetch(
+      new Request("https://example.org/api/health"),
+      env(new InMemoryD1(), { APP_ENV: " Production " })
+    );
 
     expect(productionResponse.status).toBe(200);
     expectConservativeHsts(productionResponse);
     await expect(productionResponse.json()).resolves.toMatchObject({ ok: true, appEnv: "production" });
+    expectConservativeHsts(normalizedProductionResponse);
     expect(stagingResponse.status).toBe(200);
     expect(stagingResponse.headers.has("Strict-Transport-Security")).toBe(false);
     await expect(stagingResponse.json()).resolves.toMatchObject({ ok: true, appEnv: "staging" });

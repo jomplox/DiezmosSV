@@ -855,7 +855,10 @@ function jsonResponse(body: unknown): Response {
 
 function expectSafeConfigurationError(error: unknown): void {
   expect(error).toBeInstanceOf(WompiApiError);
-  const message = (error as WompiApiError).message;
+  const wompiError = error as WompiApiError;
+  expect(wompiError.code).toBe("wompi_configuration_error");
+  expect(wompiError.cause).toBeInstanceOf(Error);
+  const message = wompiError.message;
   expect(message).toBe(WOMPI_CONFIGURATION_ERROR);
   for (const forbidden of INTERNAL_CONFIGURATION_TEXT) {
     expect(message).not.toContain(forbidden);

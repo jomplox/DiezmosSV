@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
+import { EmailService } from "../../src/worker/services/email";
 import type { Env } from "../../src/worker/types";
 import { env, InMemoryD1 } from "./support/inMemoryD1";
 import { migratedDatabase } from "./support/migratedDatabase";
@@ -591,8 +592,8 @@ describe("Stripe public donation routes", () => {
   });
 
   it.each([
-    ["provider", 60],
-    ["global", 100]
+    ["provider", 600],
+    ["global", 1000]
   ] as const)("blocks a definite retry at the exhausted %s ceiling before Stripe", async (dimension, count) => {
     vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:16:00.000Z") });
     seedDefiniteFailureCheckout(database, { claimId: `${dimension}_old_retry_claim` });
@@ -605,10 +606,10 @@ describe("Stripe public donation routes", () => {
       frequency: "once"
     }, "198.51.100.250");
 
-    expect(retry.response.status).toBe(429);
+    expect(retry.response.status).toBe(503);
     expect(retry.body).toEqual({
-      error: "too_many_attempts",
-      message: "Demasiados intentos. Espere 15 minutos e intente de nuevo."
+      error: "donation_service_busy",
+      message: "No pudimos preparar su entrega en este momento. Intente de nuevo en unos minutos."
     });
     expect(retry.response.headers.get("Cache-Control")).toBe("no-store");
     expect(providerFetch).not.toHaveBeenCalled();
@@ -1252,7 +1253,7 @@ describe("Stripe public donation routes", () => {
 
   it("blocks distinct clients at the Stripe provider ceiling before reservation or provider work", async () => {
     const now = "2026-07-04T12:00:00.000Z";
-    for (let index = 0; index < 60; index += 1) {
+    for (let index = 0; index < 600; index += 1) {
       database.prepare(
         `INSERT INTO provider_creation_claims (
            id, provider, client_key_hash, stripe_request_id, claimed_at, expires_at
@@ -1266,6 +1267,14 @@ describe("Stripe public donation routes", () => {
       );
     }
     vi.useFakeTimers({ toFake: ["Date"], now: new Date(now) });
+    database.prepare(
+      "INSERT INTO app_settings (key, value) VALUES ('alert_email', 'owner@example.org')"
+    ).run();
+    const alertSend = vi.spyOn(EmailService.prototype, "sendOperationalAlert")
+      .mockImplementation(async (_input, beforeProviderDispatch) => {
+        await beforeProviderDispatch?.();
+        return { messageId: "capacity-alert" };
+      });
     const providerFetch = vi.fn<typeof fetch>();
     vi.stubGlobal("fetch", providerFetch);
     try {
@@ -1275,21 +1284,33 @@ describe("Stripe public donation routes", () => {
         frequency: "once"
       }, "198.51.100.200");
 
-      expect(limited.response.status).toBe(429);
+      expect(limited.response.status).toBe(503);
       expect(limited.body).toEqual({
-        error: "too_many_attempts",
-        message: "Demasiados intentos. Espere 15 minutos e intente de nuevo."
+        error: "donation_service_busy",
+        message: "No pudimos preparar su entrega en este momento. Intente de nuevo en unos minutos."
       });
       expect(limited.response.headers.get("Cache-Control")).toBe("no-store");
       expect(database.prepare("SELECT COUNT(*) AS count FROM stripe_checkout_sessions").get())
         .toEqual({ count: 0 });
       expect(providerFetch).not.toHaveBeenCalled();
+      expect(alertSend).toHaveBeenCalledTimes(1);
+      expect(database.prepare(
+        `SELECT COUNT(*) AS count FROM audit_logs
+          WHERE action = 'PROVIDER_CREATION_CAPACITY_EXHAUSTED'
+            AND entity_type = 'provider_creation_capacity'`
+      ).get()).toEqual({ count: 1 });
+      expect(database.prepare(
+        `SELECT COUNT(*) AS count FROM audit_logs
+          WHERE action = 'ALERT_SENT:PROVIDER_CREATION_CAPACITY_EXHAUSTED'
+            AND entity_type = 'provider_creation_capacity'`
+      ).get()).toEqual({ count: 1 });
     } finally {
+      alertSend.mockRestore();
       vi.useRealTimers();
     }
   });
 
-  it("enforces one shared global ceiling across Wompi and Stripe claims", async () => {
+  it("admits the 101st site-wide creation attempt when provider capacity remains", async () => {
     const now = "2026-07-04T12:00:00.000Z";
     for (let index = 0; index < 100; index += 1) {
       const stripe = index % 2 === 1;
@@ -1307,6 +1328,50 @@ describe("Stripe public donation routes", () => {
       );
     }
     vi.useFakeTimers({ toFake: ["Date"], now: new Date(now) });
+    const providerFetch = stubSuccessfulStripeCreation();
+    try {
+      const created = await createCheckout(stripeProxyEnv(workerEnv), {
+        requestId,
+        amount: 50,
+        frequency: "once"
+      }, "198.51.100.201");
+
+      expect(created.response.status).toBe(201);
+      expect(database.prepare("SELECT COUNT(*) AS count FROM stripe_checkout_sessions").get())
+        .toEqual({ count: 1 });
+      expect(providerFetch).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports, audits, and alerts at the shared emergency capacity ceiling", async () => {
+    const now = "2026-07-04T12:00:00.000Z";
+    const insert = database.prepare(
+      `INSERT INTO provider_creation_claims (
+         id, provider, client_key_hash, stripe_request_id, claimed_at, expires_at
+       ) VALUES (?, ?, ?, ?, ?, ?)`
+    );
+    for (let index = 0; index < 1000; index += 1) {
+      const stripe = index % 2 === 1;
+      insert.run(
+        `emergency_global_seed_${index}`,
+        stripe ? "STRIPE" : "WOMPI",
+        `emergency-global-client-${index}`,
+        stripe ? `emergency-global-request-${index}` : null,
+        now,
+        "2026-07-04T12:15:00.000Z"
+      );
+    }
+    database.prepare(
+      "INSERT INTO app_settings (key, value) VALUES ('alert_email', 'owner@example.org')"
+    ).run();
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date(now) });
+    const alertSend = vi.spyOn(EmailService.prototype, "sendOperationalAlert")
+      .mockImplementation(async (_input, beforeProviderDispatch) => {
+        await beforeProviderDispatch?.();
+        return { messageId: "capacity-alert" };
+      });
     const providerFetch = vi.fn<typeof fetch>();
     vi.stubGlobal("fetch", providerFetch);
     try {
@@ -1314,14 +1379,29 @@ describe("Stripe public donation routes", () => {
         requestId,
         amount: 50,
         frequency: "once"
-      }, "198.51.100.201");
+      }, "198.51.100.202");
 
-      expect(limited.response.status).toBe(429);
+      expect(limited.response.status).toBe(503);
+      expect(limited.body).toEqual({
+        error: "donation_service_busy",
+        message: "No pudimos preparar su entrega en este momento. Intente de nuevo en unos minutos."
+      });
       expect(limited.response.headers.get("Cache-Control")).toBe("no-store");
-      expect(database.prepare("SELECT COUNT(*) AS count FROM stripe_checkout_sessions").get())
-        .toEqual({ count: 0 });
       expect(providerFetch).not.toHaveBeenCalled();
+      expect(alertSend).toHaveBeenCalledTimes(1);
+      expect(database.prepare(
+        `SELECT metadata_json FROM audit_logs
+          WHERE action = 'PROVIDER_CREATION_CAPACITY_EXHAUSTED'`
+      ).get()).toEqual({
+        metadata_json: JSON.stringify({
+          scope: "GLOBAL",
+          provider: "STRIPE",
+          windowMinutes: 15,
+          limit: 1000
+        })
+      });
     } finally {
+      alertSend.mockRestore();
       vi.useRealTimers();
     }
   });

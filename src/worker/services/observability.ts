@@ -17,7 +17,8 @@ const ERROR_NAMES = new Set([
   "stripewebhooksignatureerror",
   "syntaxerror",
   "typeerror",
-  "urierror"
+  "urierror",
+  "wompiapierror"
 ]);
 const ERROR_CODES = new Set([
   "analytics_range_too_large",
@@ -65,7 +66,9 @@ const ERROR_CODES = new Set([
   "subscription_checkout_conflict",
   "subscription_metadata_invalid",
   "subscription_update_failed",
-  "wompi_intent_quarantined"
+  "wompi_configuration_error",
+  "wompi_intent_quarantined",
+  "wompi_provider_error"
 ]);
 const ERROR_EVENTS = new Set([
   "accepted_wompi_finalization_failed",
@@ -80,6 +83,8 @@ const ERROR_EVENTS = new Set([
   "password_reset_request_failed",
   "post_accept_finalization_failed",
   "post_accept_finalization_sweep_failed",
+  "provider_creation_capacity_alert_failed",
+  "provider_creation_capacity_audit_failed",
   "queue_handler_failed",
   "receipt_delivery_audit_failed",
   "retention_export_failed",
@@ -104,6 +109,7 @@ const ERROR_EVENTS = new Set([
   "unhandled_worker_request_error",
   "wompi_issuance_failure_list_failed",
   "wompi_issuance_retry_failed",
+  "wompi_link_create_failed",
   "wompi_link_deactivation_failed",
   "wompi_payment_link_reconciliation_failed"
 ]);
@@ -115,6 +121,7 @@ const ALERT_KINDS = new Set([
   "email_failed",
   "issuance_dead_lettered",
   "mh_unavailable",
+  "provider_creation_capacity_exhausted",
   "retention_export_failed",
   "retention_verify_failed",
   "stripe_acknowledgment_attention",
@@ -123,6 +130,7 @@ const ALERT_KINDS = new Set([
 const ALERT_ENTITY_TYPES = new Set([
   "credentials",
   "dte_document",
+  "provider_creation_capacity",
   "retention_export",
   "stripe_acknowledgment",
   "wompi_event"
