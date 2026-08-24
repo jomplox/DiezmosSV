@@ -29,6 +29,10 @@ import {
   IntentValidationError,
   INTENT_THROTTLE_LIMIT,
   INTENT_THROTTLE_WINDOW_MINUTES,
+  PROVIDER_CREATION_CLIENT_LIMIT,
+  PROVIDER_CREATION_GLOBAL_LIMIT,
+  PROVIDER_CREATION_PROVIDER_LIMIT,
+  providerCreationRateIdentity,
   isDraftIntentBody,
   validateDatosInput,
   validateDraftIntentInput,
@@ -286,6 +290,16 @@ function loginMfaUnavailableResponse(): Response {
 
 function intentThrottleExpiresIso(): string {
   return new Date(Date.now() + INTENT_THROTTLE_WINDOW_MINUTES * 60_000).toISOString();
+}
+
+function providerCreationLimitedResponse(): Response {
+  return jsonResponse(
+    {
+      error: "too_many_attempts",
+      message: "Demasiados intentos. Espere 15 minutos e intente de nuevo."
+    },
+    { status: 429, headers: { "Cache-Control": "no-store" } }
+  );
 }
 
 async function listAuditForUser(
@@ -1324,23 +1338,27 @@ async function handleCreateDonationIntent(ctx: ApiRouteContext): Promise<Respons
     throw error;
   }
   const claimNow = nowIso();
-  const rateLimitClaimId = await ctx.repo.claimDonationIntentRateLimit(
-    await rateLimitKey(clientIp),
-    clientIp,
-    claimNow,
-    intentThrottleSinceIso(),
-    intentThrottleExpiresIso(),
-    INTENT_THROTTLE_LIMIT
-  );
-  if (!rateLimitClaimId) {
-    return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
-  }
+  const providerClaim = await ctx.repo.claimProviderCreationBudget({
+    provider: "WOMPI",
+    clientKeyHash: await rateLimitKey(providerCreationRateIdentity(clientIp)),
+    stripeRequestId: null,
+    now: claimNow,
+    cutoff: intentThrottleSinceIso(),
+    expiresAt: intentThrottleExpiresIso(),
+    clientLimit: PROVIDER_CREATION_CLIENT_LIMIT,
+    providerLimit: PROVIDER_CREATION_PROVIDER_LIMIT,
+    globalLimit: PROVIDER_CREATION_GLOBAL_LIMIT
+  });
+  if (providerClaim.kind !== "CLAIMED") return providerCreationLimitedResponse();
   try {
     const created = draft
-      ? await createDraftDonationIntent(ctx.env, ctx.repo, input as ReturnType<typeof validateDraftIntentInput>, clientIp, rateLimitClaimId)
-      : await createDonationIntent(ctx.env, ctx.repo, input as ReturnType<typeof validateIntentInput>, clientIp, rateLimitClaimId);
+      ? await createDraftDonationIntent(ctx.env, ctx.repo, input as ReturnType<typeof validateDraftIntentInput>, clientIp, providerClaim.id)
+      : await createDonationIntent(ctx.env, ctx.repo, input as ReturnType<typeof validateIntentInput>, clientIp, providerClaim.id);
     return jsonResponse(created, { status: 201 });
   } catch (error) {
+    // The repository deletes only an unattached claim. Once the PENDING parent
+    // exists, readiness/provider failures retain their durable admission proof.
+    await ctx.repo.releaseUnusedProviderCreationClaim(providerClaim.id);
     if (error instanceof IntentLinkError) {
       // Intent stays PENDING and expires harmlessly on the cron sweep.
       return jsonResponse({ error: "wompi_link_failed", message: "No se pudo generar el enlace de pago. Intente de nuevo en unos minutos." }, { status: 502 });
@@ -1393,54 +1411,69 @@ async function handleCreateStripeCheckout(ctx: ApiRouteContext): Promise<Respons
   } else {
     const clientIp = clientIpFrom(ctx.request);
     const claimNow = nowIso();
-    const rateLimitClaimId = await ctx.repo.claimDonationIntentRateLimit(
-      await rateLimitKey(clientIp),
-      clientIp,
-      claimNow,
-      intentThrottleSinceIso(),
-      intentThrottleExpiresIso(),
-      INTENT_THROTTLE_LIMIT
-    );
-    if (!rateLimitClaimId) {
-      return jsonResponse(
-        { error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." },
-        { status: 429 }
-      );
-    }
-
-    const checkoutId = newId("stripe_checkout");
-    const request = await buildStripeCheckoutCreationRequest(
-      ctx,
-      checkoutId,
-      input,
-      stripeConfiguration
-    );
-    const reservation = await ctx.repo.reserveStripeCheckout({
-      id: checkoutId,
-      requestId: input.requestId,
-      requestFingerprint: request.fingerprint,
-      frequency: input.frequency,
-      giftType: input.giftType,
-      amountCents: input.amountCents,
-      livemode: stripeConfiguration.livemode,
-      rateLimitClaimId,
-      now: claimNow
+    const providerClaim = await ctx.repo.claimProviderCreationBudget({
+      provider: "STRIPE",
+      clientKeyHash: await rateLimitKey(providerCreationRateIdentity(clientIp)),
+      stripeRequestId: input.requestId,
+      now: claimNow,
+      cutoff: intentThrottleSinceIso(),
+      expiresAt: intentThrottleExpiresIso(),
+      clientLimit: PROVIDER_CREATION_CLIENT_LIMIT,
+      providerLimit: PROVIDER_CREATION_PROVIDER_LIMIT,
+      globalLimit: PROVIDER_CREATION_GLOBAL_LIMIT
     });
-    if (reservation.kind !== "CREATED") {
-      if (reservation.record.rate_limit_claim_id !== rateLimitClaimId) {
-        await ctx.repo.releaseUnusedDonationIntentRateLimitClaim(rateLimitClaimId);
-      }
+    if (providerClaim.kind === "LIMITED") return providerCreationLimitedResponse();
+    if (providerClaim.kind === "DUPLICATE") {
+      const concurrent = await ctx.repo.getStripeCheckoutByRequestId(input.requestId);
+      if (!concurrent) return stripeCheckoutCreationInProgressResponse();
       const plan = await prepareExistingStripeCheckoutCreation(
         ctx,
-        reservation.record,
+        concurrent,
         input,
         stripeConfiguration
       );
       if (plan instanceof Response) return plan;
       ({ checkout, params } = plan);
     } else {
-      checkout = reservation.record;
-      params = request.params;
+      const checkoutId = newId("stripe_checkout");
+      let request: Awaited<ReturnType<typeof buildStripeCheckoutCreationRequest>>;
+      let reservation: Awaited<ReturnType<Repository["reserveStripeCheckout"]>>;
+      try {
+        request = await buildStripeCheckoutCreationRequest(
+          ctx,
+          checkoutId,
+          input,
+          stripeConfiguration
+        );
+        reservation = await ctx.repo.reserveStripeCheckout({
+          id: checkoutId,
+          requestId: input.requestId,
+          requestFingerprint: request.fingerprint,
+          frequency: input.frequency,
+          giftType: input.giftType,
+          amountCents: input.amountCents,
+          livemode: stripeConfiguration.livemode,
+          providerCreationClaimId: providerClaim.id,
+          now: claimNow
+        });
+      } catch (error) {
+        await ctx.repo.releaseUnusedProviderCreationClaim(providerClaim.id);
+        throw error;
+      }
+      if (reservation.kind !== "CREATED") {
+        await ctx.repo.releaseUnusedProviderCreationClaim(providerClaim.id);
+        const plan = await prepareExistingStripeCheckoutCreation(
+          ctx,
+          reservation.record,
+          input,
+          stripeConfiguration
+        );
+        if (plan instanceof Response) return plan;
+        ({ checkout, params } = plan);
+      } else {
+        checkout = reservation.record;
+        params = request.params;
+      }
     }
   }
 
@@ -1653,6 +1686,16 @@ async function existingStripeCheckoutResponse(
       { status: 502, headers: { "Cache-Control": "no-store" } }
     );
   }
+}
+
+function stripeCheckoutCreationInProgressResponse(): Response {
+  return jsonResponse(
+    {
+      error: "stripe_checkout_in_progress",
+      message: "Su entrega se está preparando. Inténtelo de nuevo en un momento."
+    },
+    { status: 409, headers: { "Cache-Control": "no-store" } }
+  );
 }
 
 async function claimStripeProviderRecoveryRead(

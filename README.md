@@ -202,7 +202,7 @@ DiezmosSV/
 │   ├── client/                 # React + Vite admin panel, /donar, fonts, assets
 │   └── shared/                 # Catalogs · DUI · NIT · legal windows · password policy
 │                               # fiscal corrections · checkout · money · email
-├── migrations/                 # D1 schema (incremental, append-only 0001…0044)
+├── migrations/                 # D1 schema (incremental, append-only 0001…0046)
 ├── DTE/svfe-json-schemas/      # MH-bundled JSON schemas for validation
 ├── docs/                       # Deploy/UAT · operator runbook · retention-restore
 │                               # fiscal-claim cutover/reconciliation · pre-CDE recovery
@@ -1037,7 +1037,7 @@ The safety model is the fiscal-claim model applied to a repair path:
 ## 🗄 Data model
 
 <details>
-<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0044)</strong></summary>
+<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0046)</strong></summary>
 
 <br/>
 
@@ -1065,8 +1065,9 @@ The safety model is the fiscal-claim model applied to a repair path:
 | `stripe_invoice_settlement_retention_generations` | Internal monotonic membership ledger for monthly-invoice convergence snapshots. It is not an archive payload and is rebuilt automatically on restore. |
 | `contingency_batches` · `contingency_batch_lines` | Historical MH contingency batch submissions and per-CDE results (read-only). |
 | `app_settings` | Runtime settings (emission environment, email templates, branding, alert email). |
-| `users` · `sessions` · `password_reset_tokens` | Authentication, RBAC, and self-service password reset. |
-| `login_rate_limits` · `security_rate_limit_claims` | D1-backed rate limiting for login, password reset, and public donation intents, with claim provenance recorded on the rows they admit. |
+| `users` · `sessions` · `password_reset_tokens` · `login_step_up_challenges` | Authentication, RBAC, self-service password reset, and short-lived hashed account step-up verification challenges. |
+| `login_rate_limits` · `security_rate_limit_claims` | D1-backed rate limiting for login, password reset, and donor-data capabilities. |
+| `provider_creation_claims` | Atomic 15-minute client, provider, and global budgets for new Wompi links and Stripe Checkout state. IPv6 clients share a normalized `/64`; parent rows retain claim provenance after the expiring ledger is swept. |
 
 Foreign keys are enabled (`PRAGMA foreign_keys = ON`). Access is raw SQL via
 `src/worker/storage/repository.ts` — no ORM.

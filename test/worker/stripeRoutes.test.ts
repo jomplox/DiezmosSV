@@ -60,8 +60,17 @@ describe("Stripe public donation routes", () => {
       "SELECT COUNT(*) AS count FROM stripe_checkout_sessions"
     ).get()).toEqual({ count: 1 });
     expect(database.prepare(
-      "SELECT COUNT(*) AS count FROM security_rate_limit_claims WHERE scope = 'donation_intent'"
+      "SELECT COUNT(*) AS count FROM provider_creation_claims WHERE provider = 'STRIPE'"
     ).get()).toEqual({ count: 1 });
+    const reservationEvidence = database.prepare(
+      `SELECT rate_limit_claim_id, provider_creation_claim_id
+         FROM stripe_checkout_sessions WHERE request_id = ?`
+    ).get(requestId) as {
+      rate_limit_claim_id: string | null;
+      provider_creation_claim_id: string | null;
+    };
+    expect(reservationEvidence.rate_limit_claim_id).toBeNull();
+    expect(reservationEvidence.provider_creation_claim_id).toMatch(/^provider_create_/);
     expect(database.prepare("SELECT COUNT(*) AS count FROM donation_intents").get())
       .toEqual({ count: 0 });
 
@@ -80,6 +89,24 @@ describe("Stripe public donation routes", () => {
       giftType: "offering"
     });
     expect(giftTypeConflict.response.status).toBe(409);
+  });
+
+  it("releases a Stripe provider claim when reservation persistence fails", async () => {
+    workerEnv = { ...workerEnv, DB: withFailingStripeReservation(database) };
+
+    const result = await createCheckout(workerEnv, {
+      requestId,
+      amount: 50,
+      frequency: "once"
+    });
+
+    expect(result.response.status).toBe(500);
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM stripe_checkout_sessions"
+    ).get()).toEqual({ count: 0 });
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM provider_creation_claims WHERE provider = 'STRIPE'"
+    ).get()).toEqual({ count: 0 });
   });
 
   it("reclaims a failed Session reservation with the same request identity", async () => {
@@ -112,7 +139,7 @@ describe("Stripe public donation routes", () => {
       error_code: null
     });
     expect(database.prepare(
-      "SELECT COUNT(*) AS count FROM security_rate_limit_claims WHERE scope = 'donation_intent'"
+      "SELECT COUNT(*) AS count FROM provider_creation_claims WHERE provider = 'STRIPE'"
     ).get()).toEqual({ count: 1 });
   });
 
@@ -146,7 +173,7 @@ describe("Stripe public donation routes", () => {
       error_code: null
     });
     expect(database.prepare(
-      "SELECT COUNT(*) AS count FROM security_rate_limit_claims WHERE scope = 'donation_intent'"
+      "SELECT COUNT(*) AS count FROM provider_creation_claims WHERE provider = 'STRIPE'"
     ).get()).toEqual({ count: 1 });
   });
 
@@ -223,6 +250,14 @@ describe("Stripe public donation routes", () => {
 
     const first = await createCheckout(proxyEnv, { requestId, amount: 50, frequency: "once" });
     expect(first.response.status).toBe(502);
+    const retainedClaim = database.prepare(
+      `SELECT claims.id
+         FROM provider_creation_claims AS claims
+         JOIN stripe_checkout_sessions AS checkout
+           ON checkout.provider_creation_claim_id = claims.id
+        WHERE checkout.request_id = ?`
+    ).get(requestId) as { id: string } | undefined;
+    expect(retainedClaim?.id).toMatch(/^provider_create_/);
     const second = await createCheckout(proxyEnv, { requestId, amount: 50, frequency: "once" });
     expect(second.response.status).toBe(502);
     const third = await createCheckout(proxyEnv, { requestId, amount: 50, frequency: "once" });
@@ -840,21 +875,108 @@ describe("Stripe public donation routes", () => {
     }, "203.0.113.10");
     expect(limited.response.status).toBe(429);
     expect(limited.body).toMatchObject({ error: "too_many_attempts" });
+    expect(limited.response.headers.get("Cache-Control")).toBe("no-store");
   });
 
-  it("releases the duplicate admission claim when concurrent requests converge on one checkout", async () => {
+  it("blocks distinct clients at the Stripe provider ceiling before reservation or provider work", async () => {
+    const now = "2026-07-04T12:00:00.000Z";
+    for (let index = 0; index < 60; index += 1) {
+      database.prepare(
+        `INSERT INTO provider_creation_claims (
+           id, provider, client_key_hash, stripe_request_id, claimed_at, expires_at
+         ) VALUES (?, 'STRIPE', ?, ?, ?, ?)`
+      ).run(
+        `stripe_provider_seed_${index}`,
+        `stripe-client-${index}`,
+        `stripe-request-${index}`,
+        now,
+        "2026-07-04T12:15:00.000Z"
+      );
+    }
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date(now) });
+    const providerFetch = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", providerFetch);
+    try {
+      const limited = await createCheckout(stripeProxyEnv(workerEnv), {
+        requestId,
+        amount: 50,
+        frequency: "once"
+      }, "198.51.100.200");
+
+      expect(limited.response.status).toBe(429);
+      expect(limited.body).toEqual({
+        error: "too_many_attempts",
+        message: "Demasiados intentos. Espere 15 minutos e intente de nuevo."
+      });
+      expect(limited.response.headers.get("Cache-Control")).toBe("no-store");
+      expect(database.prepare("SELECT COUNT(*) AS count FROM stripe_checkout_sessions").get())
+        .toEqual({ count: 0 });
+      expect(providerFetch).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("enforces one shared global ceiling across Wompi and Stripe claims", async () => {
+    const now = "2026-07-04T12:00:00.000Z";
+    for (let index = 0; index < 100; index += 1) {
+      const stripe = index % 2 === 1;
+      database.prepare(
+        `INSERT INTO provider_creation_claims (
+           id, provider, client_key_hash, stripe_request_id, claimed_at, expires_at
+         ) VALUES (?, ?, ?, ?, ?, ?)`
+      ).run(
+        `global_seed_${index}`,
+        stripe ? "STRIPE" : "WOMPI",
+        `global-client-${index}`,
+        stripe ? `global-request-${index}` : null,
+        now,
+        "2026-07-04T12:15:00.000Z"
+      );
+    }
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date(now) });
+    const providerFetch = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", providerFetch);
+    try {
+      const limited = await createCheckout(stripeProxyEnv(workerEnv), {
+        requestId,
+        amount: 50,
+        frequency: "once"
+      }, "198.51.100.201");
+
+      expect(limited.response.status).toBe(429);
+      expect(limited.response.headers.get("Cache-Control")).toBe("no-store");
+      expect(database.prepare("SELECT COUNT(*) AS count FROM stripe_checkout_sessions").get())
+        .toEqual({ count: 0 });
+      expect(providerFetch).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses one claim and one provider call when fresh concurrent requests share a request id", async () => {
+    let providerCalls = 0;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      providerCalls += 1;
+      const request = input instanceof Request ? input : new Request(input, init);
+      return stripeCheckoutJson(new URLSearchParams(await request.text()));
+    }));
     const concurrent = withSynchronizedStripeReservationReads(database);
     concurrent.synchronizeNextPair();
-    const concurrentEnv = { ...workerEnv, DB: concurrent.db };
+    const concurrentEnv = { ...stripeProxyEnv(workerEnv), DB: concurrent.db };
     const [first, second] = await Promise.all([
       createCheckout(concurrentEnv, { requestId, amount: 50, frequency: "once" }, "203.0.113.55"),
       createCheckout(concurrentEnv, { requestId, amount: 50, frequency: "once" }, "203.0.113.55")
     ]);
 
-    expect([first.response.status, second.response.status].sort()).toEqual([200, 201]);
+    expect([first.response.status, second.response.status].sort()).toEqual([201, 409]);
+    expect([first.body.error, second.body.error]).toContain("stripe_checkout_in_progress");
+    expect(providerCalls).toBe(1);
     expect(database.prepare(
-      "SELECT COUNT(*) AS count FROM security_rate_limit_claims WHERE scope = 'donation_intent'"
+      "SELECT COUNT(*) AS count FROM provider_creation_claims WHERE provider = 'STRIPE'"
     ).get()).toEqual({ count: 1 });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM stripe_checkout_sessions").get())
+      .toEqual({ count: 1 });
   });
 });
 
@@ -958,6 +1080,29 @@ function stripeCheckoutObject(params: URLSearchParams): Record<string, unknown> 
     },
     expires_at: 1_786_370_400
   };
+}
+
+function withFailingStripeReservation(
+  database: ReturnType<typeof migratedDatabase>
+): D1Database {
+  const base = sqliteD1(database);
+  return {
+    prepare(sql: string) {
+      const statement = base.prepare(sql);
+      if (sql.includes("INSERT OR IGNORE INTO stripe_checkout_sessions")) {
+        const mutable = statement as unknown as {
+          run: (...args: unknown[]) => Promise<D1Result>;
+        };
+        mutable.run = async () => {
+          throw new Error("injected Stripe reservation persistence failure");
+        };
+      }
+      return statement;
+    },
+    batch(statements: D1PreparedStatement[]) {
+      return base.batch(statements);
+    }
+  } as D1Database;
 }
 
 function withDeferredStripeAttachment(database: ReturnType<typeof migratedDatabase>): {

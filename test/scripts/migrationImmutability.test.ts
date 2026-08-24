@@ -45,7 +45,7 @@ describe("migration immutability checker", () => {
       await loadChecker();
 
     expect(Object.keys(IMMUTABLE_MIGRATION_SHA256).at(-1)).toBe(
-      "0044_stripe_portal_capability.sql"
+      "0046_provider_creation_budgets.sql"
     );
     expect(Object.keys(IMMUTABLE_MIGRATION_SHA256)).toEqual([
       "0001_init.sql",
@@ -91,7 +91,9 @@ describe("migration immutability checker", () => {
       "0041_stripe_annual_email_evidence.sql",
       "0042_stripe_annual_email_evidence_reclaim.sql",
       "0043_stripe_annual_email_evidence_dispatch_guard.sql",
-      "0044_stripe_portal_capability.sql"
+      "0044_stripe_portal_capability.sql",
+      "0045_login_step_up_mfa.sql",
+      "0046_provider_creation_budgets.sql"
     ]);
     expect(() => assertImmutableMigrations(migrationsDirectory)).not.toThrow();
   });
@@ -116,6 +118,21 @@ describe("migration immutability checker", () => {
     expect(() => assertImmutableMigrations(copy)).toThrow(
       /0043_stripe_annual_email_evidence_dispatch_guard\.sql.*modified/i
     );
+  });
+
+  it("fails if either newly pinned remediation migration is modified", async () => {
+    const { assertImmutableMigrations } = await loadChecker();
+    for (const name of [
+      "0045_login_step_up_mfa.sql",
+      "0046_provider_creation_budgets.sql"
+    ]) {
+      const copy = copiedMigrations();
+      const target = join(copy, name);
+      writeFileSync(target, `${readFileSync(target, "utf8")}\n-- mutation\n`);
+      expect(() => assertImmutableMigrations(copy)).toThrow(
+        new RegExp(`${name.replace(".", "\\.")}.*modified`, "i")
+      );
+    }
   });
 
   it("fails if a historical migration is renamed or removed", async () => {
@@ -162,7 +179,7 @@ describe("migration immutability checker", () => {
   it("accepts only the next unique additive migration prefix", async () => {
     const { assertImmutableMigrations } = await loadChecker();
     const copy = copiedMigrations();
-    writeFileSync(join(copy, "0045_future_addition.sql"), "SELECT 1;\n");
+    writeFileSync(join(copy, "0047_future_addition.sql"), "SELECT 1;\n");
 
     expect(() => assertImmutableMigrations(copy)).not.toThrow();
   });

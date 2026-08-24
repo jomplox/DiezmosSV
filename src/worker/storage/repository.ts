@@ -40,6 +40,7 @@ import {
   updateUserPasswordHashIfCurrent as updateUserPasswordHashIfCurrentRepository
 } from "./repository/identity";
 import {
+  claimProviderCreationBudget as claimProviderCreationBudgetRepository,
   claimDonationDatosRateLimit as claimDonationDatosRateLimitRepository,
   claimDonationIntentRateLimit as claimDonationIntentRateLimitRepository,
   claimStripePortalRateLimit as claimStripePortalRateLimitRepository,
@@ -50,6 +51,7 @@ import {
   deleteExpiredLoginRateLimits as deleteExpiredLoginRateLimitsRepository,
   deleteExpiredSecurityRateLimitClaims as deleteExpiredSecurityRateLimitClaimsRepository,
   finalizeStripeProviderRecoveryRead as finalizeStripeProviderRecoveryReadRepository,
+  releaseUnusedProviderCreationClaim as releaseUnusedProviderCreationClaimRepository,
   releaseUnusedDonationIntentRateLimitClaim as releaseUnusedDonationIntentRateLimitClaimRepository
 } from "./repository/rateLimits";
 import {
@@ -1614,6 +1616,16 @@ export class Repository {
       expiresAt,
       limit
     );
+  }
+
+  async claimProviderCreationBudget(
+    input: Parameters<typeof claimProviderCreationBudgetRepository>[1]
+  ): ReturnType<typeof claimProviderCreationBudgetRepository> {
+    return claimProviderCreationBudgetRepository(this.db, input);
+  }
+
+  async releaseUnusedProviderCreationClaim(id: string): Promise<void> {
+    return releaseUnusedProviderCreationClaimRepository(this.db, id);
   }
 
   async releaseUnusedDonationIntentRateLimitClaim(id: string): Promise<void> {

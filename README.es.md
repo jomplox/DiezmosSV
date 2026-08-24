@@ -208,7 +208,7 @@ DiezmosSV/
 │   ├── client/                 # Panel React + Vite, /donar, fuentes, recursos
 │   └── shared/                 # Catálogos · DUI · NIT · ventanas legales · política de contraseñas
 │                               # correcciones fiscales · entrega · montos · correo
-├── migrations/                 # Esquema D1 (incremental, solo se agrega, 0001…0044)
+├── migrations/                 # Esquema D1 (incremental, solo se agrega, 0001…0046)
 ├── DTE/svfe-json-schemas/      # Esquemas JSON de MH para validación
 ├── docs/                       # Despliegue/UAT · manual del operador · restauración de retención
 │                               # cutover/conciliación de claims fiscales · recuperación previa al CDE
@@ -1075,7 +1075,7 @@ El modelo de seguridad es el modelo del claim fiscal aplicado a una ruta de repa
 ## 📚 Modelo de datos
 
 <details>
-<summary><strong>Tablas de D1 (migrations/0001_init.sql, extendidas hasta la 0044)</strong></summary>
+<summary><strong>Tablas de D1 (migrations/0001_init.sql, extendidas hasta la 0046)</strong></summary>
 
 <br/>
 
@@ -1103,8 +1103,9 @@ El modelo de seguridad es el modelo del claim fiscal aplicado a una ruta de repa
 | `stripe_invoice_settlement_retention_generations` | Libro interno y monotónico de pertenencia para instantáneas de convergencia de facturas mensuales. No forma parte del payload archivado y se reconstruye automáticamente al restaurar. |
 | `contingency_batches` · `contingency_batch_lines` | Envíos históricos de lotes de contingencia a MH y sus resultados por CDE (solo lectura). |
 | `app_settings` | Configuración en tiempo de ejecución (ambiente de emisión, plantillas de correo, marca, correo de alertas). |
-| `users` · `sessions` · `password_reset_tokens` | Autenticación, RBAC y restablecimiento de contraseña autogestionado. |
-| `login_rate_limits` · `security_rate_limit_claims` | Limitación de tasa respaldada en D1 para el inicio de sesión, el restablecimiento de contraseña y los intentos públicos de donación, con la procedencia del claim registrada en las filas que admite. |
+| `users` · `sessions` · `password_reset_tokens` · `login_step_up_challenges` | Autenticación, RBAC, restablecimiento de contraseña autogestionado y desafíos breves de verificación escalonada de cuenta, almacenados solo como hashes. |
+| `login_rate_limits` · `security_rate_limit_claims` | Limitación de tasa respaldada en D1 para el inicio de sesión, el restablecimiento de contraseña y las capacidades de datos del donante. |
+| `provider_creation_claims` | Presupuestos atómicos de 15 minutos por cliente, proveedor y global para enlaces Wompi nuevos y estado Checkout de Stripe. Los clientes IPv6 comparten un `/64` normalizado; las filas padre conservan la procedencia del claim después de barrer el libro temporal. |
 
 Las claves foráneas están habilitadas (`PRAGMA foreign_keys = ON`). El acceso es SQL crudo a través de
 `src/worker/storage/repository.ts` — sin ORM.

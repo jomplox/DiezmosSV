@@ -47,6 +47,7 @@ export interface StripeCheckoutRecord {
   donor_phone: string | null;
   donor_address_json: string | null;
   rate_limit_claim_id: string | null;
+  provider_creation_claim_id: string | null;
   error_code: string | null;
   expires_at: string | null;
   completed_at: string | null;
@@ -175,7 +176,7 @@ export async function reserveStripeCheckout(
     giftType: Exclude<StripeGiftType, "UNSPECIFIED">;
     amountCents: number;
     livemode: boolean;
-    rateLimitClaimId: string | null;
+    providerCreationClaimId: string;
     now: string;
   }
 ): Promise<{
@@ -185,7 +186,7 @@ export async function reserveStripeCheckout(
   await db.prepare(
     `INSERT OR IGNORE INTO stripe_checkout_sessions (
        id, request_id, request_fingerprint, frequency, gift_type, amount_cents, currency,
-       livemode, status, payment_status, rate_limit_claim_id, created_at, updated_at
+       livemode, status, payment_status, provider_creation_claim_id, created_at, updated_at
      ) VALUES (?, ?, ?, ?, ?, ?, 'usd', ?, 'CREATING', 'UNPAID', ?, ?, ?)`
   ).bind(
     input.id,
@@ -195,7 +196,7 @@ export async function reserveStripeCheckout(
     input.giftType,
     input.amountCents,
     input.livemode ? 1 : 0,
-    input.rateLimitClaimId,
+    input.providerCreationClaimId,
     input.now,
     input.now
   ).run();

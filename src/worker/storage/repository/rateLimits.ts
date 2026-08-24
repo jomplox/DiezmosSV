@@ -5,6 +5,106 @@ export type StripeProviderRecoveryClaim =
   | { kind: "IN_PROGRESS" }
   | { kind: "LIMITED" };
 
+export type ProviderCreationClaim =
+  | { kind: "CLAIMED"; id: string }
+  | { kind: "DUPLICATE" }
+  | { kind: "LIMITED" };
+
+export async function claimProviderCreationBudget(
+  db: D1Database,
+  input: {
+    provider: "WOMPI" | "STRIPE";
+    clientKeyHash: string;
+    stripeRequestId: string | null;
+    now: string;
+    cutoff: string;
+    expiresAt: string;
+    clientLimit: number;
+    providerLimit: number;
+    globalLimit: number;
+  }
+): Promise<ProviderCreationClaim> {
+  const id = newId("provider_create");
+  // One statement owns all three rolling count decisions. During a rolling
+  // deploy, recent parent rows without a provider claim remain attributed to
+  // their provider/global budgets; attached rows are represented by the claim
+  // itself and are deliberately not double-counted.
+  const row = await db.prepare(
+    `INSERT OR IGNORE INTO provider_creation_claims (
+       id, provider, client_key_hash, stripe_request_id, claimed_at, expires_at
+     )
+     SELECT ?, ?, ?, ?, ?, ?
+      WHERE (
+        SELECT COUNT(*) FROM provider_creation_claims
+         WHERE client_key_hash = ? AND claimed_at >= ?
+      ) < ?
+        AND (
+          (SELECT COUNT(*) FROM provider_creation_claims
+            WHERE provider = ? AND claimed_at >= ?)
+          + CASE WHEN ? = 'WOMPI'
+              THEN (SELECT COUNT(*) FROM donation_intents
+                     WHERE provider_creation_claim_id IS NULL AND created_at >= ?)
+              ELSE (SELECT COUNT(*) FROM stripe_checkout_sessions
+                     WHERE provider_creation_claim_id IS NULL AND created_at >= ?)
+            END
+        ) < ?
+        AND (
+          (SELECT COUNT(*) FROM provider_creation_claims WHERE claimed_at >= ?)
+          + (SELECT COUNT(*) FROM donation_intents
+             WHERE provider_creation_claim_id IS NULL AND created_at >= ?)
+          + (SELECT COUNT(*) FROM stripe_checkout_sessions
+             WHERE provider_creation_claim_id IS NULL AND created_at >= ?)
+        ) < ?
+     RETURNING id`
+  ).bind(
+    id,
+    input.provider,
+    input.clientKeyHash,
+    input.stripeRequestId,
+    input.now,
+    input.expiresAt,
+    input.clientKeyHash,
+    input.cutoff,
+    input.clientLimit,
+    input.provider,
+    input.cutoff,
+    input.provider,
+    input.cutoff,
+    input.cutoff,
+    input.providerLimit,
+    input.cutoff,
+    input.cutoff,
+    input.cutoff,
+    input.globalLimit
+  ).first<{ id: string }>();
+  if (row) return { kind: "CLAIMED", id: row.id };
+  if (input.provider === "STRIPE" && input.stripeRequestId) {
+    const duplicate = await db.prepare(
+      `SELECT id FROM provider_creation_claims
+        WHERE provider = 'STRIPE' AND stripe_request_id = ?
+        LIMIT 1`
+    ).bind(input.stripeRequestId).first<{ id: string }>();
+    if (duplicate) return { kind: "DUPLICATE" };
+  }
+  return { kind: "LIMITED" };
+}
+
+export async function releaseUnusedProviderCreationClaim(
+  db: D1Database,
+  id: string
+): Promise<void> {
+  await db.prepare(
+    `DELETE FROM provider_creation_claims
+      WHERE id = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM donation_intents WHERE provider_creation_claim_id = ?
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM stripe_checkout_sessions WHERE provider_creation_claim_id = ?
+        )`
+  ).bind(id, id, id).run();
+}
+
 export async function claimDonationIntentRateLimit(
   db: D1Database,
   keyHash: string,
@@ -361,5 +461,8 @@ export async function deleteExpiredSecurityRateLimitClaims(
   ).bind(now).run();
   await db.prepare(
     "DELETE FROM stripe_portal_rate_limit_claims WHERE expires_at <= ?"
+  ).bind(now).run();
+  await db.prepare(
+    "DELETE FROM provider_creation_claims WHERE expires_at <= ?"
   ).bind(now).run();
 }

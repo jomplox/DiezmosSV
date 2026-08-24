@@ -5,6 +5,8 @@ import { utf8Bytes } from "../../src/worker/utils/encoding";
 import type { Env } from "../../src/worker/types";
 import { env, InMemoryD1 } from "./support/inMemoryD1";
 import { emisorConfig, generatedCertificateXml } from "./support/dteFixtures";
+import { migratedDatabase } from "./support/migratedDatabase";
+import { sqliteD1 } from "./support/sqliteD1";
 import { installWorkerFetchGlobals } from "./support/workerFetchGlobals";
 import { sha256Hex } from "./support/workerFetchHelpers";
 
@@ -130,7 +132,8 @@ describe("donation intents", () => {
     expect(intent.donor_email).toBeNull();
     expect(intent.client_ip).toBe("203.0.113.7");
     expect(intent.wompi_url_enlace).toBe(payload.urlEnlace);
-    expect(intent.rate_limit_claim_id).toBe(db.securityRateLimitClaims[0].id);
+    expect(intent.rate_limit_claim_id).toBeNull();
+    expect(intent.provider_creation_claim_id).toBe(providerCreationClaims(db)[0].id);
 
     // Audit records the intent creation with amount + document type, never the number.
     const audit = db.audits.find((row) => row.action === "DONATION_INTENT_CREATED");
@@ -139,6 +142,26 @@ describe("donation intents", () => {
     expect(audit?.entity_id).toBe(payload.intentId);
     const metadata = JSON.stringify(audit?.metadata_json ?? "");
     expect(metadata).not.toContain("04182769");
+  });
+
+  it("releases a Wompi provider claim when parent persistence fails", async () => {
+    const db = new InMemoryD1();
+    const prepare = db.prepare.bind(db);
+    db.prepare = (sql: string) => {
+      const statement = prepare(sql);
+      if (sql.includes("INSERT INTO donation_intents")) {
+        statement.run = async () => {
+          throw new Error("injected donation persistence failure");
+        };
+      }
+      return statement;
+    };
+
+    const response = await worker.fetch(intentRequest(validIntentBody()), env(db));
+
+    expect(response.status).toBe(500);
+    expect(db.donationIntents).toHaveLength(0);
+    expect(providerCreationClaims(db)).toHaveLength(0);
   });
 
   it("atomically admits at most five overlapping intent creations from one IP", async () => {
@@ -151,32 +174,133 @@ describe("donation intents", () => {
     expect(responses.filter((response) => response.status === 201)).toHaveLength(5);
     expect(responses.filter((response) => response.status === 429)).toHaveLength(15);
     expect(db.donationIntents).toHaveLength(5);
-    expect(db.securityRateLimitClaims.filter((claim) => claim.scope === "donation_intent")).toHaveLength(5);
-    const [claim] = db.securityRateLimitClaims;
-    expect(claim.key_hash).toMatch(/^[a-f0-9]{64}$/);
-    expect(claim.key_hash).not.toContain("203.0.113.7");
+    const claims = providerCreationClaims(db);
+    expect(claims).toHaveLength(5);
+    const [claim] = claims;
+    expect(claim.client_key_hash).toMatch(/^[a-f0-9]{64}$/);
+    expect(claim.client_key_hash).not.toContain("203.0.113.7");
   });
 
-  it("counts pre-ledger intents while atomically admitting overlapping creations", async () => {
+  it("groups compressed and long IPv6 variants by /64 while preserving the raw source IP", async () => {
+    const db = new InMemoryD1();
+    const samePrefix = [
+      "2001:0DB8:1234:5678::1",
+      "2001:db8:1234:5678:0:0:0:2",
+      "2001:0db8:1234:5678:abcd::3",
+      "2001:db8:1234:5678:ffff:0:0:4",
+      "2001:db8:1234:5678:ffff:ffff:ffff:ffff"
+    ];
+    const statuses: number[] = [];
+    for (const ip of samePrefix) {
+      statuses.push((await worker.fetch(
+        intentRequest(validIntentBody(), { "cf-connecting-ip": ip }),
+        env(db)
+      )).status);
+    }
+    statuses.push((await worker.fetch(
+      intentRequest(validIntentBody(), { "cf-connecting-ip": "2001:db8:1234:5678::99" }),
+      env(db)
+    )).status);
+    statuses.push((await worker.fetch(
+      intentRequest(validIntentBody(), { "cf-connecting-ip": "2001:db8:1234:5679::1" }),
+      env(db)
+    )).status);
+
+    expect(statuses).toEqual([201, 201, 201, 201, 201, 429, 201]);
+    expect(db.donationIntents[0].client_ip).toBe("2001:0DB8:1234:5678::1");
+    expect(new Set(providerCreationClaims(db).map((claim) => claim.client_key_hash)).size).toBe(2);
+  });
+
+  it("collapses malformed, bracketed, port, zone, proxy-list, and missing IPs into one bucket", async () => {
+    const db = new InMemoryD1();
+    const malformed = [
+      "",
+      "[2001:db8::1]",
+      "203.0.113.7:443",
+      "fe80::1%eth0",
+      "203.0.113.7, 198.51.100.8",
+      "not-an-ip"
+    ];
+    const statuses: number[] = [];
+    for (const ip of malformed) {
+      statuses.push((await worker.fetch(
+        intentRequest(validIntentBody(), { "cf-connecting-ip": ip }),
+        env(db)
+      )).status);
+    }
+
+    expect(statuses).toEqual([201, 201, 201, 201, 201, 429]);
+    expect(db.donationIntents[1].client_ip).toBe("[2001:db8::1]");
+    expect(new Set(providerCreationClaims(db).map((claim) => claim.client_key_hash)).size).toBe(1);
+  });
+
+  it("keeps the IPv6 /64 and unknown-bucket behavior on real SQLite", async () => {
+    const ipv6Database = migratedDatabase();
+    const malformedDatabase = migratedDatabase();
+    try {
+      const ipv6Env = { ...env(new InMemoryD1()), DB: sqliteD1(ipv6Database) };
+      const ipv6Addresses = [
+        "2001:0DB8:AAAA:BBBB::1",
+        "2001:db8:aaaa:bbbb:0:0:0:2",
+        "2001:db8:aaaa:bbbb:1111::3",
+        "2001:db8:aaaa:bbbb:2222::4",
+        "2001:db8:aaaa:bbbb:ffff:ffff:ffff:ffff",
+        "2001:db8:aaaa:bbbb::99",
+        "2001:db8:aaaa:bbbc::1"
+      ];
+      const ipv6Statuses: number[] = [];
+      for (const ip of ipv6Addresses) {
+        ipv6Statuses.push((await worker.fetch(
+          intentRequest(validIntentBody(), { "cf-connecting-ip": ip }),
+          ipv6Env
+        )).status);
+      }
+      expect(ipv6Statuses).toEqual([201, 201, 201, 201, 201, 429, 201]);
+      expect(ipv6Database.prepare(
+        "SELECT client_ip FROM donation_intents ORDER BY created_at, rowid LIMIT 1"
+      ).get()).toEqual({ client_ip: "2001:0DB8:AAAA:BBBB::1" });
+
+      const malformedEnv = { ...env(new InMemoryD1()), DB: sqliteD1(malformedDatabase) };
+      const malformedStatuses: number[] = [];
+      for (const ip of ["", "[::1]", "192.0.2.1:80", "fe80::1%lo0", "192.0.2.1,198.51.100.1", "bad"]) {
+        malformedStatuses.push((await worker.fetch(
+          intentRequest(validIntentBody(), { "cf-connecting-ip": ip }),
+          malformedEnv
+        )).status);
+      }
+      expect(malformedStatuses).toEqual([201, 201, 201, 201, 201, 429]);
+    } finally {
+      ipv6Database.close();
+      malformedDatabase.close();
+    }
+  });
+
+  it("counts unattributed rolling-deploy Wompi rows in the provider ceiling", async () => {
     vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:00:00.000Z") });
     try {
       const db = new InMemoryD1();
-      for (let index = 0; index < 2; index += 1) {
+      for (let index = 0; index < 59; index += 1) {
         db.donationIntents.push({
           id: `legacy_intent_${index}`,
-          client_ip: "203.0.113.7",
-          created_at: `2026-07-04T11:5${index}:00.000Z`
+          client_ip: `198.51.100.${index + 1}`,
+          provider_creation_claim_id: null,
+          created_at: "2026-07-04T11:50:00.000Z"
         });
       }
 
       const responses = await Promise.all(
-        Array.from({ length: 20 }, () => worker.fetch(intentRequest(validIntentBody()), env(db)))
+        Array.from({ length: 20 }, (_, index) => worker.fetch(
+          intentRequest(validIntentBody(), { "cf-connecting-ip": `203.0.113.${index + 1}` }),
+          env(db)
+        ))
       );
 
-      expect(responses.filter((response) => response.status === 201)).toHaveLength(3);
-      expect(responses.filter((response) => response.status === 429)).toHaveLength(17);
-      expect(db.donationIntents).toHaveLength(5);
-      expect(db.securityRateLimitClaims.filter((claim) => claim.scope === "donation_intent")).toHaveLength(3);
+      expect(responses.filter((response) => response.status === 201)).toHaveLength(1);
+      expect(responses.filter((response) => response.status === 429)).toHaveLength(19);
+      expect(responses.find((response) => response.status === 429)?.headers.get("Cache-Control"))
+        .toBe("no-store");
+      expect(db.donationIntents).toHaveLength(60);
+      expect(providerCreationClaims(db)).toHaveLength(1);
     } finally {
       vi.useRealTimers();
     }
@@ -485,14 +609,15 @@ describe("donation intents", () => {
     vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:00:00.000Z") });
     try {
       const db = new InMemoryD1();
-      // Five intents already created by this IP inside the window.
+      const clientKeyHash = await sha256Hex(utf8Bytes("203.0.113.7"));
       for (let i = 0; i < 5; i += 1) {
-        db.donationIntents.push({
-          id: `di_seed_${i}`,
-          status: "LINK_CREATED",
-          client_ip: "203.0.113.7",
-          expires_at: "2026-07-04T13:00:00.000Z",
-          created_at: `2026-07-04T11:5${i}:00.000Z`
+        providerCreationClaims(db).push({
+          id: `provider_seed_${i}`,
+          provider: "WOMPI",
+          client_key_hash: clientKeyHash,
+          stripe_request_id: null,
+          expires_at: "2026-07-04T12:15:00.000Z",
+          claimed_at: `2026-07-04T11:5${i}:00.000Z`
         });
       }
 
@@ -504,7 +629,7 @@ describe("donation intents", () => {
         message: "Demasiados intentos. Espere 15 minutos e intente de nuevo."
       });
       // No new intent was created.
-      expect(db.donationIntents).toHaveLength(5);
+      expect(db.donationIntents).toHaveLength(0);
     } finally {
       vi.useRealTimers();
     }
@@ -542,6 +667,9 @@ describe("donation intents", () => {
       await expect(response.json()).resolves.toMatchObject({ error: "wompi_link_failed" });
       expect(db.donationIntents).toHaveLength(1);
       expect(db.donationIntents[0].status).toBe("PENDING");
+      expect(providerCreationClaims(db)).toHaveLength(1);
+      expect(db.donationIntents[0].provider_creation_claim_id)
+        .toBe(providerCreationClaims(db)[0].id);
       expect(fetchSpy).toHaveBeenCalledTimes(2);
       const [tokenUrl, tokenInit] = fetchSpy.mock.calls[0];
       expect(tokenUrl).toBe("https://id.wompi.sv/connect/token");
@@ -575,6 +703,9 @@ describe("donation intents", () => {
       await expect(response.json()).resolves.toMatchObject({ error: "wompi_link_failed" });
       expect(db.donationIntents).toHaveLength(1);
       expect(db.donationIntents[0].status).toBe("PENDING");
+      expect(providerCreationClaims(db)).toHaveLength(1);
+      expect(db.donationIntents[0].provider_creation_claim_id)
+        .toBe(providerCreationClaims(db)[0].id);
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
       fetchSpy.mockRestore();
@@ -1068,14 +1199,22 @@ describe("donation intents", () => {
 
     it("applies the same per-IP throttle to draft creates", async () => {
       const db = new InMemoryD1();
+      const clientKeyHash = await sha256Hex(utf8Bytes("203.0.113.7"));
       for (let i = 0; i < 5; i += 1) {
-        db.donationIntents.push({ id: `di_seed_${i}`, client_ip: "203.0.113.7", created_at: "2026-07-04T12:00:00.000Z" });
+        providerCreationClaims(db).push({
+          id: `provider_seed_${i}`,
+          provider: "WOMPI",
+          client_key_hash: clientKeyHash,
+          stripe_request_id: null,
+          claimed_at: "2026-07-04T12:00:00.000Z",
+          expires_at: "2026-07-04T12:15:00.000Z"
+        });
       }
       vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:05:00.000Z") });
       try {
         const response = await worker.fetch(draftRequest({ amount: "25.00", giftType: "DIEZMO" }), env(db));
         expect(response.status).toBe(429);
-        expect(db.donationIntents).toHaveLength(5);
+        expect(db.donationIntents).toHaveLength(0);
       } finally {
         vi.useRealTimers();
       }
@@ -1431,3 +1570,10 @@ describe("donation intents", () => {
     });
   });
 });
+
+function providerCreationClaims(db: InMemoryD1): Array<Record<string, unknown>> {
+  const claims = (db as unknown as { providerCreationClaims?: Array<Record<string, unknown>> })
+    .providerCreationClaims;
+  expect(claims, "the in-memory D1 mirrors provider creation claims").toBeInstanceOf(Array);
+  return claims ?? [];
+}

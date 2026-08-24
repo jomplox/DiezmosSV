@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
@@ -5,7 +7,7 @@ import { AuthService, hashForStorage, hashPassword } from "../../src/worker/serv
 import { Repository } from "../../src/worker/storage/repository";
 import { utf8Bytes } from "../../src/worker/utils/encoding";
 import { env, InMemoryD1 } from "./support/inMemoryD1";
-import { migratedDatabase } from "./support/migratedDatabase";
+import { migratedDatabase, migratedDatabaseThrough } from "./support/migratedDatabase";
 import { sqliteD1 } from "./support/sqliteD1";
 import { makeDocument as testDocument } from "./fixtures";
 import { installWorkerFetchGlobals } from "./support/workerFetchGlobals";
@@ -233,6 +235,351 @@ describe("login step-up migration", () => {
       })).resolves.toMatchObject(snapshot);
     } finally {
       database.close();
+    }
+  });
+});
+
+describe("provider creation budget migration", () => {
+  const migrationPath = resolve(
+    import.meta.dirname,
+    "../../migrations/0046_provider_creation_budgets.sql"
+  );
+
+  it("installs the checked provider ledger, count indexes, and parent evidence columns", () => {
+    const database = migratedDatabase();
+    try {
+      const table = database.prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'provider_creation_claims'"
+      ).get() as { sql: string } | undefined;
+      expect(table, "migration 0046 must create the provider claim ledger").toBeDefined();
+      if (!table) return;
+
+      const indexes = database.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'provider_creation_claims'"
+      ).all().map((row) => String((row as { name: string }).name));
+      expect(indexes).toEqual(expect.arrayContaining([
+        "idx_provider_creation_claims_client_claimed",
+        "idx_provider_creation_claims_provider_claimed",
+        "idx_provider_creation_claims_global_claimed",
+        "idx_provider_creation_claims_expires",
+        "idx_provider_creation_claims_stripe_request"
+      ]));
+
+      expect(database.prepare("PRAGMA table_info(donation_intents)").all())
+        .toEqual(expect.arrayContaining([expect.objectContaining({ name: "provider_creation_claim_id" })]));
+      expect(database.prepare("PRAGMA table_info(stripe_checkout_sessions)").all())
+        .toEqual(expect.arrayContaining([expect.objectContaining({ name: "provider_creation_claim_id" })]));
+      expect(database.prepare("PRAGMA foreign_key_list(donation_intents)").all())
+        .not.toEqual(expect.arrayContaining([expect.objectContaining({ from: "provider_creation_claim_id" })]));
+      expect(database.prepare("PRAGMA foreign_key_list(stripe_checkout_sessions)").all())
+        .not.toEqual(expect.arrayContaining([expect.objectContaining({ from: "provider_creation_claim_id" })]));
+
+      expect(() => database.prepare(
+        `INSERT INTO provider_creation_claims (
+           id, provider, client_key_hash, stripe_request_id, claimed_at, expires_at
+         ) VALUES ('bad_provider', 'PAYPAL', 'client', NULL, '2026-07-04T12:00:00.000Z', '2026-07-04T12:15:00.000Z')`
+      ).run()).toThrow(/CHECK constraint failed/);
+
+      expect(() => database.prepare(
+        `INSERT INTO provider_creation_claims (
+           id, provider, client_key_hash, stripe_request_id, claimed_at, expires_at
+         ) VALUES ('bad_wompi_request', 'WOMPI', 'client', 'request-one', '2026-07-04T12:00:00.000Z', '2026-07-04T12:15:00.000Z')`
+      ).run()).toThrow(/CHECK constraint failed/);
+
+      expect(() => database.prepare(
+        `INSERT INTO provider_creation_claims (
+           id, provider, client_key_hash, stripe_request_id, claimed_at, expires_at
+         ) VALUES ('bad_stripe_request', 'STRIPE', 'client', NULL, '2026-07-04T12:00:00.000Z', '2026-07-04T12:15:00.000Z')`
+      ).run()).toThrow(/CHECK constraint failed/);
+
+      database.prepare(
+        `INSERT INTO provider_creation_claims (
+           id, provider, client_key_hash, stripe_request_id, claimed_at, expires_at
+         ) VALUES (?, 'STRIPE', ?, ?, ?, ?)`
+      ).run(
+        "stripe_claim_one",
+        "client-one",
+        "request-one",
+        "2026-07-04T12:00:00.000Z",
+        "2026-07-04T12:15:00.000Z"
+      );
+      expect(() => database.prepare(
+        `INSERT INTO provider_creation_claims (
+           id, provider, client_key_hash, stripe_request_id, claimed_at, expires_at
+         ) VALUES (?, 'STRIPE', ?, ?, ?, ?)`
+      ).run(
+        "stripe_claim_two",
+        "client-two",
+        "request-one",
+        "2026-07-04T12:00:00.000Z",
+        "2026-07-04T12:15:00.000Z"
+      )).toThrow(/UNIQUE constraint failed/);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("upgrades an exact 0045 database through additive 0046", () => {
+    expect(existsSync(migrationPath), "migration 0046 exists").toBe(true);
+    if (!existsSync(migrationPath)) return;
+    const database = migratedDatabaseThrough("0045");
+    try {
+      expect(database.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'provider_creation_claims'"
+      ).get()).toBeUndefined();
+
+      database.exec(readFileSync(migrationPath, "utf8"));
+
+      expect(database.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'provider_creation_claims'"
+      ).get()).toEqual({ name: "provider_creation_claims" });
+      expect(database.prepare("PRAGMA table_info(donation_intents)").all())
+        .toEqual(expect.arrayContaining([expect.objectContaining({ name: "provider_creation_claim_id" })]));
+      expect(database.prepare("PRAGMA table_info(stripe_checkout_sessions)").all())
+        .toEqual(expect.arrayContaining([expect.objectContaining({ name: "provider_creation_claim_id" })]));
+    } finally {
+      database.close();
+    }
+  });
+});
+
+describe("provider creation budget repository", () => {
+  const now = "2026-07-04T12:00:00.000Z";
+  const cutoff = "2026-07-04T11:45:00.000Z";
+  const expiresAt = "2026-07-04T12:15:00.000Z";
+
+  it("atomically caps concurrent SQLite claims at injected client, provider, and global ceilings", async () => {
+    const clientDatabase = migratedDatabase();
+    const providerDatabase = migratedDatabase();
+    const globalDatabase = migratedDatabase();
+    try {
+      const clientRepo = new Repository(sqliteD1(clientDatabase));
+      const clientClaims = await Promise.all(Array.from({ length: 20 }, () =>
+        claimProviderCreationBudgetForTest(clientRepo, {
+          provider: "WOMPI",
+          clientKeyHash: "same-client",
+          stripeRequestId: null,
+          now,
+          cutoff,
+          expiresAt,
+          clientLimit: 2,
+          providerLimit: 20,
+          globalLimit: 20
+        })
+      ));
+      expect(clientClaims.filter((claim) => claim.kind === "CLAIMED")).toHaveLength(2);
+
+      const providerRepo = new Repository(sqliteD1(providerDatabase));
+      const providerClaims = await Promise.all(Array.from({ length: 20 }, (_, index) =>
+        claimProviderCreationBudgetForTest(providerRepo, {
+          provider: "STRIPE",
+          clientKeyHash: `provider-client-${index}`,
+          stripeRequestId: `provider-request-${index}`,
+          now,
+          cutoff,
+          expiresAt,
+          clientLimit: 20,
+          providerLimit: 3,
+          globalLimit: 20
+        })
+      ));
+      expect(providerClaims.filter((claim) => claim.kind === "CLAIMED")).toHaveLength(3);
+
+      const globalRepo = new Repository(sqliteD1(globalDatabase));
+      const globalClaims = await Promise.all(Array.from({ length: 20 }, (_, index) =>
+        claimProviderCreationBudgetForTest(globalRepo, {
+          provider: index % 2 === 0 ? "WOMPI" : "STRIPE",
+          clientKeyHash: `global-client-${index}`,
+          stripeRequestId: index % 2 === 0 ? null : `global-request-${index}`,
+          now,
+          cutoff,
+          expiresAt,
+          clientLimit: 20,
+          providerLimit: 20,
+          globalLimit: 4
+        })
+      ));
+      expect(globalClaims.filter((claim) => claim.kind === "CLAIMED")).toHaveLength(4);
+    } finally {
+      clientDatabase.close();
+      providerDatabase.close();
+      globalDatabase.close();
+    }
+  });
+
+  it("matches the atomic low-ceiling behavior in the in-memory D1 emulator", async () => {
+    const db = new InMemoryD1();
+    const repo = new Repository(db as unknown as D1Database);
+    const claims = await Promise.all(Array.from({ length: 20 }, (_, index) =>
+      claimProviderCreationBudgetForTest(repo, {
+        provider: index % 2 === 0 ? "WOMPI" : "STRIPE",
+        clientKeyHash: `memory-client-${index}`,
+        stripeRequestId: index % 2 === 0 ? null : `memory-request-${index}`,
+        now,
+        cutoff,
+        expiresAt,
+        clientLimit: 20,
+        providerLimit: 20,
+        globalLimit: 4
+      })
+    ));
+
+    expect(claims.filter((claim) => claim.kind === "CLAIMED")).toHaveLength(4);
+    expect(providerClaimsFrom(db)).toHaveLength(4);
+  });
+
+  it("releases only unused claims and preserves attached Wompi and Stripe evidence", async () => {
+    const database = migratedDatabase();
+    try {
+      const repo = new Repository(sqliteD1(database));
+      const unused = await claimProviderCreationBudgetForTest(repo, {
+        provider: "WOMPI",
+        clientKeyHash: "unused-client",
+        stripeRequestId: null,
+        now,
+        cutoff,
+        expiresAt,
+        clientLimit: 20,
+        providerLimit: 20,
+        globalLimit: 20
+      });
+      expect(unused.kind).toBe("CLAIMED");
+      if (unused.kind !== "CLAIMED") return;
+      await releaseProviderCreationClaimForTest(repo, unused.id);
+      expect(database.prepare(
+        "SELECT COUNT(*) AS count FROM provider_creation_claims WHERE id = ?"
+      ).get(unused.id)).toEqual({ count: 0 });
+
+      const wompi = await claimProviderCreationBudgetForTest(repo, {
+        provider: "WOMPI",
+        clientKeyHash: "wompi-attached-client",
+        stripeRequestId: null,
+        now,
+        cutoff,
+        expiresAt,
+        clientLimit: 20,
+        providerLimit: 20,
+        globalLimit: 20
+      });
+      const stripe = await claimProviderCreationBudgetForTest(repo, {
+        provider: "STRIPE",
+        clientKeyHash: "stripe-attached-client",
+        stripeRequestId: "stripe-attached-request",
+        now,
+        cutoff,
+        expiresAt,
+        clientLimit: 20,
+        providerLimit: 20,
+        globalLimit: 20
+      });
+      expect(wompi.kind).toBe("CLAIMED");
+      expect(stripe.kind).toBe("CLAIMED");
+      if (wompi.kind !== "CLAIMED" || stripe.kind !== "CLAIMED") return;
+
+      database.prepare(
+        `INSERT INTO donation_intents (
+           id, status, amount_cents, donor_document_type, client_ip, expires_at,
+           provider_creation_claim_id, created_at, updated_at
+         ) VALUES (?, 'PENDING', 1000, '13', '203.0.113.1', ?, ?, ?, ?)`
+      ).run("attached_wompi", expiresAt, wompi.id, now, now);
+      database.prepare(
+        `INSERT INTO stripe_checkout_sessions (
+           id, request_id, request_fingerprint, frequency, gift_type, amount_cents,
+           currency, livemode, status, payment_status, provider_creation_claim_id,
+           created_at, updated_at
+         ) VALUES (?, ?, 'v2:test', 'ONCE', 'TITHE', 1000,
+                   'usd', 0, 'CREATING', 'UNPAID', ?, ?, ?)`
+      ).run("attached_stripe", "attached-stripe-request", stripe.id, now, now);
+
+      await releaseProviderCreationClaimForTest(repo, wompi.id);
+      await releaseProviderCreationClaimForTest(repo, stripe.id);
+      expect(database.prepare(
+        "SELECT COUNT(*) AS count FROM provider_creation_claims WHERE id IN (?, ?)"
+      ).get(wompi.id, stripe.id)).toEqual({ count: 2 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("counts unattributed legacy parents globally without double-counting attached parents", async () => {
+    const legacyDatabase = migratedDatabase();
+    const attachedDatabase = migratedDatabase();
+    try {
+      legacyDatabase.prepare(
+        `INSERT INTO donation_intents (
+           id, status, amount_cents, donor_document_type, client_ip, expires_at,
+           created_at, updated_at
+         ) VALUES ('legacy_wompi', 'PENDING', 1000, '13', '198.51.100.1', ?, ?, ?)`
+      ).run(expiresAt, now, now);
+      legacyDatabase.prepare(
+        `INSERT INTO stripe_checkout_sessions (
+           id, request_id, request_fingerprint, frequency, gift_type, amount_cents,
+           currency, livemode, status, payment_status, created_at, updated_at
+         ) VALUES ('legacy_stripe', 'legacy-stripe-request', 'v2:legacy', 'ONCE', 'TITHE',
+                   1000, 'usd', 0, 'CREATING', 'UNPAID', ?, ?)`
+      ).run(now, now);
+      const legacyRepo = new Repository(sqliteD1(legacyDatabase));
+      const legacyStripeProviderClaim = await claimProviderCreationBudgetForTest(legacyRepo, {
+        provider: "STRIPE",
+        clientKeyHash: "legacy-stripe-provider-client",
+        stripeRequestId: "fresh-stripe-request",
+        now,
+        cutoff,
+        expiresAt,
+        clientLimit: 20,
+        providerLimit: 1,
+        globalLimit: 20
+      });
+      expect(legacyStripeProviderClaim).toEqual({ kind: "LIMITED" });
+
+      const legacyClaim = await claimProviderCreationBudgetForTest(legacyRepo, {
+          provider: "WOMPI",
+          clientKeyHash: "legacy-global-client",
+          stripeRequestId: null,
+          now,
+          cutoff,
+          expiresAt,
+          clientLimit: 20,
+          providerLimit: 20,
+          globalLimit: 2
+      });
+      expect(legacyClaim).toEqual({ kind: "LIMITED" });
+
+      const attachedRepo = new Repository(sqliteD1(attachedDatabase));
+      const first = await claimProviderCreationBudgetForTest(attachedRepo, {
+        provider: "WOMPI",
+        clientKeyHash: "attached-global-one",
+        stripeRequestId: null,
+        now,
+        cutoff,
+        expiresAt,
+        clientLimit: 20,
+        providerLimit: 20,
+        globalLimit: 2
+      });
+      expect(first.kind).toBe("CLAIMED");
+      if (first.kind !== "CLAIMED") return;
+      attachedDatabase.prepare(
+        `INSERT INTO donation_intents (
+           id, status, amount_cents, donor_document_type, client_ip, expires_at,
+           provider_creation_claim_id, created_at, updated_at
+         ) VALUES ('attached_global_wompi', 'PENDING', 1000, '13', '198.51.100.2', ?, ?, ?, ?)`
+      ).run(expiresAt, first.id, now, now);
+      const second = await claimProviderCreationBudgetForTest(attachedRepo, {
+        provider: "STRIPE",
+        clientKeyHash: "attached-global-two",
+        stripeRequestId: "attached-global-request",
+        now,
+        cutoff,
+        expiresAt,
+        clientLimit: 20,
+        providerLimit: 20,
+        globalLimit: 2
+      });
+      expect(second.kind).toBe("CLAIMED");
+    } finally {
+      legacyDatabase.close();
+      attachedDatabase.close();
     }
   });
 });
@@ -1003,6 +1350,15 @@ describe("auth rate limiting", () => {
         claimed_at: "2026-07-04T11:00:00.000Z",
         expires_at: "2026-07-04T11:15:00.000Z"
       });
+      const providerClaims = providerClaimsFrom(db);
+      providerClaims.push({
+        id: "expired-provider-claim",
+        provider: "WOMPI",
+        client_key_hash: "expired-provider-hash",
+        stripe_request_id: null,
+        claimed_at: "2026-07-04T11:00:00.000Z",
+        expires_at: "2026-07-04T11:15:00.000Z"
+      });
       db.loginStepUpChallenges.push({
         id: "login_mfa_expired",
         user_id: "user_expired",
@@ -1039,6 +1395,7 @@ describe("auth rate limiting", () => {
       expect(db.loginRateLimits.has("expired-hash")).toBe(false);
       expect(db.loginRateLimits.size).toBe(1);
       expect(db.securityRateLimitClaims).toHaveLength(0);
+      expect(providerClaims).toHaveLength(0);
       expect(db.loginStepUpChallenges).toHaveLength(0);
     });
 
@@ -2171,4 +2528,52 @@ function bootstrapRequest(options: { token?: string; password?: string } = {}, c
       password: options.password ?? "Long-enough1!"
     })
   });
+}
+
+type ProviderBudgetTestInput = {
+  provider: "WOMPI" | "STRIPE";
+  clientKeyHash: string;
+  stripeRequestId: string | null;
+  now: string;
+  cutoff: string;
+  expiresAt: string;
+  clientLimit: number;
+  providerLimit: number;
+  globalLimit: number;
+};
+
+type ProviderBudgetTestResult =
+  | { kind: "CLAIMED"; id: string }
+  | { kind: "DUPLICATE" }
+  | { kind: "LIMITED" };
+
+async function claimProviderCreationBudgetForTest(
+  repo: Repository,
+  input: ProviderBudgetTestInput
+): Promise<ProviderBudgetTestResult> {
+  const method = (repo as unknown as {
+    claimProviderCreationBudget?: (value: ProviderBudgetTestInput) => Promise<ProviderBudgetTestResult>;
+  }).claimProviderCreationBudget;
+  expect(method, "repository exposes the provider creation claim boundary").toBeTypeOf("function");
+  if (!method) return { kind: "LIMITED" };
+  return method.call(repo, input);
+}
+
+async function releaseProviderCreationClaimForTest(
+  repo: Repository,
+  id: string
+): Promise<void> {
+  const method = (repo as unknown as {
+    releaseUnusedProviderCreationClaim?: (claimId: string) => Promise<void>;
+  }).releaseUnusedProviderCreationClaim;
+  expect(method, "repository exposes safe provider claim release").toBeTypeOf("function");
+  if (!method) return;
+  await method.call(repo, id);
+}
+
+function providerClaimsFrom(db: InMemoryD1): Array<Record<string, unknown>> {
+  const claims = (db as unknown as { providerCreationClaims?: Array<Record<string, unknown>> })
+    .providerCreationClaims;
+  expect(claims, "the in-memory D1 mirrors provider creation claims").toBeInstanceOf(Array);
+  return claims ?? [];
 }

@@ -131,6 +131,15 @@ export interface SecurityRateLimitClaimRow {
   expires_at: string;
 }
 
+export interface ProviderCreationClaimRow {
+  id: string;
+  provider: "WOMPI" | "STRIPE";
+  client_key_hash: string;
+  stripe_request_id: string | null;
+  claimed_at: string;
+  expires_at: string;
+}
+
 export interface LoginStepUpChallengeRow {
   id: string;
   user_id: string;
@@ -196,6 +205,7 @@ export class InMemoryD1 {
   readonly audits: Array<Record<string, unknown>> = [];
   readonly loginRateLimits = new Map<string, LoginRateLimitRow>();
   readonly securityRateLimitClaims: SecurityRateLimitClaimRow[] = [];
+  readonly providerCreationClaims: ProviderCreationClaimRow[] = [];
   readonly loginStepUpChallenges: LoginStepUpChallengeRow[] = [];
   readonly documents: DteDocumentRecord[] = [];
   readonly preparedSql: string[] = [];
@@ -986,6 +996,102 @@ export class Statement {
       document.status = "SIGNED";
       document.updated_at = String(updatedAt);
       return { id: document.id } as T;
+    }
+    if (this.sql.includes("INSERT OR IGNORE INTO provider_creation_claims")) {
+      const [
+        id,
+        provider,
+        clientKeyHash,
+        stripeRequestId,
+        claimedAt,
+        expiresAt,
+        countClientKeyHash,
+        clientCutoff,
+        clientLimit,
+        countProvider,
+        providerCutoff,
+        legacyProvider,
+        donationLegacyCutoff,
+        stripeLegacyCutoff,
+        providerLimit,
+        globalCutoff,
+        globalDonationCutoff,
+        globalStripeCutoff,
+        globalLimit
+      ] = this.args;
+      const normalizedProvider = String(provider) as "WOMPI" | "STRIPE";
+      const normalizedRequestId = stripeRequestId == null ? null : String(stripeRequestId);
+      if (
+        normalizedProvider === "STRIPE" &&
+        normalizedRequestId !== null &&
+        this.db.providerCreationClaims.some(
+          (claim) => claim.provider === "STRIPE" && claim.stripe_request_id === normalizedRequestId
+        )
+      ) {
+        return null;
+      }
+      const clientCount = this.db.providerCreationClaims.filter(
+        (claim) =>
+          claim.client_key_hash === String(countClientKeyHash) &&
+          claim.claimed_at >= String(clientCutoff)
+      ).length;
+      const providerClaimCount = this.db.providerCreationClaims.filter(
+        (claim) =>
+          claim.provider === String(countProvider) &&
+          claim.claimed_at >= String(providerCutoff)
+      ).length;
+      const providerLegacyCount = String(legacyProvider) === "WOMPI"
+        ? this.db.donationIntents.filter(
+            (intent) =>
+              (intent.provider_creation_claim_id ?? null) === null &&
+              String(intent.created_at) >= String(donationLegacyCutoff)
+          ).length
+        : this.db.stripeCheckoutSessions.filter(
+            (checkout) =>
+              (checkout.provider_creation_claim_id ?? null) === null &&
+              String(checkout.created_at) >= String(stripeLegacyCutoff)
+          ).length;
+      const globalClaimCount = this.db.providerCreationClaims.filter(
+        (claim) => claim.claimed_at >= String(globalCutoff)
+      ).length;
+      const globalLegacyCount = this.db.donationIntents.filter(
+        (intent) =>
+          (intent.provider_creation_claim_id ?? null) === null &&
+          String(intent.created_at) >= String(globalDonationCutoff)
+      ).length + this.db.stripeCheckoutSessions.filter(
+        (checkout) =>
+          (checkout.provider_creation_claim_id ?? null) === null &&
+          String(checkout.created_at) >= String(globalStripeCutoff)
+      ).length;
+      if (
+        clientCount >= Number(clientLimit) ||
+        providerClaimCount + providerLegacyCount >= Number(providerLimit) ||
+        globalClaimCount + globalLegacyCount >= Number(globalLimit)
+      ) {
+        return null;
+      }
+      const claim: ProviderCreationClaimRow = {
+        id: String(id),
+        provider: normalizedProvider,
+        client_key_hash: String(clientKeyHash),
+        stripe_request_id: normalizedRequestId,
+        claimed_at: String(claimedAt),
+        expires_at: String(expiresAt)
+      };
+      this.db.providerCreationClaims.push(claim);
+      return { id: claim.id } as T;
+    }
+    if (
+      this.sql.includes("SELECT id FROM provider_creation_claims") &&
+      this.sql.includes("stripe_request_id = ?")
+    ) {
+      const [stripeRequestId] = this.args;
+      const claim = this.db.providerCreationClaims.find(
+        (candidate) =>
+          candidate.provider === "STRIPE" &&
+          candidate.stripe_request_id === String(stripeRequestId)
+      );
+      return (claim ? { id: claim.id } : null) as T | null;
     }
     if (this.sql.includes("INSERT INTO security_rate_limit_claims")) {
       const scope = this.sql.includes("'donation_intent'")
@@ -3024,6 +3130,32 @@ export class Statement {
         }
       }
     }
+    if (
+      this.sql.includes("DELETE FROM provider_creation_claims") &&
+      this.sql.includes("NOT EXISTS")
+    ) {
+      const [id] = this.args.map(String);
+      const attached = this.db.donationIntents.some(
+        (intent) => intent.provider_creation_claim_id === id
+      ) || this.db.stripeCheckoutSessions.some(
+        (checkout) => checkout.provider_creation_claim_id === id
+      );
+      if (!attached) {
+        const index = this.db.providerCreationClaims.findIndex((claim) => claim.id === id);
+        if (index >= 0) {
+          this.db.providerCreationClaims.splice(index, 1);
+          changes += 1;
+        }
+      }
+    } else if (this.sql.includes("DELETE FROM provider_creation_claims")) {
+      const [now] = this.args.map(String);
+      for (let index = this.db.providerCreationClaims.length - 1; index >= 0; index -= 1) {
+        if (this.db.providerCreationClaims[index].expires_at <= now) {
+          this.db.providerCreationClaims.splice(index, 1);
+          changes += 1;
+        }
+      }
+    }
     if (this.sql.includes("INSERT OR IGNORE INTO document_sequences")) {
       this.db.sequencePrefixes.push(String(this.args[1]));
     }
@@ -3691,7 +3823,7 @@ export class Statement {
         expiresAt,
         giftType,
         datosTokenHash,
-        rateLimitClaimId
+        providerCreationClaimId
       ] = this.args;
       this.db.donationIntents.push({
         id: String(id),
@@ -3716,7 +3848,10 @@ export class Statement {
         document_id: null,
         client_ip: clientIp == null ? null : String(clientIp),
         datos_token_hash: datosTokenHash == null ? null : String(datosTokenHash),
-        rate_limit_claim_id: rateLimitClaimId == null ? null : String(rateLimitClaimId),
+        rate_limit_claim_id: null,
+        provider_creation_claim_id: providerCreationClaimId == null
+          ? null
+          : String(providerCreationClaimId),
         // paid_at (migration 0016): stamped only by the webhook's markIntentPaid,
         // never on create — a fresh intent has not been paid.
         paid_at: null,

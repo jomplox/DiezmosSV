@@ -534,7 +534,7 @@ function checkoutInput(overrides: Partial<Parameters<typeof reserveStripeCheckou
     giftType: "TITHE" as const,
     amountCents: 5000,
     livemode: false,
-    rateLimitClaimId: "rate_claim_one",
+    providerCreationClaimId: "provider_claim_one",
     now: "2026-08-10T12:00:00.000Z",
     ...overrides
   };
