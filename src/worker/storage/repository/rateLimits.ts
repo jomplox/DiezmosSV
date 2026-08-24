@@ -319,6 +319,25 @@ export async function claimLoginAttempt(
   return row !== null;
 }
 
+export async function countRecentAccountLoginFailures(
+  db: D1Database,
+  normalizedEmail: string,
+  sinceIso: string
+): Promise<number> {
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS count
+         FROM audit_logs
+        WHERE action = 'LOGIN_FAILED'
+          AND entity_type = 'user'
+          AND entity_id = ?
+          AND created_at >= ?`
+    )
+    .bind(normalizedEmail, sinceIso)
+    .first<{ count: number }>();
+  return Number(row?.count ?? 0);
+}
+
 export async function deleteExpiredLoginRateLimits(
   db: D1Database,
   now: string

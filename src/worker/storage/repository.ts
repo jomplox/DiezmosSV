@@ -19,14 +19,19 @@ import {
 import {
   countUsers as countUsersRepository,
   createInitialOwner as createInitialOwnerRepository,
+  createLoginStepUpChallenge as createLoginStepUpChallengeRepository,
   createPasswordResetToken as createPasswordResetTokenRepository,
   createSessionIfCredentialsCurrent as createSessionIfCredentialsCurrentRepository,
   createUser as createUserRepository,
+  consumeLoginStepUpChallenge as consumeLoginStepUpChallengeRepository,
+  deleteExpiredLoginStepUpChallenges as deleteExpiredLoginStepUpChallengesRepository,
   getActivePasswordResetUser as getActivePasswordResetUserRepository,
   getSessionUser as getSessionUserRepository,
   getUserForLogin as getUserForLoginRepository,
   getUserRole as getUserRoleRepository,
   invalidatePasswordResetToken as invalidatePasswordResetTokenRepository,
+  invalidateLoginStepUpChallenge as invalidateLoginStepUpChallengeRepository,
+  incrementLoginStepUpFailure as incrementLoginStepUpFailureRepository,
   listUsers as listUsersRepository,
   resetPasswordWithToken as resetPasswordWithTokenRepository,
   revokeSession as revokeSessionRepository,
@@ -41,6 +46,7 @@ import {
   claimStripeProviderRecoveryRead as claimStripeProviderRecoveryReadRepository,
   claimLoginAttempt as claimLoginAttemptRepository,
   claimPasswordResetBudgets as claimPasswordResetBudgetsRepository,
+  countRecentAccountLoginFailures as countRecentAccountLoginFailuresRepository,
   deleteExpiredLoginRateLimits as deleteExpiredLoginRateLimitsRepository,
   deleteExpiredSecurityRateLimitClaims as deleteExpiredSecurityRateLimitClaimsRepository,
   finalizeStripeProviderRecoveryRead as finalizeStripeProviderRecoveryReadRepository,
@@ -1689,6 +1695,10 @@ export class Repository {
     );
   }
 
+  async countRecentAccountLoginFailures(normalizedEmail: string, sinceIso: string): Promise<number> {
+    return countRecentAccountLoginFailuresRepository(this.db, normalizedEmail, sinceIso);
+  }
+
   async deleteExpiredLoginRateLimits(now: string): Promise<void> {
     return deleteExpiredLoginRateLimitsRepository(this.db, now);
   }
@@ -1707,6 +1717,41 @@ export class Repository {
     expiresAt: string;
   }): Promise<boolean> {
     return createSessionIfCredentialsCurrentRepository(this.db, input);
+  }
+
+  async createLoginStepUpChallenge(
+    input: Parameters<typeof createLoginStepUpChallengeRepository>[1]
+  ): Promise<string | null> {
+    return createLoginStepUpChallengeRepository(this.db, input);
+  }
+
+  async consumeLoginStepUpChallenge(
+    input: Parameters<typeof consumeLoginStepUpChallengeRepository>[1]
+  ): ReturnType<typeof consumeLoginStepUpChallengeRepository> {
+    return consumeLoginStepUpChallengeRepository(this.db, input);
+  }
+
+  async incrementLoginStepUpFailure(
+    input: Parameters<typeof incrementLoginStepUpFailureRepository>[1]
+  ): Promise<boolean> {
+    return incrementLoginStepUpFailureRepository(this.db, input);
+  }
+
+  async invalidateLoginStepUpChallenge(
+    challengeId: string,
+    continuationTokenHash: string,
+    invalidatedAt: string
+  ): Promise<void> {
+    return invalidateLoginStepUpChallengeRepository(
+      this.db,
+      challengeId,
+      continuationTokenHash,
+      invalidatedAt
+    );
+  }
+
+  async deleteExpiredLoginStepUpChallenges(now: string): Promise<void> {
+    return deleteExpiredLoginStepUpChallengesRepository(this.db, now);
   }
 
   async getSessionUser(tokenHash: string): Promise<Record<string, string> | null> {

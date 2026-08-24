@@ -36,6 +36,143 @@ describe("public deployment identity", () => {
   });
 });
 
+describe("login step-up migration", () => {
+  it("stores only bounded challenge hashes and exposes an expiry cleanup index", () => {
+    const database = migratedDatabase();
+    try {
+      const table = database
+        .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'login_step_up_challenges'")
+        .get() as { sql: string } | undefined;
+      expect(table, "migration 0045 must create the challenge table").toBeDefined();
+      if (!table) return;
+
+      const indexes = database
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'login_step_up_challenges'")
+        .all()
+        .map((row) => String((row as { name: string }).name));
+      expect(indexes).toContain("idx_login_step_up_challenges_expires");
+
+      const validHash = "a".repeat(64);
+      database.prepare(
+        `INSERT INTO login_step_up_challenges (
+           id, user_id, continuation_token_hash, code_hash,
+           expected_email, expected_auth_generation,
+           expected_password_hash, expected_password_salt, expires_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        "challenge_valid",
+        "user_operator",
+        validHash,
+        "b".repeat(64),
+        "operator@example.org",
+        0,
+        "hash",
+        "salt",
+        "2026-07-04T12:10:00.000Z"
+      );
+      expect(
+        database.prepare(
+          "SELECT continuation_token_hash, code_hash, failed_attempts, consumed_at, invalidated_at FROM login_step_up_challenges"
+        ).get()
+      ).toEqual({
+        continuation_token_hash: validHash,
+        code_hash: "b".repeat(64),
+        failed_attempts: 0,
+        consumed_at: null,
+        invalidated_at: null
+      });
+      expect(() => database.prepare(
+        `INSERT INTO login_step_up_challenges (
+           id, user_id, continuation_token_hash, code_hash,
+           expected_email, expected_auth_generation,
+           expected_password_hash, expected_password_salt, expires_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        "challenge_plaintext",
+        "user_operator",
+        "continuation-token",
+        "123456",
+        "operator@example.org",
+        0,
+        "hash",
+        "salt",
+        "2026-07-04T12:10:00.000Z"
+      )).toThrow(/CHECK constraint failed/);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("atomically consumes a valid SQLite challenge once and exhausts five wrong attempts", async () => {
+    const database = migratedDatabase();
+    try {
+      const repo = new Repository(sqliteD1(database));
+      const snapshot = {
+        userId: "user_operator",
+        expectedEmail: "operator@example.org",
+        expectedAuthGeneration: 0,
+        expectedPasswordHash: "hash",
+        expectedPasswordSalt: "salt"
+      };
+      const firstId = await repo.createLoginStepUpChallenge({
+        ...snapshot,
+        continuationTokenHash: "a".repeat(64),
+        codeHash: "b".repeat(64),
+        expiresAt: "2026-07-04T12:10:00.000Z"
+      });
+      expect(firstId).toMatch(/^login_mfa_/);
+
+      const consumed = await repo.consumeLoginStepUpChallenge({
+        challengeId: firstId!,
+        continuationTokenHash: "a".repeat(64),
+        codeHash: "b".repeat(64),
+        now: "2026-07-04T12:00:00.000Z",
+        maxWrongAttempts: 5
+      });
+      expect(consumed).toMatchObject(snapshot);
+      await expect(repo.consumeLoginStepUpChallenge({
+        challengeId: firstId!,
+        continuationTokenHash: "a".repeat(64),
+        codeHash: "b".repeat(64),
+        now: "2026-07-04T12:00:00.000Z",
+        maxWrongAttempts: 5
+      })).resolves.toBeNull();
+
+      const exhaustedId = await repo.createLoginStepUpChallenge({
+        ...snapshot,
+        continuationTokenHash: "c".repeat(64),
+        codeHash: "d".repeat(64),
+        expiresAt: "2026-07-04T12:10:00.000Z"
+      });
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        await expect(repo.incrementLoginStepUpFailure({
+          challengeId: exhaustedId!,
+          continuationTokenHash: "c".repeat(64),
+          submittedCodeHash: "e".repeat(64),
+          now: "2026-07-04T12:00:00.000Z",
+          maxWrongAttempts: 5
+        })).resolves.toBe(true);
+      }
+      await expect(repo.incrementLoginStepUpFailure({
+        challengeId: exhaustedId!,
+        continuationTokenHash: "c".repeat(64),
+        submittedCodeHash: "e".repeat(64),
+        now: "2026-07-04T12:00:00.000Z",
+        maxWrongAttempts: 5
+      })).resolves.toBe(false);
+      await expect(repo.consumeLoginStepUpChallenge({
+        challengeId: exhaustedId!,
+        continuationTokenHash: "c".repeat(64),
+        codeHash: "d".repeat(64),
+        now: "2026-07-04T12:00:00.000Z",
+        maxWrongAttempts: 5
+      })).resolves.toBeNull();
+    } finally {
+      database.close();
+    }
+  });
+});
+
 describe("request body limits", () => {
   it("rejects an oversized login body before authentication or throttling", async () => {
     const db = new InMemoryD1();
@@ -436,6 +573,71 @@ describe("auth rate limiting", () => {
     });
   }
 
+  function loginRequestFrom(email: string, password: string, ip: string) {
+    return new Request("https://example.org/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "CF-Connecting-IP": ip },
+      body: JSON.stringify({ email, password })
+    });
+  }
+
+  function loginMfaRequest(input: { challengeId: string; continuationToken: string; code: string }) {
+    return new Request("https://example.org/api/auth/login/mfa", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input)
+    });
+  }
+
+  function seedDistributedFailures(db: InMemoryD1, email: string, count = 5): void {
+    for (let index = 0; index < count; index += 1) {
+      seedAudit(
+        db,
+        "LOGIN_FAILED",
+        email,
+        `2026-07-04T11:${50 + index}:00.000Z`,
+        `203.0.113.${index + 10}`
+      );
+    }
+  }
+
+  async function seededStepUp(input: {
+    db: InMemoryD1;
+    email?: string;
+    password?: string;
+    send?: (message: unknown) => Promise<{ messageId: string }>;
+  }) {
+    const email = input.email ?? "operator@example.org";
+    const password = input.password ?? "Valid#Pass2026";
+    const hashed = await hashPassword(password, "fixed-salt", { enforcePolicy: false });
+    input.db.users.push({
+      id: "user_operator",
+      email,
+      name: "Operator",
+      role: "OPERATOR",
+      password_hash: hashed.hash,
+      password_salt: hashed.salt,
+      auth_generation: 0,
+      disabled_at: ""
+    });
+    seedDistributedFailures(input.db, email);
+    const sentMessages: unknown[] = [];
+    const response = await worker.fetch(
+      loginRequestFrom(email, password, "198.51.100.90"),
+      env(input.db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "security@example.org",
+        EMAIL: {
+          send: async (message: unknown) => {
+            sentMessages.push(message);
+            return input.send ? input.send(message) : { messageId: "login-step-up-code" };
+          }
+        } as SendEmail
+      })
+    );
+    return { response, sentMessages };
+  }
+
   describe("aggregate login attempts", () => {
     it("blocks the sixty-first login attempt from one IP across distinct account names", async () => {
       const db = new InMemoryD1();
@@ -713,6 +915,21 @@ describe("auth rate limiting", () => {
         claimed_at: "2026-07-04T11:00:00.000Z",
         expires_at: "2026-07-04T11:15:00.000Z"
       });
+      db.loginStepUpChallenges.push({
+        id: "login_mfa_expired",
+        user_id: "user_expired",
+        continuation_token_hash: "a".repeat(64),
+        code_hash: "b".repeat(64),
+        expected_email: "expired@example.org",
+        expected_auth_generation: 0,
+        expected_password_hash: "hash",
+        expected_password_salt: "salt",
+        expires_at: "2026-07-04T11:15:00.000Z",
+        failed_attempts: 0,
+        consumed_at: null,
+        invalidated_at: null,
+        created_at: "2026-07-04T11:00:00.000Z"
+      });
 
       const otherIp = await worker.fetch(
         new Request("https://example.org/api/auth/login", {
@@ -734,6 +951,7 @@ describe("auth rate limiting", () => {
       expect(db.loginRateLimits.has("expired-hash")).toBe(false);
       expect(db.loginRateLimits.size).toBe(1);
       expect(db.securityRateLimitClaims).toHaveLength(0);
+      expect(db.loginStepUpChallenges).toHaveLength(0);
     });
 
     it("blocks the sixty-first login attempt in the shared unknown IP bucket", async () => {
@@ -837,7 +1055,7 @@ describe("auth rate limiting", () => {
     expect(db.audits).toContainEqual(expect.objectContaining({ action: "LOGIN", entity_id: "user_ok" }));
   });
 
-  it("does not let attacker failures from one IP lock out a victim on another IP", async () => {
+  it("requires a non-locking email step-up after distributed account failures", async () => {
     const db = new InMemoryD1();
     const hashed = await hashPassword("Valid#Pass2026", "fixed-salt", { enforcePolicy: false });
     db.users.push({
@@ -849,25 +1067,221 @@ describe("auth rate limiting", () => {
       password_salt: hashed.salt,
       disabled_at: ""
     });
-    // An attacker seeds the failure threshold for the victim's email from their own IP.
-    for (let i = 0; i < 5; i += 1) {
-      seedAudit(db, "LOGIN_FAILED", "victim@example.org", `2026-07-04T11:5${i}:00.000Z`, "203.0.113.7");
+    db.auditCreatedAt = "2026-07-04T11:59:00.000Z";
+    for (let index = 0; index < 5; index += 1) {
+      const failed = await worker.fetch(
+        loginRequestFrom(
+          "victim@example.org",
+          "Wrong#Pass2026",
+          `203.0.113.${index + 10}`
+        ),
+        env(db)
+      );
+      expect(failed.status).toBe(401);
     }
+    const sentMessages: unknown[] = [];
 
-    // The victim, arriving from a different IP with the correct password, must not be
-    // throttled by the attacker's failures.
+    // Correct credentials from a fresh IP are not locked out, but they also must not
+    // mint a session until the emailed one-time code is completed.
     const response = await worker.fetch(
-      new Request("https://example.org/api/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "CF-Connecting-IP": "198.51.100.4" },
-        body: JSON.stringify({ email: "victim@example.org", password: "Valid#Pass2026" })
-      }),
+      loginRequestFrom("victim@example.org", "Valid#Pass2026", "198.51.100.4"),
+      env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "security@example.org",
+        EMAIL: {
+          send: async (message: unknown) => {
+            sentMessages.push(message);
+            return { messageId: "login-step-up-code" };
+          }
+        } as SendEmail
+      })
+    );
+
+    expect(response.status).toBe(202);
+    const challenge = await response.json() as Record<string, unknown>;
+    expect(challenge).toMatchObject({
+      mfaRequired: true,
+      challengeId: expect.any(String),
+      continuationToken: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+      expiresAt: "2026-07-04T12:10:00.000Z"
+    });
+    expect(challenge).not.toHaveProperty("token");
+    expect(challenge).not.toHaveProperty("user");
+    expect(db.sessions).toHaveLength(0);
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0]).toMatchObject({ to: "victim@example.org" });
+    expect(String((sentMessages[0] as { text?: string }).text)).toMatch(/\b\d{6}\b/);
+    expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "LOGIN", entity_id: "user_victim" }));
+  });
+
+  it("completes the emailed challenge once and rejects a replay generically", async () => {
+    const db = new InMemoryD1();
+    const { response, sentMessages } = await seededStepUp({ db });
+    expect(response.status).toBe(202);
+    const challenge = await response.json() as {
+      challengeId: string;
+      continuationToken: string;
+    };
+    const code = String((sentMessages[0] as { text?: string }).text).match(/\b(\d{6})\b/)?.[1];
+    expect(code).toMatch(/^\d{6}$/);
+
+    const completed = await worker.fetch(loginMfaRequest({ ...challenge, code: code! }), env(db));
+    expect(completed.status).toBe(200);
+    await expect(completed.json()).resolves.toMatchObject({
+      user: { id: "user_operator", email: "operator@example.org", role: "OPERATOR" },
+      token: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+      expiresAt: "2026-07-05T12:00:00.000Z"
+    });
+    expect(db.sessions).toHaveLength(1);
+    expect(db.audits).toContainEqual(expect.objectContaining({ action: "LOGIN", entity_id: "user_operator" }));
+
+    const replay = await worker.fetch(loginMfaRequest({ ...challenge, code: code! }), env(db));
+    expect(replay.status).toBe(400);
+    await expect(replay.json()).resolves.toEqual({
+      error: "invalid_login_mfa_challenge",
+      message: "El código no es válido o ya expiró. Inicie sesión nuevamente."
+    });
+    expect(db.sessions).toHaveLength(1);
+  });
+
+  it("bounds wrong codes at five attempts and then rejects the correct code generically", async () => {
+    const db = new InMemoryD1();
+    const { response, sentMessages } = await seededStepUp({ db });
+    const challenge = await response.json() as { challengeId: string; continuationToken: string };
+    const code = String((sentMessages[0] as { text?: string }).text).match(/\b(\d{6})\b/)?.[1] ?? "";
+    const wrongCode = code === "000000" ? "000001" : "000000";
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const wrong = await worker.fetch(loginMfaRequest({ ...challenge, code: wrongCode }), env(db));
+      expect(wrong.status).toBe(400);
+      await expect(wrong.json()).resolves.toMatchObject({ error: "invalid_login_mfa_challenge" });
+    }
+    const exhausted = await worker.fetch(loginMfaRequest({ ...challenge, code }), env(db));
+    expect(exhausted.status).toBe(400);
+    await expect(exhausted.json()).resolves.toMatchObject({ error: "invalid_login_mfa_challenge" });
+    expect(db.sessions).toHaveLength(0);
+  });
+
+  it("allows only one concurrent completion to create a session", async () => {
+    const db = new InMemoryD1();
+    const { response, sentMessages } = await seededStepUp({ db });
+    const challenge = await response.json() as { challengeId: string; continuationToken: string };
+    const code = String((sentMessages[0] as { text?: string }).text).match(/\b(\d{6})\b/)?.[1] ?? "";
+
+    const completions = await Promise.all([
+      worker.fetch(loginMfaRequest({ ...challenge, code }), env(db)),
+      worker.fetch(loginMfaRequest({ ...challenge, code }), env(db))
+    ]);
+
+    expect(completions.map((result) => result.status).sort()).toEqual([200, 400]);
+    expect(db.sessions).toHaveLength(1);
+  });
+
+  it("rejects expired and credential-stale challenges without creating a session", async () => {
+    const expiredDb = new InMemoryD1();
+    const expiredIssued = await seededStepUp({ db: expiredDb });
+    const expiredChallenge = await expiredIssued.response.json() as { challengeId: string; continuationToken: string };
+    const expiredCode = String((expiredIssued.sentMessages[0] as { text?: string }).text).match(/\b(\d{6})\b/)?.[1] ?? "";
+    vi.setSystemTime(new Date("2026-07-04T12:10:00.001Z"));
+    const expired = await worker.fetch(loginMfaRequest({ ...expiredChallenge, code: expiredCode }), env(expiredDb));
+    expect(expired.status).toBe(400);
+    expect(expiredDb.sessions).toHaveLength(0);
+
+    vi.setSystemTime(new Date("2026-07-04T12:00:00.000Z"));
+    const changedDb = new InMemoryD1();
+    const changedIssued = await seededStepUp({ db: changedDb });
+    const changedChallenge = await changedIssued.response.json() as { challengeId: string; continuationToken: string };
+    const changedCode = String((changedIssued.sentMessages[0] as { text?: string }).text).match(/\b(\d{6})\b/)?.[1] ?? "";
+    changedDb.users[0].auth_generation = 1;
+    const changed = await worker.fetch(loginMfaRequest({ ...changedChallenge, code: changedCode }), env(changedDb));
+    expect(changed.status).toBe(400);
+    expect(changedDb.sessions).toHaveLength(0);
+  });
+
+  it("invalidates the challenge and returns a generic 503 when email delivery fails", async () => {
+    const db = new InMemoryD1();
+    const { response } = await seededStepUp({
+      db,
+      send: async () => {
+        throw new Error("provider secret detail");
+      }
+    });
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: "login_mfa_unavailable",
+      message: "No se pudo enviar el código de verificación. Intente de nuevo en unos minutos."
+    });
+    expect(db.sessions).toHaveLength(0);
+    expect(db.loginStepUpChallenges).toHaveLength(1);
+    expect(db.loginStepUpChallenges[0].invalidated_at).not.toBeNull();
+  });
+
+  it("keeps wrong credentials generic and audited after the account threshold", async () => {
+    const db = new InMemoryD1();
+    const hashed = await hashPassword("Valid#Pass2026", "fixed-salt", { enforcePolicy: false });
+    db.users.push({
+      id: "user_wrong",
+      email: "wrong@example.org",
+      name: "Wrong Test",
+      role: "VIEWER",
+      password_hash: hashed.hash,
+      password_salt: hashed.salt,
+      disabled_at: ""
+    });
+    seedDistributedFailures(db, "wrong@example.org");
+
+    const response = await worker.fetch(
+      loginRequestFrom("wrong@example.org", "Wrong#Pass2026", "198.51.100.91"),
       env(db)
     );
 
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ user: { email: "victim@example.org", role: "ADMIN" } });
-    expect(db.audits).toContainEqual(expect.objectContaining({ action: "LOGIN", entity_id: "user_victim" }));
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({ error: "auth_error", message: "Credenciales inválidas" });
+    expect(db.audits.filter((audit) => audit.action === "LOGIN_FAILED")).toHaveLength(6);
+    expect(db.sessions).toHaveLength(0);
+    expect(db.loginStepUpChallenges).toHaveLength(0);
+  });
+
+  it("never sends a code or issues a challenge for disabled and unknown accounts", async () => {
+    const db = new InMemoryD1();
+    const hashed = await hashPassword("Valid#Pass2026", "fixed-salt", { enforcePolicy: false });
+    db.users.push({
+      id: "user_disabled",
+      email: "disabled@example.org",
+      name: "Disabled",
+      role: "VIEWER",
+      password_hash: hashed.hash,
+      password_salt: hashed.salt,
+      disabled_at: "2026-07-01T00:00:00.000Z"
+    });
+    seedDistributedFailures(db, "disabled@example.org");
+    seedDistributedFailures(db, "unknown@example.org");
+    const sentMessages: unknown[] = [];
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "security@example.org",
+      EMAIL: {
+        send: async (message: unknown) => {
+          sentMessages.push(message);
+          return { messageId: "must-not-send" };
+        }
+      } as SendEmail
+    });
+
+    const disabled = await worker.fetch(
+      loginRequestFrom("disabled@example.org", "Valid#Pass2026", "198.51.100.92"),
+      runtime
+    );
+    const unknown = await worker.fetch(
+      loginRequestFrom("unknown@example.org", "Valid#Pass2026", "198.51.100.93"),
+      runtime
+    );
+
+    expect(disabled.status).toBe(401);
+    expect(unknown.status).toBe(401);
+    expect(sentMessages).toHaveLength(0);
+    expect(db.loginStepUpChallenges).toHaveLength(0);
   });
 
   it("still throttles repeated failures from the same IP", async () => {

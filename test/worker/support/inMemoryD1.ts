@@ -131,6 +131,22 @@ export interface SecurityRateLimitClaimRow {
   expires_at: string;
 }
 
+export interface LoginStepUpChallengeRow {
+  id: string;
+  user_id: string;
+  continuation_token_hash: string;
+  code_hash: string;
+  expected_email: string;
+  expected_auth_generation: number;
+  expected_password_hash: string;
+  expected_password_salt: string;
+  expires_at: string;
+  failed_attempts: number;
+  consumed_at: string | null;
+  invalidated_at: string | null;
+  created_at: string;
+}
+
 export function withWompiIssuanceDefaults(
   event: Record<string, unknown> | undefined
 ): Record<string, unknown> | undefined {
@@ -180,6 +196,7 @@ export class InMemoryD1 {
   readonly audits: Array<Record<string, unknown>> = [];
   readonly loginRateLimits = new Map<string, LoginRateLimitRow>();
   readonly securityRateLimitClaims: SecurityRateLimitClaimRow[] = [];
+  readonly loginStepUpChallenges: LoginStepUpChallengeRow[] = [];
   readonly documents: DteDocumentRecord[] = [];
   readonly preparedSql: string[] = [];
   readonly sequencePrefixes: string[] = [];
@@ -431,6 +448,115 @@ export class Statement {
   }
 
   async first<T>(): Promise<T | null> {
+    if (
+      this.sql.includes("INSERT INTO login_step_up_challenges") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [
+        id,
+        continuationTokenHash,
+        codeHash,
+        expiresAt,
+        userId,
+        expectedEmail,
+        expectedAuthGeneration,
+        expectedPasswordHash,
+        expectedPasswordSalt
+      ] = this.args;
+      const user = this.db.users.find(
+        (row) =>
+          row.id === userId &&
+          !row.disabled_at &&
+          row.email === expectedEmail &&
+          Number(row.auth_generation ?? 0) === Number(expectedAuthGeneration) &&
+          row.password_hash === expectedPasswordHash &&
+          row.password_salt === expectedPasswordSalt
+      );
+      if (!user || this.db.loginStepUpChallenges.some((row) => row.continuation_token_hash === continuationTokenHash)) {
+        return null;
+      }
+      this.db.loginStepUpChallenges.push({
+        id: String(id),
+        user_id: String(userId),
+        continuation_token_hash: String(continuationTokenHash),
+        code_hash: String(codeHash),
+        expected_email: String(expectedEmail),
+        expected_auth_generation: Number(expectedAuthGeneration),
+        expected_password_hash: String(expectedPasswordHash),
+        expected_password_salt: String(expectedPasswordSalt),
+        expires_at: String(expiresAt),
+        failed_attempts: 0,
+        consumed_at: null,
+        invalidated_at: null,
+        created_at: new Date().toISOString()
+      });
+      return { id } as T;
+    }
+    if (
+      this.sql.includes("UPDATE login_step_up_challenges") &&
+      this.sql.includes("SET consumed_at = ?") &&
+      this.sql.includes("RETURNING id, user_id")
+    ) {
+      const [consumedAt, challengeId, continuationTokenHash, codeHash, now, maxWrongAttempts] = this.args;
+      const challenge = this.db.loginStepUpChallenges.find(
+        (row) =>
+          row.id === challengeId &&
+          row.continuation_token_hash === continuationTokenHash &&
+          row.code_hash === codeHash &&
+          row.consumed_at === null &&
+          row.invalidated_at === null &&
+          row.expires_at > String(now) &&
+          row.failed_attempts < Number(maxWrongAttempts)
+      );
+      const user = challenge && this.db.users.find(
+        (row) =>
+          row.id === challenge.user_id &&
+          !row.disabled_at &&
+          row.email === challenge.expected_email &&
+          Number(row.auth_generation ?? 0) === challenge.expected_auth_generation &&
+          row.password_hash === challenge.expected_password_hash &&
+          row.password_salt === challenge.expected_password_salt
+      );
+      if (!challenge || !user) return null;
+      challenge.consumed_at = String(consumedAt);
+      return {
+        id: challenge.id,
+        user_id: challenge.user_id,
+        expected_email: challenge.expected_email,
+        expected_auth_generation: challenge.expected_auth_generation,
+        expected_password_hash: challenge.expected_password_hash,
+        expected_password_salt: challenge.expected_password_salt
+      } as T;
+    }
+    if (
+      this.sql.includes("UPDATE login_step_up_challenges") &&
+      this.sql.includes("SET failed_attempts = failed_attempts + 1") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [challengeId, continuationTokenHash, submittedCodeHash, now, maxWrongAttempts] = this.args;
+      const challenge = this.db.loginStepUpChallenges.find(
+        (row) =>
+          row.id === challengeId &&
+          row.continuation_token_hash === continuationTokenHash &&
+          row.code_hash !== submittedCodeHash &&
+          row.consumed_at === null &&
+          row.invalidated_at === null &&
+          row.expires_at > String(now) &&
+          row.failed_attempts < Number(maxWrongAttempts)
+      );
+      const user = challenge && this.db.users.find(
+        (row) =>
+          row.id === challenge.user_id &&
+          !row.disabled_at &&
+          row.email === challenge.expected_email &&
+          Number(row.auth_generation ?? 0) === challenge.expected_auth_generation &&
+          row.password_hash === challenge.expected_password_hash &&
+          row.password_salt === challenge.expected_password_salt
+      );
+      if (!challenge || !user) return null;
+      challenge.failed_attempts += 1;
+      return { id: challenge.id } as T;
+    }
     if (
       this.sql.includes("MAX(generation)") &&
       this.sql.includes("FROM stripe_retention_generations")
@@ -1674,6 +1800,22 @@ export class Statement {
     }
     if (
       this.sql.includes("SELECT COUNT(*) AS count") &&
+      this.sql.includes("action = 'LOGIN_FAILED'") &&
+      this.sql.includes("entity_type = 'user'")
+    ) {
+      const [entityId, sinceIso] = this.args.map(String);
+      return {
+        count: this.db.audits.filter(
+          (audit) =>
+            audit.action === "LOGIN_FAILED" &&
+            audit.entity_type === "user" &&
+            audit.entity_id === entityId &&
+            String(audit.created_at) >= sinceIso
+        ).length
+      } as T;
+    }
+    if (
+      this.sql.includes("SELECT COUNT(*) AS count") &&
       this.sql.includes("episode_member.key = 'stalledRequeueEpochAt'")
     ) {
       const [action, entityId, episodeId, exclusiveBoundary] = this.args.map(String);
@@ -2872,6 +3014,32 @@ export class Statement {
           this.db.loginRateLimits.delete(key);
           changes += 1;
         }
+      }
+    }
+    if (this.sql.includes("DELETE FROM login_step_up_challenges")) {
+      const [now] = this.args.map(String);
+      for (let index = this.db.loginStepUpChallenges.length - 1; index >= 0; index -= 1) {
+        if (this.db.loginStepUpChallenges[index].expires_at <= now) {
+          this.db.loginStepUpChallenges.splice(index, 1);
+          changes += 1;
+        }
+      }
+    }
+    if (
+      this.sql.includes("UPDATE login_step_up_challenges") &&
+      this.sql.includes("SET invalidated_at = ?")
+    ) {
+      const [invalidatedAt, challengeId, continuationTokenHash] = this.args.map(String);
+      const challenge = this.db.loginStepUpChallenges.find(
+        (row) =>
+          row.id === challengeId &&
+          row.continuation_token_hash === continuationTokenHash &&
+          row.consumed_at === null &&
+          row.invalidated_at === null
+      );
+      if (challenge) {
+        challenge.invalidated_at = invalidatedAt;
+        changes = 1;
       }
     }
     if (this.sql.includes("INSERT INTO users")) {

@@ -7,6 +7,24 @@ export type { FiscalCorrectionStatus } from "../shared/fiscalCorrection";
 
 export type Ambiente = "00" | "01";
 
+export interface LoginStepUpChallengeResponse {
+  mfaRequired: true;
+  challengeId: string;
+  continuationToken: string;
+  expiresAt: string;
+}
+
+export interface LoginSessionResponse {
+  user: {
+    id: string;
+    email: string;
+    name: string;
+    role: "VIEWER" | "OPERATOR" | "ADMIN" | "OWNER";
+  };
+  token: string;
+  expiresAt: string;
+}
+
 // Wrangler owns configured binding/runtime types. Environment-dependent bindings
 // stay partial here so fail-closed paths can still model missing or invalid config;
 // dashboard-only secrets that Wrangler cannot infer are added explicitly below.

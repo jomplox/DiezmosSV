@@ -3,7 +3,7 @@ import { buildAdvancedCdeDocument, buildDirectCdeDocument, buildInvalidacionEven
 import { certificateExpiry, signMhDocument } from "./domain/signer";
 import { ambienteFromWompi, isApprovedDonation, normalizeWompiWebhook, verifyWompiHash, WompiPayloadError, wompiHashHeader, wompiWebhookFromPaymentLink } from "./domain/wompi";
 import { ALERT_EMAIL_SETTING_KEY, normalizeAlertRecipients, sendOperationalAlert } from "./services/alerts";
-import { AuthError, AuthService, BootstrapUnavailableError, PASSWORD_RESET_TTL_MINUTES, PasswordPolicyError, PasswordResetError, requireRole, type AuthUser, type Role, UserNotFoundError } from "./services/auth";
+import { AuthError, AuthService, BootstrapUnavailableError, InvalidLoginStepUpChallengeError, LOGIN_STEP_UP_TTL_MINUTES, PASSWORD_RESET_TTL_MINUTES, PasswordPolicyError, PasswordResetError, requireRole, type AuthUser, type Role, UserNotFoundError } from "./services/auth";
 import {
   CredentialWriterConfigError,
   StripeCredentialValidationError,
@@ -639,6 +639,7 @@ async function handleScheduled(event: ScheduledEvent, env: Env): Promise<void> {
   const now = nowIso();
   await repo.deleteExpiredLoginRateLimits(now);
   await repo.deleteExpiredSecurityRateLimitClaims(now);
+  await repo.deleteExpiredLoginStepUpChallenges(now);
   if (env.STRIPE_MOCK_MODE === "1" || env.STRIPE_RESTRICTED_KEY?.trim()) {
     try {
       for (let processed = 0; processed < 25; processed += 1) {
@@ -2116,15 +2117,95 @@ async function handleLogin(ctx: ApiRouteContext): Promise<Response> {
     // (email, caller IP) so only the abusing IP is throttled, not the victim.
     return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
   }
+  const accountFailures = await ctx.repo.countRecentAccountLoginFailures(
+    normalizedEmail,
+    authThrottleSinceIso()
+  );
   let result;
   try {
-    result = await ctx.auth.login(body.email, body.password);
+    const credentials = await ctx.auth.verifyLoginCredentials(body.email, body.password);
+    if (accountFailures >= LOGIN_FAILED_LIMIT) {
+      const issued = await ctx.auth.issueLoginStepUpChallenge(credentials);
+      try {
+        const branding = await loadEmailBranding(ctx.repo, ctx.env);
+        await new EmailService(ctx.env, DEFAULT_EMAIL_TEMPLATES, branding).sendLoginStepUpCode(
+          issued.user.email,
+          issued.user.name,
+          issued.code,
+          LOGIN_STEP_UP_TTL_MINUTES
+        );
+      } catch {
+        await ctx.auth.invalidateLoginStepUpChallenge(
+          issued.response.challengeId,
+          issued.response.continuationToken
+        );
+        await ctx.repo.createAudit({
+          action: "LOGIN_MFA_EMAIL_FAILED",
+          entityType: "user",
+          entityId: issued.user.id,
+          summary: "No se pudo enviar el código de verificación"
+        });
+        return jsonResponse(
+          {
+            error: "login_mfa_unavailable",
+            message: "No se pudo enviar el código de verificación. Intente de nuevo en unos minutos."
+          },
+          { status: 503 }
+        );
+      }
+      await ctx.repo.createAudit({
+        actorType: "USER",
+        actorId: issued.user.id,
+        action: "LOGIN_MFA_CHALLENGE_ISSUED",
+        entityType: "user",
+        entityId: issued.user.id,
+        summary: issued.user.email
+      });
+      return jsonResponse(issued.response, { status: 202 });
+    }
+    result = await ctx.auth.createSession(credentials);
   } catch (error) {
     await ctx.repo.createAudit({ action: "LOGIN_FAILED", entityType: "user", entityId: normalizedEmail, summary: error instanceof Error ? error.message : String(error) });
     throw error;
   }
   await ctx.repo.createAudit({ actorType: "USER", actorId: result.user.id, action: "LOGIN", entityType: "user", entityId: result.user.id, summary: result.user.email });
   return jsonResponse(result);
+}
+
+async function handleLoginMfa(ctx: ApiRouteContext): Promise<Response> {
+  const rejected = rejectUnsafePublicJsonMutation(ctx.request, ctx.url);
+  if (rejected) return rejected;
+  const body = (await readJsonObject(ctx.request, {
+    limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES,
+    malformed: "throw"
+  })) as { challengeId?: unknown; continuationToken?: unknown; code?: unknown };
+  try {
+    const result = await ctx.auth.completeLoginStepUpChallenge({
+      challengeId: String(body.challengeId ?? ""),
+      continuationToken: String(body.continuationToken ?? ""),
+      code: String(body.code ?? "")
+    });
+    await ctx.repo.createAudit({
+      actorType: "USER",
+      actorId: result.user.id,
+      action: "LOGIN",
+      entityType: "user",
+      entityId: result.user.id,
+      summary: result.user.email
+    });
+    return jsonResponse(result);
+  } catch (error) {
+    if (error instanceof InvalidLoginStepUpChallengeError) {
+      return jsonResponse(
+        {
+          error: "invalid_login_mfa_challenge",
+          message: error.message
+        },
+        { status: 400 }
+      );
+    }
+    throw error;
+  }
 }
 
 async function handleLogout(ctx: ApiRouteContext): Promise<Response> {
@@ -3225,6 +3306,7 @@ const publicRoutes: Array<Route<ApiRouteContext>> = [
 const authRoutes: Array<Route<ApiRouteContext>> = [
   { method: "POST", pattern: "/api/auth/bootstrap-owner", handler: handleBootstrapOwner },
   { method: "POST", pattern: "/api/auth/login", handler: handleLogin },
+  { method: "POST", pattern: "/api/auth/login/mfa", handler: handleLoginMfa },
   { method: "POST", pattern: "/api/auth/logout", handler: handleLogout },
   { method: "POST", pattern: "/api/auth/password-reset/request", handler: handlePasswordResetRequest },
   { method: "POST", pattern: "/api/auth/password-reset/confirm", handler: handlePasswordResetConfirm }
