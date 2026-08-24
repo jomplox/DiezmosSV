@@ -1089,7 +1089,7 @@ async function ingestTrustedWompiPayload(
   }
   const { record, canonicalPayload } = insertion;
   const inserted = insertion.kind === "inserted";
-  const environment = record.environment;
+  const environment = ambienteFromWompi(canonicalPayload);
   const policy = deploymentEnvironmentPolicy(env);
   const environmentAllowed = policy.allowedAmbiente === environment;
   const action = inserted ? source.insertedAction : source.duplicateAction;

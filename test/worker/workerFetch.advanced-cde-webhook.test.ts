@@ -51,7 +51,8 @@ function collisionWebhook(overrides: Partial<WompiWebhook> = {}): WompiWebhook {
 function seedCanonicalWompiEvent(
   db: InMemoryD1,
   payload: WompiWebhook,
-  id = "wompi_collision_canonical"
+  id = "wompi_collision_canonical",
+  rawBody = JSON.stringify(payload)
 ): Record<string, unknown> {
   const firstName = payload.Cliente?.Nombre?.trim() ?? "";
   const lastName = payload.Cliente?.Apellidos?.trim() ?? "";
@@ -68,7 +69,7 @@ function seedCanonicalWompiEvent(
     amount_cents: Math.round(Number(payload.Monto) * 100),
     donor_email: payload.Cliente?.EMail ?? null,
     donor_name: `${firstName} ${lastName}`.trim() || "Donante",
-    raw_body: JSON.stringify(payload),
+    raw_body: rawBody,
     headers_json: "{}",
     received_at: "2026-06-26T01:46:47.015Z",
     processed_at: null,
@@ -611,6 +612,114 @@ describe("advanced CDE generation", () => {
 });
 
 describe("Wompi webhook integration", () => {
+  const losslessBodyEdges: Array<{
+    name: string;
+    marker: string;
+    mutateStored?: (raw: Record<string, unknown>) => void;
+    mutateIncoming: (raw: Record<string, unknown>) => void;
+  }> = [
+    {
+      name: "an unknown nested extra value",
+      marker: "unknown-edge-private-marker",
+      mutateIncoming: (raw) => {
+        raw.ProviderEvidence = {
+          nested: { decision: "unknown-edge-private-marker" },
+          steps: [1, { approved: true }]
+        };
+      }
+    },
+    {
+      name: "explicit null instead of a missing member",
+      marker: "IdExterno",
+      mutateIncoming: (raw) => {
+        raw.IdExterno = null;
+      }
+    },
+    {
+      name: "a duplicate documented alias",
+      marker: "999.00",
+      mutateIncoming: (raw) => {
+        raw.monto = "999.00";
+      }
+    },
+    {
+      name: "a numeric string instead of a number",
+      marker: "Cantidad",
+      mutateIncoming: (raw) => {
+        raw.Cantidad = "1";
+      }
+    },
+    {
+      name: "a different nested array order",
+      marker: "array-order-private-marker",
+      mutateStored: (raw) => {
+        raw.ProviderEvidence = {
+          history: [1, 2, { note: "array-order-private-marker" }]
+        };
+      },
+      mutateIncoming: (raw) => {
+        raw.ProviderEvidence = {
+          history: [2, 1, { note: "array-order-private-marker" }]
+        };
+      }
+    }
+  ];
+
+  it.each(
+    (["same-ID", "alternate-ID"] as const).flatMap((replayKind) =>
+      losslessBodyEdges.map((edge) => ({ replayKind, ...edge }))
+    )
+  )("rejects a $replayKind replay with $name", async ({
+    replayKind,
+    marker,
+    mutateStored,
+    mutateIncoming
+  }) => {
+    const db = new InMemoryD1();
+    seedCollisionIntent(db);
+    const alternate = replayKind === "alternate-ID";
+    const storedPayload = collisionWebhook({
+      IdTransaccion: alternate ? "lossless-stored-transaction" : "collision-transaction"
+    });
+    const storedRaw = structuredClone(storedPayload) as unknown as Record<string, unknown>;
+    const incomingRaw = structuredClone(storedPayload) as unknown as Record<string, unknown>;
+    mutateStored?.(storedRaw);
+    mutateIncoming(incomingRaw);
+    if (alternate) {
+      incomingRaw.IdTransaccion = "lossless-alternate-transaction";
+    }
+    seedCanonicalWompiEvent(
+      db,
+      storedPayload,
+      "wompi_lossless_canonical",
+      JSON.stringify(storedRaw)
+    );
+    const canonicalBefore = structuredClone(db.wompiEvents);
+    const send = vi.fn();
+
+    const response = await postRawSignedWompi(db, JSON.stringify(incomingRaw), send);
+    const responseBody = await response.json();
+
+    expect(response.status).toBe(409);
+    expect(responseBody).toEqual({ error: "wompi_event_conflict" });
+    expect(send).not.toHaveBeenCalled();
+    expect(db.donationIntents[0].paid_at).toBeNull();
+    expect(db.wompiEvents).toEqual(canonicalBefore);
+    const audit = db.audits.find((row) => row.action === "WOMPI_EVENT_CONFLICT");
+    expect(audit).toMatchObject({
+      entity_type: "wompi_event",
+      entity_id: "wompi_lossless_canonical",
+      summary: "Evento Wompi rechazado por conflicto con el registro canónico"
+    });
+    expect(JSON.parse(String(audit!.metadata_json))).toEqual({
+      reason: "canonical_mismatch",
+      fields: ["normalized_body"]
+    });
+    const boundedOutput = JSON.stringify({ responseBody, audit });
+    expect(boundedOutput).not.toContain(marker);
+    expect(boundedOutput).not.toContain(String(incomingRaw.IdTransaccion));
+  });
+
   it.each([
     {
       name: "environment",
@@ -835,10 +944,18 @@ describe("Wompi webhook integration", () => {
     seedCollisionIntent(db);
     const send = vi.fn();
     const canonicalPayload = collisionWebhook();
-    const canonicalRawBody = JSON.stringify(canonicalPayload);
+    const canonicalRawBody = JSON.stringify({
+      ...canonicalPayload,
+      ProviderEvidence: {
+        nested: { first: 1, second: 2 }
+      }
+    });
 
-    const first = await postSignedWompi(db, canonicalPayload, send);
+    const first = await postRawSignedWompi(db, canonicalRawBody, send);
     const replayRawBody = JSON.stringify({
+      ProviderEvidence: {
+        nested: { second: 2, first: 1 }
+      },
       cliente: {
         celular: "70000005",
         email: "donor@example.org",
