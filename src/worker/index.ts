@@ -932,6 +932,9 @@ async function handleWompiWebhook(request: Request, env: Env): Promise<Response>
     insertedAction: "WOMPI_RECEIVED",
     duplicateAction: "WOMPI_DUPLICATE"
   });
+  if (ingested.conflict) {
+    return jsonResponse({ error: "wompi_event_conflict" }, { status: 409 });
+  }
   return jsonResponse({
     ok: true,
     wompiEventId: ingested.wompiEventId,
@@ -1053,21 +1056,49 @@ async function ingestTrustedWompiPayload(
   inserted: boolean;
   queued: boolean;
   environmentAllowed: boolean;
+  conflict: boolean;
 }> {
   // The signed webhook or authenticated payment-link response remains the event's
   // fiscal environment, but the deployment capability decides whether this Worker
   // may issue it. Incompatible events are retained as evidence and quarantined.
-  const environment = ambienteFromWompi(payload);
+  const incomingEnvironment = ambienteFromWompi(payload);
+  const insertion = await repo.insertWompiEvent(
+    payload,
+    rawBody,
+    headers,
+    incomingEnvironment
+  );
+  if (insertion.kind === "conflict") {
+    await repo.createAudit({
+      action: "WOMPI_EVENT_CONFLICT",
+      entityType: "wompi_event",
+      entityId: insertion.record.id,
+      summary: "Evento Wompi rechazado por conflicto con el registro canónico",
+      metadata: {
+        reason: insertion.reason,
+        fields: insertion.fields
+      }
+    });
+    return {
+      wompiEventId: insertion.record.id,
+      inserted: false,
+      queued: false,
+      environmentAllowed: false,
+      conflict: true
+    };
+  }
+  const { record, canonicalPayload } = insertion;
+  const inserted = insertion.kind === "inserted";
+  const environment = record.environment;
   const policy = deploymentEnvironmentPolicy(env);
   const environmentAllowed = policy.allowedAmbiente === environment;
-  const { record, inserted } = await repo.insertWompiEvent(payload, rawBody, headers, environment);
   const action = inserted ? source.insertedAction : source.duplicateAction;
   if (action) {
     await repo.createAudit({
       action,
       entityType: "wompi_event",
       entityId: record.id,
-      summary: `${payload.IdTransaccion} ${payload.ResultadoTransaccion}`,
+      summary: `${canonicalPayload.IdTransaccion} ${canonicalPayload.ResultadoTransaccion}`,
       metadata: source.auditMetadata
     });
   }
@@ -1090,10 +1121,10 @@ async function ingestTrustedWompiPayload(
   // Runs on replays too (markIntentPaid is idempotent). Wrapped defensively — a
   // bad/unknown intent id must never break webhook processing.
   if (environmentAllowed) {
-    await markIntentPaidFromWebhook(env, repo, payload);
+    await markIntentPaidFromWebhook(env, repo, canonicalPayload);
   }
   let queued = false;
-  if (environmentAllowed && isApprovedDonation(payload)) {
+  if (environmentAllowed && isApprovedDonation(canonicalPayload)) {
     // Claim on duplicates too. If a previous delivery inserted the event but failed
     // before queueing it, the CAS repairs that gap; an already-queued event returns null.
     const attemptId = await repo.claimInitialWompiIssuanceAttempt(record.id);
@@ -1106,7 +1137,8 @@ async function ingestTrustedWompiPayload(
     wompiEventId: record.id,
     inserted,
     queued,
-    environmentAllowed
+    environmentAllowed,
+    conflict: false
   };
 }
 

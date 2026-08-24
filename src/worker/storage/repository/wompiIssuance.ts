@@ -6,7 +6,13 @@ import type {
   WompiIssuanceRetrySnapshot,
   WompiWebhook
 } from "../../types";
-import { amountCents, donorName, isApprovedDonation } from "../../domain/wompi";
+import {
+  ambienteFromWompi,
+  amountCents,
+  donorName,
+  isApprovedDonation,
+  normalizeWompiWebhook
+} from "../../domain/wompi";
 import {
   normalizeAuditIp,
   serializeAuditContext,
@@ -25,6 +31,28 @@ type WompiHost = Pick<
   Repository,
   "getWompiEventById" | "getWompiEventByTransaction" | "getWompiEventByPaymentLinkId"
 >;
+
+export type WompiEventConflictField =
+  | "identity"
+  | "environment"
+  | "result"
+  | "amount"
+  | "payment_link"
+  | "commerce_intent"
+  | "normalized_body";
+
+export type WompiEventInsertResult =
+  | {
+      kind: "inserted" | "equivalent_replay";
+      record: WompiEventRecord;
+      canonicalPayload: WompiWebhook;
+    }
+  | {
+      kind: "conflict";
+      record: WompiEventRecord;
+      reason: "identity_lookup_conflict" | "canonical_mismatch";
+      fields: WompiEventConflictField[];
+    };
 
 const WOMPI_ISSUANCE_CLAIM_STALE_MS = 15 * 60 * 1000;
 const ISSUANCE_RETRIES_EXHAUSTED_CODE = "ISSUANCE_RETRIES_EXHAUSTED";
@@ -46,13 +74,8 @@ export async function insertWompiEvent(
   rawBody: string,
   headers: Record<string, string>,
   environment: Ambiente
-): Promise<{ record: WompiEventRecord; inserted: boolean }> {
+): Promise<WompiEventInsertResult> {
   const paymentLinkId = dynamicApprovedPaymentLinkId(payload);
-  const existing = await host.getWompiEventByTransaction(payload.IdTransaccion)
-    ?? (paymentLinkId === null ? null : await host.getWompiEventByPaymentLinkId(paymentLinkId));
-  if (existing) {
-    return { record: existing, inserted: false };
-  }
   const id = newId("wompi");
   const result = await db
     .prepare(
@@ -75,14 +98,37 @@ export async function insertWompiEvent(
     )
     .run();
   const inserted = Number(result.meta?.changes ?? 0) === 1;
-  const record = inserted
-    ? await host.getWompiEventById(id)
-    : await host.getWompiEventByTransaction(payload.IdTransaccion)
-      ?? (paymentLinkId === null ? null : await host.getWompiEventByPaymentLinkId(paymentLinkId));
+  if (inserted) {
+    const record = await host.getWompiEventById(id);
+    if (!record) {
+      throw new Error("No se pudo leer el evento Wompi creado");
+    }
+    const canonicalPayload = storedCanonicalPayload(record);
+    if (!canonicalPayload) {
+      throw new Error("No se pudo reconstruir el evento Wompi creado");
+    }
+    return { kind: "inserted", record, canonicalPayload };
+  }
+
+  // A uniqueness race can happen after any pre-read, so an ignored insert is
+  // always resolved by fresh reads of both provider identifiers.
+  const transactionRecord = await host.getWompiEventByTransaction(payload.IdTransaccion);
+  const paymentLinkRecord = paymentLinkId === null
+    ? null
+    : await host.getWompiEventByPaymentLinkId(paymentLinkId);
+  if (transactionRecord && paymentLinkRecord && transactionRecord.id !== paymentLinkRecord.id) {
+    return {
+      kind: "conflict",
+      record: transactionRecord,
+      reason: "identity_lookup_conflict",
+      fields: ["identity"]
+    };
+  }
+  const record = transactionRecord ?? paymentLinkRecord;
   if (!record) {
     throw new Error("No se pudo leer el evento Wompi creado o deduplicado");
   }
-  return { record, inserted };
+  return compareWompiReplay(record, payload, environment);
 }
 
 export async function getWompiEventById(
@@ -117,6 +163,138 @@ function dynamicApprovedPaymentLinkId(payload: WompiWebhook): number | null {
   )
     ? Number(linkId)
     : null;
+}
+
+function compareWompiReplay(
+  record: WompiEventRecord,
+  incoming: WompiWebhook,
+  incomingEnvironment: Ambiente
+): WompiEventInsertResult {
+  const stored = storedCanonicalPayload(record);
+  if (!stored) {
+    return canonicalConflict(record, ["normalized_body"]);
+  }
+
+  const fields: WompiEventConflictField[] = [];
+  addConflict(
+    fields,
+    "environment",
+    record.environment !== ambienteFromWompi(stored)
+      || record.environment !== incomingEnvironment
+  );
+  addConflict(
+    fields,
+    "result",
+    record.result !== stored.ResultadoTransaccion
+      || record.result !== incoming.ResultadoTransaccion
+  );
+  addConflict(
+    fields,
+    "amount",
+    record.amount_cents !== amountCents(stored)
+      || record.amount_cents !== amountCents(incoming)
+  );
+
+  const storedPaymentLink = paymentLinkIdentifier(stored);
+  const incomingPaymentLink = paymentLinkIdentifier(incoming);
+  addConflict(
+    fields,
+    "payment_link",
+    record.payment_link_id !== dynamicApprovedPaymentLinkId(stored)
+      || storedPaymentLink !== incomingPaymentLink
+  );
+
+  const storedIntent = commerceIntentIdentifier(stored);
+  const incomingIntent = commerceIntentIdentifier(incoming);
+  addConflict(fields, "commerce_intent", storedIntent !== incomingIntent);
+
+  const sameTransaction = record.transaction_id === incoming.IdTransaccion;
+  const canonicalStored = canonicalNormalizedPayload(stored, !sameTransaction);
+  const canonicalIncoming = canonicalNormalizedPayload(incoming, !sameTransaction);
+  const alternateTransactionAllowed = sameTransaction || (
+    record.transaction_id === stored.IdTransaccion
+    && dynamicApprovedPaymentLinkId(stored) !== null
+    && dynamicApprovedPaymentLinkId(stored) === dynamicApprovedPaymentLinkId(incoming)
+    && storedIntent === incomingIntent
+  );
+  addConflict(
+    fields,
+    "normalized_body",
+    canonicalStored !== canonicalIncoming || !alternateTransactionAllowed
+  );
+
+  return fields.length === 0
+    ? { kind: "equivalent_replay", record, canonicalPayload: stored }
+    : canonicalConflict(record, fields);
+}
+
+function canonicalConflict(
+  record: WompiEventRecord,
+  fields: WompiEventConflictField[]
+): Extract<WompiEventInsertResult, { kind: "conflict" }> {
+  return {
+    kind: "conflict",
+    record,
+    reason: "canonical_mismatch",
+    fields
+  };
+}
+
+function addConflict(
+  fields: WompiEventConflictField[],
+  field: WompiEventConflictField,
+  conflicting: boolean
+): void {
+  if (conflicting && !fields.includes(field)) {
+    fields.push(field);
+  }
+}
+
+function storedCanonicalPayload(record: WompiEventRecord): WompiWebhook | null {
+  try {
+    return normalizeWompiWebhook(JSON.parse(record.raw_body));
+  } catch {
+    return null;
+  }
+}
+
+function paymentLinkIdentifier(payload: WompiWebhook): number | null {
+  const linkId = payload.EnlacePago?.Id;
+  return Number.isInteger(linkId) && Number(linkId) > 0 ? Number(linkId) : null;
+}
+
+function commerceIntentIdentifier(payload: WompiWebhook): string | null {
+  return payload.EnlacePago?.IdentificadorEnlaceComercio?.trim() || null;
+}
+
+function canonicalNormalizedPayload(
+  payload: WompiWebhook,
+  excludeTransactionId: boolean
+): string {
+  if (!excludeTransactionId) {
+    return stableJson(payload);
+  }
+  const { IdTransaccion: _excludedTransactionId, ...withoutTransactionId } = payload;
+  return stableJson(withoutTransactionId);
+}
+
+function stableJson(value: unknown): string {
+  return JSON.stringify(sortJson(value));
+}
+
+function sortJson(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(sortJson);
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .filter(([, member]) => member !== undefined)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, member]) => [key, sortJson(member)])
+    );
+  }
+  return value;
 }
 
 export async function claimWompiEventIssuance(

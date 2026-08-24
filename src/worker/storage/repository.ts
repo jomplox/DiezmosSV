@@ -202,7 +202,8 @@ import {
   markWompiIssuanceProcessing as markWompiIssuanceProcessingRepository,
   recordWompiIssuanceFailure as recordWompiIssuanceFailureRepository,
   releaseWompiEventIssuance as releaseWompiEventIssuanceRepository,
-  reserveWompiDocumentIdentifiers as reserveWompiDocumentIdentifiersRepository
+  reserveWompiDocumentIdentifiers as reserveWompiDocumentIdentifiersRepository,
+  type WompiEventInsertResult
 } from "./repository/wompiIssuance";
 import {
   claimDocumentInvalidation as claimDocumentInvalidationRepository,
@@ -596,7 +597,7 @@ export class Repository {
     return finalizeStripeAnnualStatementDeliveryRepository(this.db, input);
   }
 
-  async insertWompiEvent(payload: WompiWebhook, rawBody: string, headers: Record<string, string>, environment: Ambiente): Promise<{ record: WompiEventRecord; inserted: boolean }> {
+  async insertWompiEvent(payload: WompiWebhook, rawBody: string, headers: Record<string, string>, environment: Ambiente): Promise<WompiEventInsertResult> {
     return insertWompiEventRepository(this.db, this, payload, rawBody, headers, environment);
   }
 

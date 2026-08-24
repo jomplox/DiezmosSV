@@ -247,6 +247,7 @@ export class InMemoryD1 {
   beforeDocumentSignedUpdate: (() => void | Promise<void>) | null = null;
   beforeWompiIssuanceClaim: (() => void | Promise<void>) | null = null;
   beforeWompiIssuanceRetryClaim: (() => void | Promise<void>) | null = null;
+  beforeWompiEventInsert: (() => void | Promise<void>) | null = null;
   beforePostAcceptFinalizationClaim: (() => void | Promise<void>) | null = null;
   beforePostAcceptEmailDispatchMark: (() => void | Promise<void>) | null = null;
   beforeAuditCount: ((action: string, entityId: string) => Promise<void>) | null = null;
@@ -3790,6 +3791,9 @@ export class Statement {
       }
     }
     if (this.sql.includes("INSERT") && this.sql.includes("INTO wompi_events")) {
+      const beforeInsert = this.db.beforeWompiEventInsert;
+      this.db.beforeWompiEventInsert = null;
+      await beforeInsert?.();
       const [
         id,
         transactionId,
