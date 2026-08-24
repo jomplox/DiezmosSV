@@ -199,6 +199,7 @@ const STRIPE_PORTAL_IP_LIMIT = 10;
 const STRIPE_PORTAL_CUSTOMER_LIMIT = 5;
 const STRIPE_PORTAL_AGGREGATE_LIMIT = 100;
 const STRIPE_PORTAL_PATH = "/api/donations/stripe/portal";
+const STRICT_TRANSPORT_SECURITY = "max-age=31536000";
 
 // Public donation endpoints parse untrusted JSON before validation and rate-limit
 // admission. Cap bodies at 16 KiB (normal payloads are a few hundred bytes) so an
@@ -455,47 +456,57 @@ function emergencyDonationShutdownResponse(request: Request, env: Env, url: URL)
   });
 }
 
+async function handleFetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
+  try {
+    const url = new URL(request.url);
+    const shutdownResponse = emergencyDonationShutdownResponse(request, env, url);
+    if (shutdownResponse) {
+      return shutdownResponse;
+    }
+    if (url.pathname.startsWith("/api/")) {
+      return await handleApi(request, env, url, ctx);
+    }
+    if (url.pathname === "/webhooks/wompi") {
+      return await handleWompiWebhook(request, env);
+    }
+    if (url.pathname === "/webhooks/stripe") {
+      return await handleStripeWebhook(request, env, ctx);
+    }
+    const documentRedirect = redirectToCanonicalDocument(env, url);
+    if (documentRedirect) {
+      return documentRedirect;
+    }
+    return documentResponseWithSecurityHeaders(await env.ASSETS.fetch(request));
+  } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      return jsonResponse({ error: "request_body_too_large", message: "La solicitud es demasiado grande." }, { status: 413 });
+    }
+    if (error instanceof InvalidJsonBodyError) {
+      return jsonResponse({ error: "invalid_json_body", message: "La solicitud no contiene JSON válido." }, { status: 400 });
+    }
+    if (error instanceof AuthError) {
+      return jsonResponse({ error: "auth_error", message: error.message }, { status: error.status });
+    }
+    if (error instanceof EnvironmentNotAllowedError) {
+      return jsonResponse({ error: error.code, message: error.message }, { status: 409 });
+    }
+    if (error instanceof PaymentCollectionDisabledError) {
+      return jsonResponse({ error: error.code, message: error.message }, { status: 503 });
+    }
+    logWorkerError(env, "unhandled_worker_request_error", error);
+    return jsonResponse({ error: "internal_error", message: "Ocurrió un error interno." }, { status: 500 });
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
-    try {
-      const url = new URL(request.url);
-      const shutdownResponse = emergencyDonationShutdownResponse(request, env, url);
-      if (shutdownResponse) {
-        return shutdownResponse;
-      }
-      if (url.pathname.startsWith("/api/")) {
-        return await handleApi(request, env, url, ctx);
-      }
-      if (url.pathname === "/webhooks/wompi") {
-        return await handleWompiWebhook(request, env);
-      }
-      if (url.pathname === "/webhooks/stripe") {
-        return await handleStripeWebhook(request, env, ctx);
-      }
-      const documentRedirect = redirectToCanonicalDocument(env, url);
-      if (documentRedirect) {
-        return documentRedirect;
-      }
-      return documentResponseWithSecurityHeaders(await env.ASSETS.fetch(request));
-    } catch (error) {
-      if (error instanceof RequestBodyTooLargeError) {
-        return jsonResponse({ error: "request_body_too_large", message: "La solicitud es demasiado grande." }, { status: 413 });
-      }
-      if (error instanceof InvalidJsonBodyError) {
-        return jsonResponse({ error: "invalid_json_body", message: "La solicitud no contiene JSON válido." }, { status: 400 });
-      }
-      if (error instanceof AuthError) {
-        return jsonResponse({ error: "auth_error", message: error.message }, { status: error.status });
-      }
-      if (error instanceof EnvironmentNotAllowedError) {
-        return jsonResponse({ error: error.code, message: error.message }, { status: 409 });
-      }
-      if (error instanceof PaymentCollectionDisabledError) {
-        return jsonResponse({ error: error.code, message: error.message }, { status: 503 });
-      }
-      logWorkerError(env, "unhandled_worker_request_error", error);
-      return jsonResponse({ error: "internal_error", message: "Ocurrió un error interno." }, { status: 500 });
+    const response = await handleFetch(request, env, ctx);
+    if (env.APP_ENV !== "production") {
+      return response;
     }
+    const wrappedResponse = new Response(response.body, response);
+    wrappedResponse.headers.set("Strict-Transport-Security", STRICT_TRANSPORT_SECURITY);
+    return wrappedResponse;
   },
 
   async queue(batch: MessageBatch<IssuanceMessage>, env: Env): Promise<void> {
