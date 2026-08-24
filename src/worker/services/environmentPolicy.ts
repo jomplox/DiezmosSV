@@ -72,6 +72,7 @@ export async function assertFiscalCollectionReady(env: Env): Promise<Ambiente> {
   requireSecret(env, `MH_PASSWORD_${credentialLane}` as keyof Env);
   mhEndpoint(env, "auth", ambiente);
   mhEndpoint(env, "recepcion", ambiente);
+  mhEndpoint(env, "anulacion", ambiente);
   const certificate = await assertMhSigningMaterialReady(
     getMhCertificateXml(env),
     requireSecret(env, "MH_CERT_PASSWORD")

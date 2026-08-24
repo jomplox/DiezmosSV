@@ -175,5 +175,39 @@ export function getMhCertificateXml(env: Env): string {
 export function mhEndpoint(env: Env, name: "auth" | "recepcion" | "anulacion", ambiente: "00" | "01"): string {
   const suffix = ambiente === "01" ? "PROD" : "TEST";
   const key = `MH_${name.toUpperCase()}_URL_${suffix}` as keyof Env;
-  return requireSecret(env, key);
+  const value = requireSecret(env, key);
+  const expected = MH_ENDPOINTS[ambiente][name];
+  if (!isExpectedMhEndpoint(value, expected)) {
+    throw new Error(`MH endpoint ${String(key)} debe ser ${expected}`);
+  }
+  return value;
+}
+
+const MH_ENDPOINTS = {
+  "00": {
+    auth: "https://apitest.dtes.mh.gob.sv/seguridad/auth",
+    recepcion: "https://apitest.dtes.mh.gob.sv/fesv/recepciondte",
+    anulacion: "https://apitest.dtes.mh.gob.sv/fesv/anulardte"
+  },
+  "01": {
+    auth: "https://api.dtes.mh.gob.sv/seguridad/auth",
+    recepcion: "https://api.dtes.mh.gob.sv/fesv/recepciondte",
+    anulacion: "https://api.dtes.mh.gob.sv/fesv/anulardte"
+  }
+} as const;
+
+function isExpectedMhEndpoint(value: string, expected: string): boolean {
+  if (value !== value.trim()) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:"
+      && url.username === ""
+      && url.password === ""
+      && url.port === ""
+      && url.search === ""
+      && url.hash === ""
+      && `${url.origin}${url.pathname}` === expected;
+  } catch {
+    return false;
+  }
 }

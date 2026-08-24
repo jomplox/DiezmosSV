@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getEmisorConfig, getMhCertificateXml, isMockMode } from "../../src/worker/config";
+import { getEmisorConfig, getMhCertificateXml, isMockMode, mhEndpoint } from "../../src/worker/config";
 import type { Env } from "../../src/worker/types";
 import { emisorConfig } from "./fixtures";
 
@@ -59,6 +59,27 @@ describe("worker config", () => {
         })
       )
     ).toThrow(/CAT-013/i);
+  });
+});
+
+describe("MH endpoints", () => {
+  it.each([
+    ["auth", "00", "MH_AUTH_URL_TEST", "https://apitest.dtes.mh.gob.sv/seguridad/auth"],
+    ["recepcion", "00", "MH_RECEPCION_URL_TEST", "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"],
+    ["anulacion", "00", "MH_ANULACION_URL_TEST", "https://apitest.dtes.mh.gob.sv/fesv/anulardte"],
+    ["auth", "01", "MH_AUTH_URL_PROD", "https://api.dtes.mh.gob.sv/seguridad/auth"],
+    ["recepcion", "01", "MH_RECEPCION_URL_PROD", "https://api.dtes.mh.gob.sv/fesv/recepciondte"],
+    ["anulacion", "01", "MH_ANULACION_URL_PROD", "https://api.dtes.mh.gob.sv/fesv/anulardte"]
+  ] as const)("accepts the %s endpoint for MH lane %s", (name, ambiente, key, endpoint) => {
+    expect(mhEndpoint(env({ [key]: endpoint }), name, ambiente)).toBe(endpoint);
+  });
+
+  it.each([
+    ["HTTP", "auth", "00", "MH_AUTH_URL_TEST", "http://apitest.dtes.mh.gob.sv/seguridad/auth"],
+    ["production lane", "recepcion", "00", "MH_RECEPCION_URL_TEST", "https://api.dtes.mh.gob.sv/fesv/recepciondte"],
+    ["wrong service path", "anulacion", "01", "MH_ANULACION_URL_PROD", "https://api.dtes.mh.gob.sv/fesv/recepciondte"]
+  ] as const)("rejects an %s %s endpoint outside the requested lane", (_label, name, ambiente, key, endpoint) => {
+    expect(() => mhEndpoint(env({ [key]: endpoint }), name, ambiente)).toThrow(/MH endpoint/i);
   });
 });
 

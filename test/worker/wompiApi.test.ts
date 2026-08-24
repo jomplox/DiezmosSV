@@ -266,7 +266,8 @@ describe("Wompi API service", () => {
   it.each([
     ["credentials", (env: Env) => { delete env.MH_USER_TEST; }],
     ["authentication endpoint", (env: Env) => { delete env.MH_AUTH_URL_TEST; }],
-    ["reception endpoint", (env: Env) => { delete env.MH_RECEPCION_URL_TEST; }]
+    ["reception endpoint", (env: Env) => { delete env.MH_RECEPCION_URL_TEST; }],
+    ["invalidation endpoint", (env: Env) => { delete env.MH_ANULACION_URL_TEST; }]
   ])("fails closed before Wompi when the MH TEST %s is missing", async (_label, makeInvalid) => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
@@ -274,6 +275,20 @@ describe("Wompi API service", () => {
     makeInvalid(env);
 
     await expect(new WompiApiService(env).createPaymentLink(intent())).rejects.toThrow();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["an insecure authentication endpoint", (env: Env) => { env.MH_AUTH_URL_TEST = "http://apitest.dtes.mh.gob.sv/seguridad/auth"; }],
+    ["a cross-lane reception endpoint", (env: Env) => { env.MH_RECEPCION_URL_TEST = "https://api.dtes.mh.gob.sv/fesv/recepciondte"; }],
+    ["an invalidation endpoint for another MH service", (env: Env) => { env.MH_ANULACION_URL_TEST = "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"; }]
+  ])("fails closed before Wompi when MH TEST has %s", async (_label, makeInvalid) => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const env = realEnv();
+    makeInvalid(env);
+
+    await expect(new WompiApiService(env).createPaymentLink(intent())).rejects.toThrow(/MH endpoint/i);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -734,7 +749,8 @@ function realEnv(db: FakeD1 = new FakeD1()): Env {
     MH_USER_TEST: "test-mh-user",
     MH_PASSWORD_TEST: "test-mh-password",
     MH_AUTH_URL_TEST: "https://apitest.dtes.mh.gob.sv/seguridad/auth",
-    MH_RECEPCION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"
+    MH_RECEPCION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/recepciondte",
+    MH_ANULACION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/anulardte"
   };
 }
 
