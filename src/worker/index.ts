@@ -1646,7 +1646,7 @@ async function prepareExistingStripeCheckoutCreation(
   });
   if (!reclaimed) {
     if (definiteFailureAdmission?.claim.kind === "CLAIMED") {
-      await ctx.repo.releaseUnusedProviderCreationClaim(definiteFailureAdmission.id);
+      await releaseLostStripeRetryClaim(ctx, definiteFailureAdmission.id);
     }
     const current = await ctx.repo.getStripeCheckoutById(existing.id);
     return current
@@ -1654,6 +1654,26 @@ async function prepareExistingStripeCheckoutCreation(
       : stripeCheckoutIndeterminateResponse();
   }
   return { checkout: reclaimed, params: request.params };
+}
+
+async function releaseLostStripeRetryClaim(
+  ctx: ApiRouteContext,
+  claimId: string
+): Promise<void> {
+  try {
+    await ctx.repo.releaseUnusedProviderCreationClaim(claimId);
+    return;
+  } catch (error) {
+    logWorkerError(ctx.env, "stripe_checkout_claim_cleanup_retry", error);
+  }
+
+  try {
+    await ctx.repo.releaseUnusedProviderCreationClaim(claimId);
+  } catch (error) {
+    // The claim is unattached and expires after the fixed admission window. A
+    // later cleanup sweep removes it; never retry in a loop or reach Stripe.
+    logWorkerError(ctx.env, "stripe_checkout_claim_cleanup_deferred", error);
+  }
 }
 
 async function buildStripeCheckoutCreationRequest(

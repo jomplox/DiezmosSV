@@ -196,6 +196,22 @@ const MH_ENDPOINTS = {
   }
 } as const;
 
+export function resolveMhTestAuthFallbackEndpoint(env: Env): string | null {
+  const value = env.MH_AUTH_URL_TEST_FALLBACK;
+  if (value === undefined || value === "") {
+    return null;
+  }
+  if (value === MH_ENDPOINTS["00"].auth) {
+    return null;
+  }
+  if (value === MH_ENDPOINTS["01"].auth) {
+    return value;
+  }
+  throw new Error(
+    `MH_AUTH_URL_TEST_FALLBACK debe ser ${MH_ENDPOINTS["00"].auth}, ${MH_ENDPOINTS["01"].auth}, o estar vacío`
+  );
+}
+
 function isExpectedMhEndpoint(value: string, expected: string): boolean {
   if (value !== value.trim()) return false;
   try {

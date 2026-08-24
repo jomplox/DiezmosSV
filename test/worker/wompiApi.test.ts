@@ -319,6 +319,29 @@ describe("Wompi API service", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("fails fiscal readiness on a hostile optional MH TEST fallback before the first Wompi fetch", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({
+        access_token: "wompi-access-token",
+        expires_in: 3600,
+        token_type: "Bearer"
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        idEnlace: 1,
+        urlEnlace: "https://s.wompi.sv/1",
+        urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1"
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+    const env = realEnv();
+    env.MH_AUTH_URL_TEST_FALLBACK = "https://credentials.example/collect";
+
+    const error = await new WompiApiService(env).createPaymentLink(intent()).catch((caught: unknown) => caught);
+
+    expectSafeConfigurationError(error);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("uses the production MH credential lane before contacting Wompi in production", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);

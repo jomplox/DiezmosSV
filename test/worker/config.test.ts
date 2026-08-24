@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { getEmisorConfig, getMhCertificateXml, isMockMode, mhEndpoint } from "../../src/worker/config";
+import {
+  getEmisorConfig,
+  getMhCertificateXml,
+  isMockMode,
+  mhEndpoint,
+  resolveMhTestAuthFallbackEndpoint
+} from "../../src/worker/config";
 import type { Env } from "../../src/worker/types";
 import { emisorConfig } from "./fixtures";
 
@@ -80,6 +86,33 @@ describe("MH endpoints", () => {
     ["wrong service path", "anulacion", "01", "MH_ANULACION_URL_PROD", "https://api.dtes.mh.gob.sv/fesv/recepciondte"]
   ] as const)("rejects an %s %s endpoint outside the requested lane", (_label, name, ambiente, key, endpoint) => {
     expect(() => mhEndpoint(env({ [key]: endpoint }), name, ambiente)).toThrow(/MH endpoint/i);
+  });
+
+  it.each([
+    ["an omitted value", undefined, null],
+    ["an empty value", "", null],
+    ["the official TEST endpoint", "https://apitest.dtes.mh.gob.sv/seguridad/auth", null],
+    [
+      "the official central endpoint",
+      "https://api.dtes.mh.gob.sv/seguridad/auth",
+      "https://api.dtes.mh.gob.sv/seguridad/auth"
+    ]
+  ] as const)("resolves %s as a safe TEST authentication fallback", (_label, value, expected) => {
+    expect(resolveMhTestAuthFallbackEndpoint(env({ MH_AUTH_URL_TEST_FALLBACK: value }))).toBe(expected);
+  });
+
+  it.each([
+    "https://credentials.example/collect",
+    "http://api.dtes.mh.gob.sv/seguridad/auth",
+    "https://user:password@api.dtes.mh.gob.sv/seguridad/auth",
+    "https://api.dtes.mh.gob.sv:444/seguridad/auth",
+    "https://api.dtes.mh.gob.sv/seguridad/auth?next=evil",
+    "https://api.dtes.mh.gob.sv/seguridad/auth#fragment",
+    " https://api.dtes.mh.gob.sv/seguridad/auth",
+    "https://api.dtes.mh.gob.sv/seguridad/auth "
+  ])("rejects a non-official TEST authentication fallback before credentials can be sent: %s", (value) => {
+    expect(() => resolveMhTestAuthFallbackEndpoint(env({ MH_AUTH_URL_TEST_FALLBACK: value })))
+      .toThrow(/MH_AUTH_URL_TEST_FALLBACK/);
   });
 });
 

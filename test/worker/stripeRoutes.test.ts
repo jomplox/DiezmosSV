@@ -659,7 +659,7 @@ describe("Stripe public donation routes", () => {
 
     const retry = await createCheckout({
       ...stripeProxyEnv(workerEnv),
-      DB: losing
+      DB: losing.db
     }, {
       requestId,
       amount: 50,
@@ -669,6 +669,7 @@ describe("Stripe public donation routes", () => {
     expect(retry.response.status).toBe(409);
     expect(retry.body).toMatchObject({ error: "stripe_checkout_unavailable" });
     expect(providerFetch).not.toHaveBeenCalled();
+    expect(losing.releaseAttempts()).toBe(1);
     expect(database.prepare(
       "SELECT COUNT(*) AS count FROM provider_creation_claims WHERE stripe_request_id = ?"
     ).get(requestId)).toEqual({ count: 0 });
@@ -682,6 +683,84 @@ describe("Stripe public donation routes", () => {
       idempotency_generation: 1,
       provider_creation_claim_id: "lost_cas_old_retry_claim"
     });
+  });
+
+  it("retries lost-CAS claim cleanup once after the first release throws", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:16:00.000Z") });
+    seedDefiniteFailureCheckout(database, { claimId: "lost_cas_retry_cleanup_old_claim" });
+    const providerFetch = stubSuccessfulStripeCreation();
+    const losing = withLosingDefiniteRetryCas(database, 1);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const retry = await createCheckout({
+      ...stripeProxyEnv(workerEnv),
+      DB: losing.db
+    }, {
+      requestId,
+      amount: 50,
+      frequency: "once"
+    });
+    const cleanupEvents = errorLog.mock.calls
+      .map(([entry]) => entry)
+      .filter((entry) => (entry as { event?: string }).event?.startsWith("stripe_checkout_claim_cleanup_"));
+    errorLog.mockRestore();
+
+    expect(retry.response.status).toBe(409);
+    expect(retry.body).toMatchObject({ error: "stripe_checkout_unavailable" });
+    expect(losing.releaseAttempts()).toBe(2);
+    expect(providerFetch).not.toHaveBeenCalled();
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM provider_creation_claims WHERE stripe_request_id = ?"
+    ).get(requestId)).toEqual({ count: 0 });
+    expect(cleanupEvents).toEqual([{
+      event: "stripe_checkout_claim_cleanup_retry",
+      app_env: "local",
+      error_name: "error",
+      error_code: "unknown"
+    }]);
+  });
+
+  it("bounds lost-CAS claim cleanup at two attempts and relies on expiry when both throw", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:16:00.000Z") });
+    seedDefiniteFailureCheckout(database, { claimId: "lost_cas_deferred_cleanup_old_claim" });
+    const providerFetch = stubSuccessfulStripeCreation();
+    const losing = withLosingDefiniteRetryCas(database, 2);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const retry = await createCheckout({
+      ...stripeProxyEnv(workerEnv),
+      DB: losing.db
+    }, {
+      requestId,
+      amount: 50,
+      frequency: "once"
+    });
+    const cleanupEvents = errorLog.mock.calls
+      .map(([entry]) => entry)
+      .filter((entry) => (entry as { event?: string }).event?.startsWith("stripe_checkout_claim_cleanup_"));
+    errorLog.mockRestore();
+
+    expect(retry.response.status).toBe(409);
+    expect(retry.body).toMatchObject({ error: "stripe_checkout_unavailable" });
+    expect(losing.releaseAttempts()).toBe(2);
+    expect(providerFetch).not.toHaveBeenCalled();
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM provider_creation_claims WHERE stripe_request_id = ?"
+    ).get(requestId)).toEqual({ count: 1 });
+    expect(cleanupEvents).toEqual([
+      {
+        event: "stripe_checkout_claim_cleanup_retry",
+        app_env: "local",
+        error_name: "error",
+        error_code: "unknown"
+      },
+      {
+        event: "stripe_checkout_claim_cleanup_deferred",
+        app_env: "local",
+        error_name: "error",
+        error_code: "unknown"
+      }
+    ]);
   });
 
   it("retains an attached refreshed claim when the definite retry provider call fails", async () => {
@@ -1447,28 +1526,48 @@ function stubSuccessfulStripeCreation(): ReturnType<typeof vi.fn<typeof fetch>> 
 }
 
 function withLosingDefiniteRetryCas(
-  database: ReturnType<typeof migratedDatabase>
-): D1Database {
+  database: ReturnType<typeof migratedDatabase>,
+  releaseFailures = 0
+): { db: D1Database; releaseAttempts(): number } {
   const base = sqliteD1(database);
+  let releaseAttempts = 0;
   return {
-    prepare(sql: string) {
-      const statement = base.prepare(sql);
-      if (
-        sql.includes("UPDATE stripe_checkout_sessions")
-        && sql.includes("provider_creation_claim_id = ?")
-        && sql.includes("creation_outcome_class = 'DEFINITE_FAILURE'")
-      ) {
-        const mutable = statement as unknown as {
-          first: <T>() => Promise<T | null>;
-        };
-        mutable.first = async <T>() => null as T | null;
+    db: {
+      prepare(sql: string) {
+        const statement = base.prepare(sql);
+        if (
+          sql.includes("UPDATE stripe_checkout_sessions")
+          && sql.includes("provider_creation_claim_id = ?")
+          && sql.includes("creation_outcome_class = 'DEFINITE_FAILURE'")
+        ) {
+          const mutable = statement as unknown as {
+            first: <T>() => Promise<T | null>;
+          };
+          mutable.first = async <T>() => null as T | null;
+        }
+        if (sql.includes("DELETE FROM provider_creation_claims")) {
+          const mutable = statement as unknown as {
+            run: (...args: unknown[]) => Promise<D1Result>;
+          };
+          const run = mutable.run.bind(mutable);
+          mutable.run = async (...args: unknown[]) => {
+            releaseAttempts += 1;
+            if (releaseAttempts <= releaseFailures) {
+              throw new Error("injected provider claim release failure");
+            }
+            return run(...args);
+          };
+        }
+        return statement;
+      },
+      batch(statements: D1PreparedStatement[]) {
+        return base.batch(statements);
       }
-      return statement;
-    },
-    batch(statements: D1PreparedStatement[]) {
-      return base.batch(statements);
+    } as D1Database,
+    releaseAttempts() {
+      return releaseAttempts;
     }
-  } as D1Database;
+  };
 }
 
 function withFailingStripeReservation(

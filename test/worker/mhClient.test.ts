@@ -20,6 +20,8 @@ const MH_SECRET_TOKEN_FORM_SEPARATOR = `bEaReR+${MH_BEARER_CREDENTIAL}`;
 const MH_OWS_SECRET_TOKEN = ` \t${MH_SECRET_TOKEN}\t `;
 const MH_OWS_SECRET_TOKEN_PERCENT = "%20%09bEaReR%20cache%20token%2Bcredential%2F%25%3F%20canary%09%20";
 const MH_OWS_SECRET_TOKEN_FORM = "+%09bEaReR+cache+token%2Bcredential%2F%25%3F+canary%09+";
+const MH_NUMERIC_USER = "73194620581734";
+const MH_NUMERIC_PASSWORD = "86420975318642";
 
 const MH_SECRET_VARIANTS = [
   MH_SECRET_USER,
@@ -38,7 +40,9 @@ const MH_SECRET_VARIANTS = [
   MH_SECRET_TOKEN_FORM_SEPARATOR,
   MH_OWS_SECRET_TOKEN,
   MH_OWS_SECRET_TOKEN_PERCENT,
-  MH_OWS_SECRET_TOKEN_FORM
+  MH_OWS_SECRET_TOKEN_FORM,
+  MH_NUMERIC_USER,
+  MH_NUMERIC_PASSWORD
 ];
 
 describe("MH client", () => {
@@ -73,6 +77,49 @@ describe("MH client", () => {
     ]);
     expect(fetchMock.mock.calls[1][1]?.body?.toString()).toBe("user=10000000000001&pwd=test-api-password");
     expect(fetchMock.mock.calls[2][1]?.headers).toMatchObject({ Authorization: "Bearer test-token" });
+  });
+
+  it("rejects a hostile TEST fallback after code 106 without sending credentials to it", async () => {
+    const environment = testEnv();
+    environment.MH_USER_TEST = MH_SECRET_USER;
+    environment.MH_PASSWORD_TEST = MH_SECRET_PASSWORD;
+    environment.MH_AUTH_URL_TEST_FALLBACK = "https://credentials.example/collect";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({
+        status: "ERROR",
+        body: { codigoMsg: "106", descripcionMsg: "CREDENCIALES INVÁLIDAS" }
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        status: "OK",
+        body: { token: "Bearer stolen-credential-proof" },
+        tokenType: "Bearer"
+      }))
+      .mockResolvedValueOnce(jsonResponse({ estado: "PROCESADO", selloRecibido: "UNREACHABLE" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await transmitTestDte(new MhClient(environment)).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(MhPreDispatchError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe("https://apitest.dtes.mh.gob.sv/seguridad/auth");
+    expectNoMhSecrets(serializeError(error));
+  });
+
+  it("treats the official TEST endpoint as a no-op fallback after code 106", async () => {
+    const environment = testEnv();
+    environment.MH_AUTH_URL_TEST_FALLBACK = "https://apitest.dtes.mh.gob.sv/seguridad/auth";
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      status: "ERROR",
+      body: { codigoMsg: "106", descripcionMsg: "CREDENCIALES INVÁLIDAS" }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await transmitTestDte(new MhClient(environment)).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(MhPreDispatchError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe("https://apitest.dtes.mh.gob.sv/seguridad/auth");
   });
 
   it("bounds both MH authentication and transmission below the DTE lease", async () => {
@@ -183,6 +230,52 @@ describe("MH client", () => {
     );
   });
 
+  it("stores the supported Bearer token type instead of provider-controlled authentication text", async () => {
+    const lookupStatement = {
+      bind: vi.fn().mockReturnThis(),
+      first: vi.fn().mockResolvedValue(null),
+      run: vi.fn().mockResolvedValue({})
+    };
+    const writeStatement = {
+      bind: vi.fn().mockReturnThis(),
+      first: vi.fn().mockResolvedValue(null),
+      run: vi.fn().mockResolvedValue({})
+    };
+    const environment = testEnv();
+    environment.MH_USER_TEST = MH_SECRET_USER;
+    environment.MH_PASSWORD_TEST = MH_SECRET_PASSWORD;
+    environment.DB = {
+      prepare: vi.fn((sql: string) => sql.includes("SELECT token, token_type")
+        ? lookupStatement
+        : writeStatement)
+    } as unknown as D1Database;
+    vi.stubGlobal("fetch", vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({
+        status: "OK",
+        body: { token: "Bearer safe-auth-token" },
+        tokenType: `provider ${MH_SECRET_USER} ${MH_SECRET_PASSWORD}`
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        estado: "PROCESADO",
+        selloRecibido: "SAFE-SEAL",
+        observaciones: []
+      })));
+
+    const result = await transmitTestDte(new MhClient(environment));
+
+    expect(result.accepted).toBe(true);
+    expect(writeStatement.bind).toHaveBeenCalledWith(
+      "00",
+      "Bearer safe-auth-token",
+      "Bearer",
+      expect.any(String),
+      expect.any(String)
+    );
+    const [ambiente, _token, tokenType, expiresAt, updatedAt] = writeStatement.bind.mock.calls[0];
+    expectNoMhSecrets(JSON.stringify({ ambiente, tokenType, expiresAt, updatedAt }));
+  });
+
   it("sanitizes credentials and authorization recursively before returning a terminal rejection", async () => {
     const environment = testEnv();
     environment.MH_USER_TEST = MH_SECRET_USER;
@@ -220,6 +313,81 @@ describe("MH client", () => {
     expect(result.observaciones).toHaveLength(3);
     expect(result.observaciones[2]).toBe("authorization=[REDACTED]");
     expectNoMhSecrets(JSON.stringify(result));
+  });
+
+  it("redacts exact all-numeric credential echoes before observations stringify provider scalars", async () => {
+    const environment = testEnv();
+    environment.MH_USER_TEST = MH_NUMERIC_USER;
+    environment.MH_PASSWORD_TEST = MH_NUMERIC_PASSWORD;
+    vi.stubGlobal("fetch", vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({
+        status: "OK",
+        body: { token: "Bearer numeric-sanitizer-token" },
+        tokenType: "Bearer"
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        estado: "RECHAZADO",
+        selloRecibido: null,
+        observaciones: [
+          Number(MH_NUMERIC_USER),
+          Number(MH_NUMERIC_PASSWORD),
+          42,
+          false
+        ],
+        nested: {
+          userEcho: Number(MH_NUMERIC_USER),
+          passwordEcho: Number(MH_NUMERIC_PASSWORD),
+          unrelatedNumber: 7,
+          unrelatedBoolean: false
+        }
+      }, { status: 400 })));
+
+    const result = await transmitTestDte(new MhClient(environment));
+    const raw = result.raw as {
+      nested: Record<string, unknown>;
+    };
+
+    expect(result).toMatchObject({
+      accepted: false,
+      estado: "RECHAZADO",
+      selloRecibido: null,
+      observaciones: ["[REDACTED]", "[REDACTED]", "42", "false"]
+    });
+    expect(raw.nested).toEqual({
+      userEcho: "[REDACTED]",
+      passwordEcho: "[REDACTED]",
+      unrelatedNumber: 7,
+      unrelatedBoolean: false
+    });
+    expectNoMhSecrets(JSON.stringify(result));
+  });
+
+  it("redacts an exact boolean credential echo while preserving an unrelated boolean", async () => {
+    const environment = testEnv();
+    environment.MH_PASSWORD_TEST = "false";
+    vi.stubGlobal("fetch", vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({
+        status: "OK",
+        body: { token: "Bearer boolean-sanitizer-token" },
+        tokenType: "Bearer"
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        estado: "RECHAZADO",
+        selloRecibido: null,
+        observaciones: [false, true],
+        nested: { passwordEcho: false, unrelatedBoolean: true }
+      }, { status: 400 })));
+
+    const result = await transmitTestDte(new MhClient(environment));
+    const raw = result.raw as { nested: Record<string, unknown> };
+
+    expect(result.observaciones).toEqual(["[REDACTED]", "true"]);
+    expect(raw.nested).toEqual({
+      passwordEcho: "[REDACTED]",
+      unrelatedBoolean: true
+    });
   });
 
   it.each([

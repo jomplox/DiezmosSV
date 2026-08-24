@@ -1,4 +1,4 @@
-import { isMockMode, mhEndpoint, requireSecret } from "../config";
+import { isMockMode, mhEndpoint, requireSecret, resolveMhTestAuthFallbackEndpoint } from "../config";
 import type { Ambiente, Env, MhResponse } from "../types";
 import { nowIso } from "../utils/dates";
 import { generationCode } from "../utils/ids";
@@ -6,6 +6,7 @@ import { assertDeploymentAllowsAmbiente } from "./environmentPolicy";
 
 const MH_REQUEST_TIMEOUT_MS = 60 * 1000;
 const MH_REDACTION = "[REDACTED]";
+const MH_TOKEN_TYPE = "Bearer";
 const PUBLIC_INDETERMINATE_ESTADOS = new Set([
   "ACEPTADO",
   "NO PROCESADO",
@@ -76,9 +77,9 @@ export class MhClient {
 
     // Some Ministerio de Hacienda test accounts are provisioned through the central auth service while still transmitting to TEST endpoints.
     if (!token && ambiente === "00" && isInvalidCredentials(data)) {
-      const centralAuthUrl = this.env.MH_AUTH_URL_TEST_FALLBACK?.trim();
-      if (centralAuthUrl && centralAuthUrl !== primaryAuthUrl) {
-        data = await this.authenticate(centralAuthUrl, credentials);
+      const fallbackAuthUrl = resolveMhTestAuthFallbackEndpoint(this.env);
+      if (fallbackAuthUrl) {
+        data = await this.authenticate(fallbackAuthUrl, credentials);
         token = data.body?.token;
       }
     }
@@ -92,7 +93,7 @@ export class MhClient {
        VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(environment) DO UPDATE SET token = excluded.token, token_type = excluded.token_type, expires_at = excluded.expires_at, updated_at = excluded.updated_at`
     )
-      .bind(ambiente, token, data.tokenType ?? "Bearer", expiresAt, nowIso())
+      .bind(ambiente, token, MH_TOKEN_TYPE, expiresAt, nowIso())
       .run();
     return token;
   }
@@ -263,6 +264,12 @@ function addProviderRedactionVariants(values: Set<string>, value: string | undef
 function sanitizeProviderValue(value: unknown, redactions: string[]): unknown {
   if (typeof value === "string") {
     return sanitizeProviderText(value, redactions);
+  }
+  if (
+    (typeof value === "number" && Number.isFinite(value))
+    || typeof value === "boolean"
+  ) {
+    return redactions.includes(String(value)) ? MH_REDACTION : value;
   }
   if (Array.isArray(value)) {
     return value.map((entry) => sanitizeProviderValue(entry, redactions));

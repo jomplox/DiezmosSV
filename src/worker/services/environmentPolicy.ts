@@ -1,5 +1,11 @@
 import type { Ambiente, Env } from "../types";
-import { getEmisorConfig, getMhCertificateXml, mhEndpoint, requireSecret } from "../config";
+import {
+  getEmisorConfig,
+  getMhCertificateXml,
+  mhEndpoint,
+  requireSecret,
+  resolveMhTestAuthFallbackEndpoint
+} from "../config";
 import { assertMhSigningMaterialReady } from "../domain/signer";
 
 type DeploymentAppEnvironment = "local" | "staging" | "production" | "unknown";
@@ -71,6 +77,9 @@ export async function assertFiscalCollectionReady(env: Env): Promise<Ambiente> {
   requireSecret(env, `MH_USER_${credentialLane}` as keyof Env);
   requireSecret(env, `MH_PASSWORD_${credentialLane}` as keyof Env);
   mhEndpoint(env, "auth", ambiente);
+  if (ambiente === "00") {
+    resolveMhTestAuthFallbackEndpoint(env);
+  }
   mhEndpoint(env, "recepcion", ambiente);
   mhEndpoint(env, "anulacion", ambiente);
   const certificate = await assertMhSigningMaterialReady(
