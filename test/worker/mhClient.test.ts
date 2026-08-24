@@ -3,6 +3,24 @@ import { MhClient, MhPreDispatchError, MhUnavailableError } from "../../src/work
 import { EnvironmentNotAllowedError } from "../../src/worker/services/environmentPolicy";
 import type { Env } from "../../src/worker/types";
 
+const MH_SECRET_USER = "mh user+canary@example.test";
+const MH_SECRET_USER_PERCENT = "mh%20user%2Bcanary%40example.test";
+const MH_SECRET_USER_FORM = "mh+user%2Bcanary%40example.test";
+const MH_SECRET_PASSWORD = "PW canary+&=/%?";
+const MH_SECRET_PASSWORD_PERCENT = "PW%20canary%2B%26%3D%2F%25%3F";
+const MH_SECRET_PASSWORD_FORM = "PW+canary%2B%26%3D%2F%25%3F";
+const MH_SECRET_TOKEN = `Bearer token:${MH_SECRET_PASSWORD}:mh-token-canary`;
+
+const MH_SECRET_VARIANTS = [
+  MH_SECRET_USER,
+  MH_SECRET_USER_PERCENT,
+  MH_SECRET_USER_FORM,
+  MH_SECRET_PASSWORD,
+  MH_SECRET_PASSWORD_PERCENT,
+  MH_SECRET_PASSWORD_FORM,
+  MH_SECRET_TOKEN
+];
+
 describe("MH client", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -93,6 +111,142 @@ describe("MH client", () => {
     })).rejects.toBeInstanceOf(MhUnavailableError);
   });
 
+  it("keeps a plain-text authentication rejection and echoed form credentials out of the pre-dispatch error", async () => {
+    const environment = testEnv();
+    environment.MH_USER_TEST = MH_SECRET_USER;
+    environment.MH_PASSWORD_TEST = MH_SECRET_PASSWORD;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+      `credential echo ${MH_SECRET_USER} ${MH_SECRET_USER_PERCENT} ${MH_SECRET_USER_FORM} ${MH_SECRET_PASSWORD} ${MH_SECRET_PASSWORD_PERCENT} ${MH_SECRET_PASSWORD_FORM}`,
+      { status: 401 }
+    )));
+
+    const error = await transmitTestDte(new MhClient(environment)).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(MhPreDispatchError);
+    expect((error as Error).message).toBe("Falló la autenticación con el Ministerio de Hacienda (HTTP 401)");
+    expect((error as MhPreDispatchError).cause).toBeInstanceOf(Error);
+    expect(((error as MhPreDispatchError).cause as Error).message).toBe(
+      "Falló la autenticación con el Ministerio de Hacienda (HTTP 401)"
+    );
+    expectNoMhSecrets(serializeError(error));
+  });
+
+  it("discards provider codes and descriptions when a successful authentication response has no token", async () => {
+    const environment = testEnv();
+    environment.MH_USER_TEST = MH_SECRET_USER;
+    environment.MH_PASSWORD_TEST = MH_SECRET_PASSWORD;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({
+      status: "ERROR",
+      body: {
+        codigoMsg: `AUTH-${MH_SECRET_USER}-${MH_SECRET_USER_FORM}`,
+        descripcionMsg: `Credential ${MH_SECRET_PASSWORD} ${MH_SECRET_PASSWORD_PERCENT} ${MH_SECRET_PASSWORD_FORM}`
+      }
+    })));
+
+    const error = await transmitTestDte(new MhClient(environment)).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(MhPreDispatchError);
+    expect((error as Error).message).toBe(
+      "La autenticación con el Ministerio de Hacienda no devolvió body.token"
+    );
+    expectNoMhSecrets(serializeError(error));
+  });
+
+  it("uses the same bounded token-missing error for a non-object authentication body", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(null)));
+
+    const error = await transmitTestDte(new MhClient(testEnv())).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(MhPreDispatchError);
+    expect((error as Error).message).toBe(
+      "La autenticación con el Ministerio de Hacienda no devolvió body.token"
+    );
+  });
+
+  it("sanitizes credentials and authorization recursively before returning a terminal rejection", async () => {
+    const environment = testEnv();
+    environment.MH_USER_TEST = MH_SECRET_USER;
+    environment.MH_PASSWORD_TEST = MH_SECRET_PASSWORD;
+    vi.stubGlobal("fetch", vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({
+        status: "OK",
+        body: { token: MH_SECRET_TOKEN },
+        tokenType: "Bearer"
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        estado: "RECHAZADO",
+        selloRecibido: null,
+        observaciones: [
+          `user=${MH_SECRET_USER}; encoded=${MH_SECRET_USER_PERCENT}`,
+          `pwd=${MH_SECRET_PASSWORD}; form=${MH_SECRET_PASSWORD_FORM}`,
+          `authorization=${MH_SECRET_TOKEN}`
+        ],
+        descripcionMsg: `nested ${MH_SECRET_PASSWORD_PERCENT}`,
+        estadoDetalle: `provider state echoed ${MH_SECRET_USER_FORM}`,
+        selloEcho: `provider seal echoed ${MH_SECRET_TOKEN}`,
+        text: `provider text echoed ${MH_SECRET_PASSWORD}`,
+        nested: [{ arrayValue: `prefix-${MH_SECRET_TOKEN}-suffix` }],
+        [`provider-${MH_SECRET_PASSWORD}-key`]: "nested object key"
+      }, { status: 400 })));
+
+    const result = await transmitTestDte(new MhClient(environment));
+
+    expect(result).toMatchObject({
+      accepted: false,
+      estado: "RECHAZADO",
+      selloRecibido: null
+    });
+    expect(result.observaciones).toHaveLength(3);
+    expect(result.observaciones[2]).toBe("authorization=[REDACTED]");
+    expectNoMhSecrets(JSON.stringify(result));
+  });
+
+  it("bounds an arbitrary indeterminate estado and sanitizes a plain-text reception response", async () => {
+    const environment = testEnv();
+    environment.MH_USER_TEST = MH_SECRET_USER;
+    environment.MH_PASSWORD_TEST = MH_SECRET_PASSWORD;
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({
+        status: "OK",
+        body: { token: MH_SECRET_TOKEN },
+        tokenType: "Bearer"
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        estado: `PENDIENTE ${MH_SECRET_USER} ${MH_SECRET_PASSWORD_FORM} ${MH_SECRET_TOKEN}`,
+        observaciones: [`still pending ${MH_SECRET_PASSWORD}`]
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const indeterminate = await transmitTestDte(new MhClient(environment)).catch((caught: unknown) => caught);
+
+    expect(indeterminate).toBeInstanceOf(MhUnavailableError);
+    expect((indeterminate as Error).message).toBe(
+      "Ministerio de Hacienda devolvió un resultado no definitivo: ESTADO_NO_RECONOCIDO"
+    );
+    expectNoMhSecrets(serializeError(indeterminate));
+
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({
+        status: "OK",
+        body: { token: MH_SECRET_TOKEN },
+        tokenType: "Bearer"
+      }))
+      .mockResolvedValueOnce(new Response(
+        `plain response ${MH_SECRET_USER_FORM} ${MH_SECRET_PASSWORD_PERCENT} ${MH_SECRET_TOKEN}`,
+        { status: 422 }
+      ));
+
+    const plainText = await transmitTestDte(new MhClient(environment)).catch((caught: unknown) => caught);
+
+    expect(plainText).toBeInstanceOf(MhUnavailableError);
+    expect((plainText as Error).message).toBe(
+      "Ministerio de Hacienda devolvió un resultado no definitivo: RECIBIDO (HTTP 422)"
+    );
+    expectNoMhSecrets(serializeError(plainText));
+  });
+
   it("rejects an incompatible ambiente before mock mode, token lookup, or fetch", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
@@ -136,6 +290,38 @@ function testEnv(): Env {
   };
 }
 
-function jsonResponse(body: unknown): Response {
-  return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
+  return new Response(JSON.stringify(body), {
+    status: init.status ?? 200,
+    headers: { "Content-Type": "application/json" }
+  });
+}
+
+async function transmitTestDte(client: MhClient) {
+  return client.transmitDte({
+    ambiente: "00",
+    version: 2,
+    tipoDte: "15",
+    codigoGeneracion: "11111111-2222-4333-8444-555555555555",
+    signedJws: "signed-test-document"
+  });
+}
+
+function serializeError(error: unknown): string {
+  if (!(error instanceof Error)) return JSON.stringify(error);
+  const cause = "cause" in error ? (error as Error & { cause?: unknown }).cause : undefined;
+  return JSON.stringify({
+    name: error.name,
+    message: error.message,
+    stack: error.stack,
+    cause: cause instanceof Error
+      ? { name: cause.name, message: cause.message, stack: cause.stack }
+      : cause
+  });
+}
+
+function expectNoMhSecrets(evidence: string): void {
+  for (const secret of MH_SECRET_VARIANTS) {
+    expect(evidence).not.toContain(secret);
+  }
 }

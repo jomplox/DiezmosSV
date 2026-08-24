@@ -5,6 +5,14 @@ import { generationCode } from "../utils/ids";
 import { assertDeploymentAllowsAmbiente } from "./environmentPolicy";
 
 const MH_REQUEST_TIMEOUT_MS = 60 * 1000;
+const MH_REDACTION = "[REDACTED]";
+const PUBLIC_INDETERMINATE_ESTADOS = new Set([
+  "ACEPTADO",
+  "NO PROCESADO",
+  "PROCESADO",
+  "RECIBIDO",
+  "RECHAZADO"
+]);
 
 export class MhClient {
   constructor(private readonly env: Env) {}
@@ -27,7 +35,7 @@ export class MhClient {
         documento: input.signedJws
       })
     });
-    return parseMhResponse(response);
+    return parseMhResponse(response, this.providerRedactions(input.ambiente, token));
   }
 
   async transmitInvalidacion(input: { ambiente: Ambiente; version: number; signedJws: string }): Promise<MhResponse> {
@@ -46,7 +54,7 @@ export class MhClient {
         documento: input.signedJws
       })
     });
-    return parseMhResponse(response);
+    return parseMhResponse(response, this.providerRedactions(input.ambiente, token));
   }
 
   // Los métodos de contingencia (evento y lotes) se eliminaron: el Anexo de
@@ -76,9 +84,7 @@ export class MhClient {
     }
 
     if (!token) {
-      const code = data.body?.codigoMsg ? ` ${data.body.codigoMsg}` : "";
-      const message = data.body?.descripcionMsg ? `: ${data.body.descripcionMsg}` : "";
-      throw new Error(`La autenticación con el Ministerio de Hacienda no devolvió body.token${code}${message}`);
+      throw new Error("La autenticación con el Ministerio de Hacienda no devolvió body.token");
     }
     const expiresAt = new Date(Date.now() + 23 * 60 * 60 * 1000).toISOString();
     await this.env.DB.prepare(
@@ -112,9 +118,18 @@ export class MhClient {
       body: form
     });
     if (!response.ok) {
-      throw new Error(`Falló la autenticación con el Ministerio de Hacienda: ${response.status} ${await response.text()}`);
+      throw new Error(`Falló la autenticación con el Ministerio de Hacienda (HTTP ${response.status})`);
     }
-    return (await response.json()) as MhAuthResponse;
+    const text = await response.text();
+    if (!text) return {};
+    try {
+      const parsed: unknown = JSON.parse(text);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed as MhAuthResponse
+        : {};
+    } catch {
+      return {};
+    }
   }
 
   private jsonHeaders(token: string): HeadersInit {
@@ -136,6 +151,12 @@ export class MhClient {
       user: requireSecret(this.env, "MH_USER_TEST"),
       password: requireSecret(this.env, "MH_PASSWORD_TEST")
     };
+  }
+
+  private providerRedactions(ambiente: Ambiente, authorization: string): string[] {
+    const user = ambiente === "01" ? this.env.MH_USER_PROD : this.env.MH_USER_TEST;
+    const password = ambiente === "01" ? this.env.MH_PASSWORD_PROD : this.env.MH_PASSWORD_TEST;
+    return providerRedactions(user, password, authorization);
   }
 }
 
@@ -169,8 +190,8 @@ function isInvalidCredentials(data: MhAuthResponse): boolean {
   return data.body?.codigoMsg === "106";
 }
 
-async function parseMhResponse(response: Response): Promise<MhResponse> {
-  const raw = await safeJson(response);
+async function parseMhResponse(response: Response, redactions: string[]): Promise<MhResponse> {
+  const raw = sanitizeProviderValue(await safeJson(response), redactions);
   const body = raw as Record<string, unknown>;
   const estado = String(body.estado ?? body.status ?? "RECIBIDO");
   const rawSeal = typeof body.selloRecibido === "string" ? body.selloRecibido.trim() : "";
@@ -188,7 +209,7 @@ async function parseMhResponse(response: Response): Promise<MhResponse> {
     // and contradictory bodies leave the already-dispatched fiscal outcome unknown.
     if (!rejected) {
       throw new MhUnavailableError(
-        `Ministerio de Hacienda devolvió un resultado no definitivo: ${estado} (HTTP ${response.status})`
+        `Ministerio de Hacienda devolvió un resultado no definitivo: ${publicIndeterminateEstado(normalizedEstado)} (HTTP ${response.status})`
       );
     }
   }
@@ -197,7 +218,9 @@ async function parseMhResponse(response: Response): Promise<MhResponse> {
     // malformed, contradictory, substring-like (for example NO PROCESADO),
     // intermediate, and undocumented 2xx bodies leave the external outcome unknown.
     // A positive verdict without its required seal is equally non-definitive.
-    throw new MhUnavailableError(`Ministerio de Hacienda devolvió un resultado no definitivo: ${estado}`);
+    throw new MhUnavailableError(
+      `Ministerio de Hacienda devolvió un resultado no definitivo: ${publicIndeterminateEstado(normalizedEstado)}`
+    );
   }
   return {
     accepted: response.ok && accepted,
@@ -206,6 +229,54 @@ async function parseMhResponse(response: Response): Promise<MhResponse> {
     observaciones,
     raw
   };
+}
+
+function providerRedactions(
+  user: string | undefined,
+  password: string | undefined,
+  authorization: string
+): string[] {
+  const values = new Set<string>();
+  for (const credential of [user, password]) {
+    if (!credential) continue;
+    values.add(credential);
+    values.add(encodeURIComponent(credential));
+    values.add(new URLSearchParams({ value: credential }).toString().slice("value=".length));
+  }
+  if (authorization) values.add(authorization);
+  return [...values].filter(Boolean).sort((left, right) => right.length - left.length);
+}
+
+function sanitizeProviderValue(value: unknown, redactions: string[]): unknown {
+  if (typeof value === "string") {
+    return sanitizeProviderText(value, redactions);
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => sanitizeProviderValue(entry, redactions));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [
+        sanitizeProviderText(key, redactions),
+        sanitizeProviderValue(entry, redactions)
+      ])
+    );
+  }
+  return value;
+}
+
+function sanitizeProviderText(value: string, redactions: string[]): string {
+  let sanitized = value;
+  for (const secret of redactions) {
+    sanitized = sanitized.split(secret).join(MH_REDACTION);
+  }
+  return sanitized;
+}
+
+function publicIndeterminateEstado(normalizedEstado: string): string {
+  return PUBLIC_INDETERMINATE_ESTADOS.has(normalizedEstado)
+    ? normalizedEstado
+    : "ESTADO_NO_RECONOCIDO";
 }
 
 async function safeJson(response: Response): Promise<unknown> {
