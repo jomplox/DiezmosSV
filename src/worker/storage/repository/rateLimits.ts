@@ -7,7 +7,7 @@ export type StripeProviderRecoveryClaim =
 
 export type ProviderCreationClaim =
   | { kind: "CLAIMED"; id: string }
-  | { kind: "DUPLICATE" }
+  | { kind: "DUPLICATE"; id: string }
   | { kind: "LIMITED" };
 
 export async function claimProviderCreationBudget(
@@ -30,17 +30,19 @@ export async function claimProviderCreationBudget(
   // their provider/global budgets; attached rows are represented by the claim
   // itself and are deliberately not double-counted.
   const row = await db.prepare(
-    `INSERT OR IGNORE INTO provider_creation_claims (
+    `INSERT INTO provider_creation_claims (
        id, provider, client_key_hash, stripe_request_id, claimed_at, expires_at
      )
      SELECT ?, ?, ?, ?, ?, ?
       WHERE (
         SELECT COUNT(*) FROM provider_creation_claims
          WHERE client_key_hash = ? AND claimed_at >= ?
+           AND (provider <> 'STRIPE' OR stripe_request_id IS NOT ?)
       ) < ?
         AND (
           (SELECT COUNT(*) FROM provider_creation_claims
-            WHERE provider = ? AND claimed_at >= ?)
+            WHERE provider = ? AND claimed_at >= ?
+              AND (provider <> 'STRIPE' OR stripe_request_id IS NOT ?))
           + CASE WHEN ? = 'WOMPI'
               THEN (SELECT COUNT(*) FROM donation_intents
                      WHERE provider_creation_claim_id IS NULL AND created_at >= ?)
@@ -49,12 +51,21 @@ export async function claimProviderCreationBudget(
             END
         ) < ?
         AND (
-          (SELECT COUNT(*) FROM provider_creation_claims WHERE claimed_at >= ?)
+          (SELECT COUNT(*) FROM provider_creation_claims
+            WHERE claimed_at >= ?
+              AND (provider <> 'STRIPE' OR stripe_request_id IS NOT ?))
           + (SELECT COUNT(*) FROM donation_intents
              WHERE provider_creation_claim_id IS NULL AND created_at >= ?)
           + (SELECT COUNT(*) FROM stripe_checkout_sessions
              WHERE provider_creation_claim_id IS NULL AND created_at >= ?)
         ) < ?
+     ON CONFLICT(provider, stripe_request_id)
+       WHERE provider = 'STRIPE' AND stripe_request_id IS NOT NULL
+     DO UPDATE SET
+       client_key_hash = excluded.client_key_hash,
+       claimed_at = excluded.claimed_at,
+       expires_at = excluded.expires_at
+     WHERE provider_creation_claims.expires_at <= excluded.claimed_at
      RETURNING id`
   ).bind(
     id,
@@ -65,14 +76,17 @@ export async function claimProviderCreationBudget(
     input.expiresAt,
     input.clientKeyHash,
     input.cutoff,
+    input.stripeRequestId,
     input.clientLimit,
     input.provider,
     input.cutoff,
+    input.stripeRequestId,
     input.provider,
     input.cutoff,
     input.cutoff,
     input.providerLimit,
     input.cutoff,
+    input.stripeRequestId,
     input.cutoff,
     input.cutoff,
     input.globalLimit
@@ -82,9 +96,10 @@ export async function claimProviderCreationBudget(
     const duplicate = await db.prepare(
       `SELECT id FROM provider_creation_claims
         WHERE provider = 'STRIPE' AND stripe_request_id = ?
+          AND claimed_at >= ? AND expires_at > ?
         LIMIT 1`
-    ).bind(input.stripeRequestId).first<{ id: string }>();
-    if (duplicate) return { kind: "DUPLICATE" };
+    ).bind(input.stripeRequestId, input.cutoff, input.now).first<{ id: string }>();
+    if (duplicate) return { kind: "DUPLICATE", id: duplicate.id };
   }
   return { kind: "LIMITED" };
 }

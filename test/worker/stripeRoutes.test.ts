@@ -30,6 +30,7 @@ describe("Stripe public donation routes", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     database.close();
   });
@@ -486,6 +487,298 @@ describe("Stripe public donation routes", () => {
       creation_outcome_class: null,
       idempotency_generation: 2
     });
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM provider_creation_claims WHERE stripe_request_id = ?"
+    ).get(requestId)).toEqual({ count: 1 });
+  });
+
+  it("reuses an active attached claim for a definite retry without charging twice", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:00:00.000Z") });
+    seedDefiniteFailureCheckout(database, {
+      claimId: "active_retry_claim",
+      claimedAt: "2026-07-04T11:55:00.000Z",
+      expiresAt: "2026-07-04T12:10:00.000Z"
+    });
+    const providerFetch = stubSuccessfulStripeCreation();
+
+    const retry = await createCheckout(stripeProxyEnv(workerEnv), {
+      requestId,
+      amount: 50,
+      frequency: "once"
+    });
+
+    expect(retry.response.status).toBe(201);
+    expect(providerFetch).toHaveBeenCalledTimes(1);
+    expect(database.prepare(
+      `SELECT id, claimed_at, expires_at FROM provider_creation_claims
+        WHERE stripe_request_id = ?`
+    ).get(requestId)).toEqual({
+      id: "active_retry_claim",
+      claimed_at: "2026-07-04T11:55:00.000Z",
+      expires_at: "2026-07-04T12:10:00.000Z"
+    });
+    expect(database.prepare(
+      `SELECT status, idempotency_generation, provider_creation_claim_id
+         FROM stripe_checkout_sessions WHERE request_id = ?`
+    ).get(requestId)).toEqual({
+      status: "OPEN",
+      idempotency_generation: 2,
+      provider_creation_claim_id: "active_retry_claim"
+    });
+  });
+
+  it("admits a definite retry with a new claim after the expired claim was swept", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:16:00.000Z") });
+    seedDefiniteFailureCheckout(database, { claimId: "swept_retry_claim" });
+    const providerFetch = stubSuccessfulStripeCreation();
+
+    const retry = await createCheckout(stripeProxyEnv(workerEnv), {
+      requestId,
+      amount: 50,
+      frequency: "once"
+    });
+
+    expect(retry.response.status).toBe(201);
+    expect(providerFetch).toHaveBeenCalledTimes(1);
+    const claim = database.prepare(
+      `SELECT id, claimed_at, expires_at FROM provider_creation_claims
+        WHERE stripe_request_id = ?`
+    ).get(requestId) as { id: string; claimed_at: string; expires_at: string } | undefined;
+    expect(claim).toEqual({
+      id: expect.stringMatching(/^provider_create_/),
+      claimed_at: "2026-07-04T12:16:00.000Z",
+      expires_at: "2026-07-04T12:31:00.000Z"
+    });
+    expect(claim?.id).not.toBe("swept_retry_claim");
+    expect(database.prepare(
+      "SELECT provider_creation_claim_id FROM stripe_checkout_sessions WHERE request_id = ?"
+    ).get(requestId)).toEqual({ provider_creation_claim_id: claim?.id });
+  });
+
+  it("atomically refreshes an unswept expired claim before a definite retry", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:16:00.000Z") });
+    seedDefiniteFailureCheckout(database, {
+      claimId: "expired_retry_claim",
+      claimedAt: "2026-07-04T12:00:00.000Z",
+      expiresAt: "2026-07-04T12:15:00.000Z"
+    });
+    const providerFetch = stubSuccessfulStripeCreation();
+
+    const retry = await createCheckout(stripeProxyEnv(workerEnv), {
+      requestId,
+      amount: 50,
+      frequency: "once"
+    });
+
+    expect(retry.response.status).toBe(201);
+    expect(providerFetch).toHaveBeenCalledTimes(1);
+    expect(database.prepare(
+      `SELECT id, claimed_at, expires_at FROM provider_creation_claims
+        WHERE stripe_request_id = ?`
+    ).get(requestId)).toEqual({
+      id: "expired_retry_claim",
+      claimed_at: "2026-07-04T12:16:00.000Z",
+      expires_at: "2026-07-04T12:31:00.000Z"
+    });
+    expect(database.prepare(
+      `SELECT status, idempotency_generation, provider_creation_claim_id
+         FROM stripe_checkout_sessions WHERE request_id = ?`
+    ).get(requestId)).toEqual({
+      status: "OPEN",
+      idempotency_generation: 2,
+      provider_creation_claim_id: "expired_retry_claim"
+    });
+  });
+
+  it.each([
+    ["provider", 60],
+    ["global", 100]
+  ] as const)("blocks a definite retry at the exhausted %s ceiling before Stripe", async (dimension, count) => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:16:00.000Z") });
+    seedDefiniteFailureCheckout(database, { claimId: `${dimension}_old_retry_claim` });
+    seedProviderCreationCapacity(database, dimension, count, "2026-07-04T12:16:00.000Z");
+    const providerFetch = stubSuccessfulStripeCreation();
+
+    const retry = await createCheckout(stripeProxyEnv(workerEnv), {
+      requestId,
+      amount: 50,
+      frequency: "once"
+    }, "198.51.100.250");
+
+    expect(retry.response.status).toBe(429);
+    expect(retry.body).toEqual({
+      error: "too_many_attempts",
+      message: "Demasiados intentos. Espere 15 minutos e intente de nuevo."
+    });
+    expect(retry.response.headers.get("Cache-Control")).toBe("no-store");
+    expect(providerFetch).not.toHaveBeenCalled();
+    expect(database.prepare(
+      `SELECT status, idempotency_generation, provider_creation_claim_id
+         FROM stripe_checkout_sessions WHERE request_id = ?`
+    ).get(requestId)).toEqual({
+      status: "FAILED",
+      idempotency_generation: 1,
+      provider_creation_claim_id: `${dimension}_old_retry_claim`
+    });
+  });
+
+  it("admits and attaches only one claim across concurrent definite retries", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:16:00.000Z") });
+    seedDefiniteFailureCheckout(database, { claimId: "concurrent_old_retry_claim" });
+    const providerFetch = stubSuccessfulStripeCreation();
+    const synchronized = withSynchronizedStripeReservationReads(database);
+    synchronized.synchronizeNextPair();
+    const concurrentEnv = { ...stripeProxyEnv(workerEnv), DB: synchronized.db };
+
+    const results = await Promise.all([
+      createCheckout(concurrentEnv, { requestId, amount: 50, frequency: "once" }),
+      createCheckout(concurrentEnv, { requestId, amount: 50, frequency: "once" })
+    ]);
+
+    expect(results.map((result) => result.response.status).sort()).toEqual([201, 409]);
+    expect(providerFetch).toHaveBeenCalledTimes(1);
+    const claims = database.prepare(
+      "SELECT id FROM provider_creation_claims WHERE stripe_request_id = ?"
+    ).all(requestId) as Array<{ id: string }>;
+    expect(claims).toHaveLength(1);
+    expect(database.prepare(
+      `SELECT status, idempotency_generation, provider_creation_claim_id
+         FROM stripe_checkout_sessions WHERE request_id = ?`
+    ).get(requestId)).toEqual({
+      status: "OPEN",
+      idempotency_generation: 2,
+      provider_creation_claim_id: claims[0]?.id
+    });
+  });
+
+  it("releases an unattached fresh claim when the definite retry CAS loses", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:16:00.000Z") });
+    seedDefiniteFailureCheckout(database, { claimId: "lost_cas_old_retry_claim" });
+    const providerFetch = stubSuccessfulStripeCreation();
+    const losing = withLosingDefiniteRetryCas(database);
+
+    const retry = await createCheckout({
+      ...stripeProxyEnv(workerEnv),
+      DB: losing
+    }, {
+      requestId,
+      amount: 50,
+      frequency: "once"
+    });
+
+    expect(retry.response.status).toBe(409);
+    expect(retry.body).toMatchObject({ error: "stripe_checkout_unavailable" });
+    expect(providerFetch).not.toHaveBeenCalled();
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM provider_creation_claims WHERE stripe_request_id = ?"
+    ).get(requestId)).toEqual({ count: 0 });
+    expect(database.prepare(
+      `SELECT status, creation_outcome_class, idempotency_generation,
+              provider_creation_claim_id
+         FROM stripe_checkout_sessions WHERE request_id = ?`
+    ).get(requestId)).toEqual({
+      status: "FAILED",
+      creation_outcome_class: "DEFINITE_FAILURE",
+      idempotency_generation: 1,
+      provider_creation_claim_id: "lost_cas_old_retry_claim"
+    });
+  });
+
+  it("retains an attached refreshed claim when the definite retry provider call fails", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:16:00.000Z") });
+    seedDefiniteFailureCheckout(database, {
+      claimId: "failed_refreshed_retry_claim",
+      claimedAt: "2026-07-04T12:00:00.000Z",
+      expiresAt: "2026-07-04T12:15:00.000Z"
+    });
+    const providerFetch = vi.fn<typeof fetch>(async () => stripeJson({
+      error: {
+        type: "invalid_request_error",
+        code: "parameter_invalid_integer",
+        message: "definite retry fixture",
+        param: "line_items[0][price_data][unit_amount]"
+      }
+    }, 400, { "stripe-should-retry": "false" }));
+    vi.stubGlobal("fetch", providerFetch);
+
+    const retry = await createCheckout(stripeProxyEnv(workerEnv), {
+      requestId,
+      amount: 50,
+      frequency: "once"
+    });
+
+    expect(retry.response.status).toBe(502);
+    expect(providerFetch).toHaveBeenCalledTimes(1);
+    expect(database.prepare(
+      `SELECT id, claimed_at, expires_at FROM provider_creation_claims
+        WHERE stripe_request_id = ?`
+    ).get(requestId)).toEqual({
+      id: "failed_refreshed_retry_claim",
+      claimed_at: "2026-07-04T12:16:00.000Z",
+      expires_at: "2026-07-04T12:31:00.000Z"
+    });
+    expect(database.prepare(
+      `SELECT status, creation_outcome_class, idempotency_generation,
+              provider_creation_claim_id
+         FROM stripe_checkout_sessions WHERE request_id = ?`
+    ).get(requestId)).toEqual({
+      status: "FAILED",
+      creation_outcome_class: "DEFINITE_FAILURE",
+      idempotency_generation: 2,
+      provider_creation_claim_id: "failed_refreshed_retry_claim"
+    });
+  });
+
+  it("keeps an active unattached Stripe claim in progress before expiry", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:00:00.000Z") });
+    seedStripeProviderClaim(database, {
+      id: "active_unattached_claim",
+      claimedAt: "2026-07-04T11:55:00.000Z",
+      expiresAt: "2026-07-04T12:10:00.000Z"
+    });
+    const providerFetch = stubSuccessfulStripeCreation();
+
+    const retry = await createCheckout(stripeProxyEnv(workerEnv), {
+      requestId,
+      amount: 50,
+      frequency: "once"
+    });
+
+    expect(retry.response.status).toBe(409);
+    expect(retry.body).toMatchObject({ error: "stripe_checkout_in_progress" });
+    expect(providerFetch).not.toHaveBeenCalled();
+    expect(database.prepare("SELECT COUNT(*) AS count FROM stripe_checkout_sessions").get())
+      .toEqual({ count: 0 });
+  });
+
+  it("refreshes an expired unattached Stripe claim instead of waiting for cron", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:16:00.000Z") });
+    seedStripeProviderClaim(database, {
+      id: "expired_unattached_claim",
+      claimedAt: "2026-07-04T12:00:00.000Z",
+      expiresAt: "2026-07-04T12:15:00.000Z"
+    });
+    const providerFetch = stubSuccessfulStripeCreation();
+
+    const retry = await createCheckout(stripeProxyEnv(workerEnv), {
+      requestId,
+      amount: 50,
+      frequency: "once"
+    });
+
+    expect(retry.response.status).toBe(201);
+    expect(providerFetch).toHaveBeenCalledTimes(1);
+    expect(database.prepare(
+      `SELECT id, claimed_at, expires_at FROM provider_creation_claims
+        WHERE stripe_request_id = ?`
+    ).get(requestId)).toEqual({
+      id: "expired_unattached_claim",
+      claimed_at: "2026-07-04T12:16:00.000Z",
+      expires_at: "2026-07-04T12:31:00.000Z"
+    });
+    expect(database.prepare(
+      "SELECT provider_creation_claim_id FROM stripe_checkout_sessions WHERE request_id = ?"
+    ).get(requestId)).toEqual({ provider_creation_claim_id: "expired_unattached_claim" });
   });
 
   it("recovers a returned Session after deferred D1 attachment", async () => {
@@ -1080,6 +1373,102 @@ function stripeCheckoutObject(params: URLSearchParams): Record<string, unknown> 
     },
     expires_at: 1_786_370_400
   };
+}
+
+function seedStripeProviderClaim(
+  database: ReturnType<typeof migratedDatabase>,
+  input: { id: string; claimedAt: string; expiresAt: string; stripeRequestId?: string }
+): void {
+  database.prepare(
+    `INSERT INTO provider_creation_claims (
+       id, provider, client_key_hash, stripe_request_id, claimed_at, expires_at
+     ) VALUES (?, 'STRIPE', 'seed-client', ?, ?, ?)`
+  ).run(input.id, input.stripeRequestId ?? requestId, input.claimedAt, input.expiresAt);
+}
+
+function seedDefiniteFailureCheckout(
+  database: ReturnType<typeof migratedDatabase>,
+  input: { claimId: string; claimedAt?: string; expiresAt?: string }
+): void {
+  if (input.claimedAt && input.expiresAt) {
+    seedStripeProviderClaim(database, {
+      id: input.claimId,
+      claimedAt: input.claimedAt,
+      expiresAt: input.expiresAt
+    });
+  }
+  database.prepare(
+    `INSERT INTO stripe_checkout_sessions (
+       id, request_id, request_fingerprint, frequency, gift_type, amount_cents,
+       currency, livemode, status, creation_attempt_count, creation_outcome_class,
+       idempotency_generation, payment_status, provider_creation_claim_id, error_code,
+       created_at, updated_at
+     ) VALUES ('stripe_checkout_retry_fixture', ?, 'v2:stale', 'ONCE', 'TITHE', 5000,
+               'usd', 0, 'FAILED', 1, 'DEFINITE_FAILURE', 1, 'UNPAID', ?,
+               'stripe_checkout_create_failed', '2026-07-04T12:00:00.000Z',
+               '2026-07-04T12:00:00.000Z')`
+  ).run(requestId, input.claimId);
+}
+
+function seedProviderCreationCapacity(
+  database: ReturnType<typeof migratedDatabase>,
+  dimension: "provider" | "global",
+  count: number,
+  claimedAt: string
+): void {
+  const insert = database.prepare(
+    `INSERT INTO provider_creation_claims (
+       id, provider, client_key_hash, stripe_request_id, claimed_at, expires_at
+     ) VALUES (?, ?, ?, ?, ?, '2026-07-04T12:31:00.000Z')`
+  );
+  for (let index = 0; index < count; index += 1) {
+    const provider = dimension === "provider" || index % 2 === 0 ? "STRIPE" : "WOMPI";
+    insert.run(
+      `${dimension}_capacity_${index}`,
+      provider,
+      `${dimension}-client-${index}`,
+      provider === "STRIPE" ? `${dimension}-request-${index}` : null,
+      claimedAt
+    );
+  }
+}
+
+function stubSuccessfulStripeCreation(): ReturnType<typeof vi.fn<typeof fetch>> {
+  const providerFetch = vi.fn<typeof fetch>(async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const url = new URL(request.url);
+    if (request.method !== "POST" || url.pathname !== "/v1/checkout/sessions") {
+      throw new Error(`Unexpected Stripe request: ${request.method} ${url.pathname}`);
+    }
+    return stripeCheckoutJson(new URLSearchParams(await request.text()));
+  });
+  vi.stubGlobal("fetch", providerFetch);
+  return providerFetch;
+}
+
+function withLosingDefiniteRetryCas(
+  database: ReturnType<typeof migratedDatabase>
+): D1Database {
+  const base = sqliteD1(database);
+  return {
+    prepare(sql: string) {
+      const statement = base.prepare(sql);
+      if (
+        sql.includes("UPDATE stripe_checkout_sessions")
+        && sql.includes("provider_creation_claim_id = ?")
+        && sql.includes("creation_outcome_class = 'DEFINITE_FAILURE'")
+      ) {
+        const mutable = statement as unknown as {
+          first: <T>() => Promise<T | null>;
+        };
+        mutable.first = async <T>() => null as T | null;
+      }
+      return statement;
+    },
+    batch(statements: D1PreparedStatement[]) {
+      return base.batch(statements);
+    }
+  } as D1Database;
 }
 
 function withFailingStripeReservation(

@@ -194,12 +194,81 @@ describe("Stripe donation repository", () => {
     expect(await reclaimStripeCheckoutCreation(db, {
       id: "stripe_checkout_one",
       requestFingerprint: "v2:corrected",
-      now: "2026-08-10T12:00:05.000Z"
+      now: "2026-08-10T12:00:05.000Z",
+      definiteFailureAdmission: {
+        admittedProviderCreationClaimId: "provider_claim_two",
+        expectedProviderCreationClaimId: "provider_claim_one",
+        expectedIdempotencyGeneration: 1
+      }
     })).toMatchObject({
       status: "CREATING",
       creation_attempt_count: 3,
       request_fingerprint: "v2:corrected",
-      idempotency_generation: 2
+      idempotency_generation: 2,
+      provider_creation_claim_id: "provider_claim_two"
+    });
+  });
+
+  it("binds definite retry admission to the old claim and generation snapshot", async () => {
+    await reserveStripeCheckout(db, checkoutInput());
+    await failStripeCheckoutCreation(db, {
+      outcomeClass: "DEFINITE_FAILURE",
+      id: "stripe_checkout_one",
+      errorCode: "definite_fixture",
+      now: "2026-08-10T12:00:01.000Z"
+    });
+
+    expect(await reclaimStripeCheckoutCreation(db, {
+      id: "stripe_checkout_one",
+      requestFingerprint: "v2:corrected",
+      now: "2026-08-10T12:00:02.000Z"
+    })).toBeNull();
+    expect(await reclaimStripeCheckoutCreation(db, {
+      id: "stripe_checkout_one",
+      requestFingerprint: "v2:corrected",
+      now: "2026-08-10T12:00:02.000Z",
+      definiteFailureAdmission: {
+        admittedProviderCreationClaimId: "provider_claim_two",
+        expectedProviderCreationClaimId: "wrong_old_claim",
+        expectedIdempotencyGeneration: 1
+      }
+    })).toBeNull();
+    expect(await reclaimStripeCheckoutCreation(db, {
+      id: "stripe_checkout_one",
+      requestFingerprint: "v2:corrected",
+      now: "2026-08-10T12:00:02.000Z",
+      definiteFailureAdmission: {
+        admittedProviderCreationClaimId: "provider_claim_two",
+        expectedProviderCreationClaimId: "provider_claim_one",
+        expectedIdempotencyGeneration: 2
+      }
+    })).toBeNull();
+    expect(database.prepare(
+      `SELECT status, creation_outcome_class, idempotency_generation,
+              provider_creation_claim_id
+         FROM stripe_checkout_sessions WHERE id = 'stripe_checkout_one'`
+    ).get()).toEqual({
+      status: "FAILED",
+      creation_outcome_class: "DEFINITE_FAILURE",
+      idempotency_generation: 1,
+      provider_creation_claim_id: "provider_claim_one"
+    });
+
+    expect(await reclaimStripeCheckoutCreation(db, {
+      id: "stripe_checkout_one",
+      requestFingerprint: "v2:corrected",
+      now: "2026-08-10T12:00:03.000Z",
+      definiteFailureAdmission: {
+        admittedProviderCreationClaimId: "provider_claim_two",
+        expectedProviderCreationClaimId: "provider_claim_one",
+        expectedIdempotencyGeneration: 1
+      }
+    })).toMatchObject({
+      status: "CREATING",
+      creation_attempt_count: 2,
+      creation_outcome_class: null,
+      idempotency_generation: 2,
+      provider_creation_claim_id: "provider_claim_two"
     });
   });
 

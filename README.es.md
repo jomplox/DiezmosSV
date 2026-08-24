@@ -208,7 +208,7 @@ DiezmosSV/
 │   ├── client/                 # Panel React + Vite, /donar, fuentes, recursos
 │   └── shared/                 # Catálogos · DUI · NIT · ventanas legales · política de contraseñas
 │                               # correcciones fiscales · entrega · montos · correo
-├── migrations/                 # Esquema D1 (incremental, solo se agrega, 0001…0046)
+├── migrations/                 # Esquema D1 (incremental, solo se agrega, 0001…0047)
 ├── DTE/svfe-json-schemas/      # Esquemas JSON de MH para validación
 ├── docs/                       # Despliegue/UAT · manual del operador · restauración de retención
 │                               # cutover/conciliación de claims fiscales · recuperación previa al CDE
@@ -1075,7 +1075,7 @@ El modelo de seguridad es el modelo del claim fiscal aplicado a una ruta de repa
 ## 📚 Modelo de datos
 
 <details>
-<summary><strong>Tablas de D1 (migrations/0001_init.sql, extendidas hasta la 0046)</strong></summary>
+<summary><strong>Tablas de D1 (migrations/0001_init.sql, extendidas hasta la 0047)</strong></summary>
 
 <br/>
 

@@ -49,7 +49,8 @@ export const IMMUTABLE_MIGRATION_SHA256 = Object.freeze({
   "0043_stripe_annual_email_evidence_dispatch_guard.sql": "dd00177c7dece29d887cfd7913b7b2ca0eecd7e63862c6f09d459a0b2a054714",
   "0044_stripe_portal_capability.sql": "2a4be49afc5da8201438999cec857978910631ec002084467a50951b5373d1ca",
   "0045_login_step_up_mfa.sql": "9fd64e15528cb80f72d99389cec87378c01cada6adb70497ece9e4cb567853ca",
-  "0046_provider_creation_budgets.sql": "dd014b8bf754da9bca91cddf96d77dcb48718a4644cd3c89d01ddaecc8bca35d"
+  "0046_provider_creation_budgets.sql": "dd014b8bf754da9bca91cddf96d77dcb48718a4644cd3c89d01ddaecc8bca35d",
+  "0047_provider_creation_legacy_index.sql": "52c0072c5d0c85ee488c5351cc0d33fcc01da3370b08d3a583440e7c8663aeeb"
 });
 
 export function assertImmutableMigrations(
@@ -98,7 +99,7 @@ export function assertImmutableMigrations(
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     assertImmutableMigrations();
-    process.stdout.write("Historical migrations 0001-0046 are immutable.\n");
+    process.stdout.write("Historical migrations 0001-0047 are immutable.\n");
   } catch (error) {
     process.stderr.write(
       `${error instanceof Error ? error.message : String(error)}\n`

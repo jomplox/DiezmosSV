@@ -997,7 +997,7 @@ export class Statement {
       document.updated_at = String(updatedAt);
       return { id: document.id } as T;
     }
-    if (this.sql.includes("INSERT OR IGNORE INTO provider_creation_claims")) {
+    if (this.sql.includes("INSERT INTO provider_creation_claims")) {
       const [
         id,
         provider,
@@ -1007,14 +1007,17 @@ export class Statement {
         expiresAt,
         countClientKeyHash,
         clientCutoff,
+        excludedClientRequestId,
         clientLimit,
         countProvider,
         providerCutoff,
+        excludedProviderRequestId,
         legacyProvider,
         donationLegacyCutoff,
         stripeLegacyCutoff,
         providerLimit,
         globalCutoff,
+        excludedGlobalRequestId,
         globalDonationCutoff,
         globalStripeCutoff,
         globalLimit
@@ -1022,23 +1025,30 @@ export class Statement {
       const normalizedProvider = String(provider) as "WOMPI" | "STRIPE";
       const normalizedRequestId = stripeRequestId == null ? null : String(stripeRequestId);
       if (
-        normalizedProvider === "STRIPE" &&
-        normalizedRequestId !== null &&
-        this.db.providerCreationClaims.some(
-          (claim) => claim.provider === "STRIPE" && claim.stripe_request_id === normalizedRequestId
-        )
+        (normalizedProvider === "WOMPI" && normalizedRequestId !== null) ||
+        (normalizedProvider === "STRIPE" && normalizedRequestId === null)
       ) {
-        return null;
+        throw new Error("CHECK constraint failed: provider_creation_claims");
       }
+      const matchingRequest = normalizedRequestId === null
+        ? null
+        : this.db.providerCreationClaims.find(
+            (claim) => claim.provider === "STRIPE" && claim.stripe_request_id === normalizedRequestId
+          ) ?? null;
+      const includedClaim = (claim: ProviderCreationClaimRow, excludedRequestId: unknown): boolean =>
+        claim.provider !== "STRIPE"
+        || claim.stripe_request_id !== (excludedRequestId == null ? null : String(excludedRequestId));
       const clientCount = this.db.providerCreationClaims.filter(
         (claim) =>
           claim.client_key_hash === String(countClientKeyHash) &&
-          claim.claimed_at >= String(clientCutoff)
+          claim.claimed_at >= String(clientCutoff) &&
+          includedClaim(claim, excludedClientRequestId)
       ).length;
       const providerClaimCount = this.db.providerCreationClaims.filter(
         (claim) =>
           claim.provider === String(countProvider) &&
-          claim.claimed_at >= String(providerCutoff)
+          claim.claimed_at >= String(providerCutoff) &&
+          includedClaim(claim, excludedProviderRequestId)
       ).length;
       const providerLegacyCount = String(legacyProvider) === "WOMPI"
         ? this.db.donationIntents.filter(
@@ -1052,7 +1062,9 @@ export class Statement {
               String(checkout.created_at) >= String(stripeLegacyCutoff)
           ).length;
       const globalClaimCount = this.db.providerCreationClaims.filter(
-        (claim) => claim.claimed_at >= String(globalCutoff)
+        (claim) =>
+          claim.claimed_at >= String(globalCutoff) &&
+          includedClaim(claim, excludedGlobalRequestId)
       ).length;
       const globalLegacyCount = this.db.donationIntents.filter(
         (intent) =>
@@ -1070,6 +1082,13 @@ export class Statement {
       ) {
         return null;
       }
+      if (matchingRequest) {
+        if (matchingRequest.expires_at > String(claimedAt)) return null;
+        matchingRequest.client_key_hash = String(clientKeyHash);
+        matchingRequest.claimed_at = String(claimedAt);
+        matchingRequest.expires_at = String(expiresAt);
+        return { id: matchingRequest.id } as T;
+      }
       const claim: ProviderCreationClaimRow = {
         id: String(id),
         provider: normalizedProvider,
@@ -1085,11 +1104,13 @@ export class Statement {
       this.sql.includes("SELECT id FROM provider_creation_claims") &&
       this.sql.includes("stripe_request_id = ?")
     ) {
-      const [stripeRequestId] = this.args;
+      const [stripeRequestId, cutoff, now] = this.args;
       const claim = this.db.providerCreationClaims.find(
         (candidate) =>
           candidate.provider === "STRIPE" &&
-          candidate.stripe_request_id === String(stripeRequestId)
+          candidate.stripe_request_id === String(stripeRequestId) &&
+          candidate.claimed_at >= String(cutoff) &&
+          candidate.expires_at > String(now)
       );
       return (claim ? { id: claim.id } : null) as T | null;
     }

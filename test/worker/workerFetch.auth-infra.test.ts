@@ -244,6 +244,10 @@ describe("provider creation budget migration", () => {
     import.meta.dirname,
     "../../migrations/0046_provider_creation_budgets.sql"
   );
+  const legacyIndexMigrationPath = resolve(
+    import.meta.dirname,
+    "../../migrations/0047_provider_creation_legacy_index.sql"
+  );
 
   it("installs the checked provider ledger, count indexes, and parent evidence columns", () => {
     const database = migratedDatabase();
@@ -337,6 +341,99 @@ describe("provider creation budget migration", () => {
         .toEqual(expect.arrayContaining([expect.objectContaining({ name: "provider_creation_claim_id" })]));
       expect(database.prepare("PRAGMA table_info(stripe_checkout_sessions)").all())
         .toEqual(expect.arrayContaining([expect.objectContaining({ name: "provider_creation_claim_id" })]));
+    } finally {
+      database.close();
+    }
+  });
+
+  it("upgrades an exact 0046 database through additive 0047", () => {
+    expect(existsSync(legacyIndexMigrationPath), "migration 0047 exists").toBe(true);
+    if (!existsSync(legacyIndexMigrationPath)) return;
+    const database = migratedDatabaseThrough("0046");
+    try {
+      expect(database.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_stripe_checkout_legacy_created'"
+      ).get()).toBeUndefined();
+
+      database.exec(readFileSync(legacyIndexMigrationPath, "utf8"));
+
+      expect(database.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_stripe_checkout_legacy_created'"
+      ).get()).toEqual({ name: "idx_stripe_checkout_legacy_created" });
+      expect(database.prepare("PRAGMA index_info(idx_stripe_checkout_legacy_created)").all())
+        .toEqual([expect.objectContaining({ name: "created_at" })]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("searches indexed recent Stripe legacy history while preserving rolling admission", async () => {
+    const database = migratedDatabase();
+    const historyNow = "2026-07-04T12:00:00.000Z";
+    const historyCutoff = "2026-07-04T11:45:00.000Z";
+    const historyExpiresAt = "2026-07-04T12:15:00.000Z";
+    try {
+      const insert = database.prepare(
+        `INSERT INTO stripe_checkout_sessions (
+           id, request_id, request_fingerprint, frequency, gift_type, amount_cents,
+           currency, livemode, status, payment_status, created_at, updated_at
+         ) VALUES (?, ?, 'v2:legacy', 'ONCE', 'TITHE', 1000,
+                   'usd', 0, 'FAILED', 'UNPAID', ?, ?)`
+      );
+      database.exec("BEGIN IMMEDIATE");
+      for (let index = 0; index < 2_000; index += 1) {
+        insert.run(
+          `historic_stripe_${index}`,
+          `historic-stripe-request-${index}`,
+          "2025-01-01T00:00:00.000Z",
+          "2025-01-01T00:00:00.000Z"
+        );
+      }
+      insert.run(
+        "recent_legacy_stripe",
+        "recent-legacy-stripe-request",
+        "2026-07-04T11:59:00.000Z",
+        "2026-07-04T11:59:00.000Z"
+      );
+      database.exec("COMMIT");
+      database.exec("ANALYZE");
+
+      const plan = database.prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT COUNT(*) FROM stripe_checkout_sessions
+          WHERE provider_creation_claim_id IS NULL AND created_at >= ?`
+      ).all(historyCutoff) as Array<{ detail: string }>;
+      const detail = plan.map((step) => step.detail).join("\n");
+      expect(detail).toMatch(
+        /SEARCH stripe_checkout_sessions USING INDEX idx_stripe_checkout_legacy_created \(created_at>\?\)/i
+      );
+      expect(detail).not.toMatch(/SCAN stripe_checkout_sessions/i);
+
+      const repo = new Repository(sqliteD1(database));
+      const first = await claimProviderCreationBudgetForTest(repo, {
+        provider: "STRIPE",
+        clientKeyHash: "large-history-client-one",
+        stripeRequestId: "large-history-request-one",
+        now: historyNow,
+        cutoff: historyCutoff,
+        expiresAt: historyExpiresAt,
+        clientLimit: 20,
+        providerLimit: 2,
+        globalLimit: 20
+      });
+      const second = await claimProviderCreationBudgetForTest(repo, {
+        provider: "STRIPE",
+        clientKeyHash: "large-history-client-two",
+        stripeRequestId: "large-history-request-two",
+        now: historyNow,
+        cutoff: historyCutoff,
+        expiresAt: historyExpiresAt,
+        clientLimit: 20,
+        providerLimit: 2,
+        globalLimit: 20
+      });
+      expect(first.kind).toBe("CLAIMED");
+      expect(second).toEqual({ kind: "LIMITED" });
     } finally {
       database.close();
     }
@@ -2544,7 +2641,7 @@ type ProviderBudgetTestInput = {
 
 type ProviderBudgetTestResult =
   | { kind: "CLAIMED"; id: string }
-  | { kind: "DUPLICATE" }
+  | { kind: "DUPLICATE"; id: string }
   | { kind: "LIMITED" };
 
 async function claimProviderCreationBudgetForTest(

@@ -1547,6 +1547,9 @@ async function prepareExistingStripeCheckoutCreation(
     return existingStripeCheckoutResponse(ctx, existing, configuration);
   }
 
+  const definiteFailureRetry = existing.status === "FAILED"
+    && existing.creation_outcome_class === "DEFINITE_FAILURE";
+
   const request = await buildStripeCheckoutCreationRequest(ctx, existing.id, {
     requestId: existing.request_id,
     amountCents: existing.amount_cents,
@@ -1560,12 +1563,48 @@ async function prepareExistingStripeCheckoutCreation(
     return stripeCheckoutIndeterminateResponse();
   }
 
+  let definiteFailureAdmission: {
+    claim: Awaited<ReturnType<Repository["claimProviderCreationBudget"]>>;
+    id: string;
+  } | null = null;
+  if (definiteFailureRetry) {
+    const clientIp = clientIpFrom(ctx.request);
+    const claimNow = nowIso();
+    const claim = await ctx.repo.claimProviderCreationBudget({
+      provider: "STRIPE",
+      clientKeyHash: await rateLimitKey(providerCreationRateIdentity(clientIp)),
+      stripeRequestId: existing.request_id,
+      now: claimNow,
+      cutoff: intentThrottleSinceIso(),
+      expiresAt: intentThrottleExpiresIso(),
+      clientLimit: PROVIDER_CREATION_CLIENT_LIMIT,
+      providerLimit: PROVIDER_CREATION_PROVIDER_LIMIT,
+      globalLimit: PROVIDER_CREATION_GLOBAL_LIMIT
+    });
+    if (claim.kind === "LIMITED") return providerCreationLimitedResponse();
+    if (
+      claim.kind === "DUPLICATE"
+      && claim.id !== existing.provider_creation_claim_id
+    ) {
+      return stripeCheckoutCreationInProgressResponse();
+    }
+    definiteFailureAdmission = { claim, id: claim.id };
+  }
+
   const reclaimed = await ctx.repo.reclaimStripeCheckoutCreation({
     id: existing.id,
     requestFingerprint: request.fingerprint,
-    now: nowIso()
+    now: nowIso(),
+    definiteFailureAdmission: definiteFailureAdmission ? {
+      admittedProviderCreationClaimId: definiteFailureAdmission.id,
+      expectedProviderCreationClaimId: existing.provider_creation_claim_id,
+      expectedIdempotencyGeneration: existing.idempotency_generation
+    } : undefined
   });
   if (!reclaimed) {
+    if (definiteFailureAdmission?.claim.kind === "CLAIMED") {
+      await ctx.repo.releaseUnusedProviderCreationClaim(definiteFailureAdmission.id);
+    }
     const current = await ctx.repo.getStripeCheckoutById(existing.id);
     return current
       ? existingStripeCheckoutResponse(ctx, current, configuration)

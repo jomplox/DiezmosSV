@@ -343,8 +343,40 @@ export async function failStripeCheckoutCreation(
 
 export async function reclaimStripeCheckoutCreation(
   db: D1Database,
-  input: { id: string; requestFingerprint: string; now: string }
+  input: {
+    id: string;
+    requestFingerprint: string;
+    now: string;
+    definiteFailureAdmission?: {
+      admittedProviderCreationClaimId: string;
+      expectedProviderCreationClaimId: string | null;
+      expectedIdempotencyGeneration: number;
+    };
+  }
 ): Promise<StripeCheckoutRecord | null> {
+  if (input.definiteFailureAdmission) {
+    const admission = input.definiteFailureAdmission;
+    return db.prepare(
+      `UPDATE stripe_checkout_sessions
+          SET request_fingerprint = ?, status = 'CREATING',
+              creation_attempt_count = creation_attempt_count + 1,
+              idempotency_generation = idempotency_generation + 1,
+              creation_outcome_class = NULL, error_code = NULL,
+              provider_creation_claim_id = ?, updated_at = ?
+        WHERE id = ? AND provider_creation_claim_id IS ?
+          AND idempotency_generation = ?
+          AND status = 'FAILED' AND creation_outcome_class = 'DEFINITE_FAILURE'
+          AND stripe_session_id IS NULL AND creation_attempt_count < 3
+        RETURNING *`
+    ).bind(
+      input.requestFingerprint,
+      admission.admittedProviderCreationClaimId,
+      input.now,
+      input.id,
+      admission.expectedProviderCreationClaimId,
+      admission.expectedIdempotencyGeneration
+    ).first<StripeCheckoutRecord>();
+  }
   return db.prepare(
     `UPDATE stripe_checkout_sessions
         SET request_fingerprint = CASE
@@ -359,7 +391,8 @@ export async function reclaimStripeCheckoutCreation(
             error_code = NULL, updated_at = ?
       WHERE id = ? AND stripe_session_id IS NULL
         AND creation_attempt_count < 3
-        AND (creation_outcome_class = 'DEFINITE_FAILURE' OR request_fingerprint = ?)
+        AND creation_outcome_class IS NOT 'DEFINITE_FAILURE'
+        AND request_fingerprint = ?
         AND (
           status = 'FAILED'
           OR (status = 'CREATING' AND updated_at < ?)
