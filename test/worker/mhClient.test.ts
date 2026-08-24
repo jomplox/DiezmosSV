@@ -9,7 +9,14 @@ const MH_SECRET_USER_FORM = "mh+user%2Bcanary%40example.test";
 const MH_SECRET_PASSWORD = "PW canary+&=/%?";
 const MH_SECRET_PASSWORD_PERCENT = "PW%20canary%2B%26%3D%2F%25%3F";
 const MH_SECRET_PASSWORD_FORM = "PW+canary%2B%26%3D%2F%25%3F";
-const MH_SECRET_TOKEN = `Bearer token:${MH_SECRET_PASSWORD}:mh-token-canary`;
+const MH_BEARER_CREDENTIAL = "cache token+credential/%? canary";
+const MH_BEARER_CREDENTIAL_PERCENT = "cache%20token%2Bcredential%2F%25%3F%20canary";
+const MH_BEARER_CREDENTIAL_FORM = "cache+token%2Bcredential%2F%25%3F+canary";
+const MH_SECRET_TOKEN = `bEaReR ${MH_BEARER_CREDENTIAL}`;
+const MH_SECRET_TOKEN_PERCENT = "bEaReR%20cache%20token%2Bcredential%2F%25%3F%20canary";
+const MH_SECRET_TOKEN_FORM = "bEaReR+cache+token%2Bcredential%2F%25%3F+canary";
+const MH_SECRET_TOKEN_PERCENT_SEPARATOR = `bEaReR%20${MH_BEARER_CREDENTIAL}`;
+const MH_SECRET_TOKEN_FORM_SEPARATOR = `bEaReR+${MH_BEARER_CREDENTIAL}`;
 
 const MH_SECRET_VARIANTS = [
   MH_SECRET_USER,
@@ -18,7 +25,14 @@ const MH_SECRET_VARIANTS = [
   MH_SECRET_PASSWORD,
   MH_SECRET_PASSWORD_PERCENT,
   MH_SECRET_PASSWORD_FORM,
-  MH_SECRET_TOKEN
+  MH_BEARER_CREDENTIAL,
+  MH_BEARER_CREDENTIAL_PERCENT,
+  MH_BEARER_CREDENTIAL_FORM,
+  MH_SECRET_TOKEN,
+  MH_SECRET_TOKEN_PERCENT,
+  MH_SECRET_TOKEN_FORM,
+  MH_SECRET_TOKEN_PERCENT_SEPARATOR,
+  MH_SECRET_TOKEN_FORM_SEPARATOR
 ];
 
 describe("MH client", () => {
@@ -202,6 +216,57 @@ describe("MH client", () => {
     expectNoMhSecrets(JSON.stringify(result));
   });
 
+  it.each([
+    {
+      ambiente: "00" as const,
+      appEnv: "staging" as const,
+      receptionUrl: "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"
+    },
+    {
+      ambiente: "01" as const,
+      appEnv: "production" as const,
+      receptionUrl: "https://api.dtes.mh.gob.sv/fesv/recepciondte"
+    }
+  ])("sanitizes cached Bearer credential and authorization variants in lane $ambiente", async ({
+    ambiente,
+    appEnv,
+    receptionUrl
+  }) => {
+    const { environment, cacheStatement } = cachedTokenEnv(ambiente, appEnv);
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      estado: "PROCESADO",
+      selloRecibido: `SEAL-${MH_BEARER_CREDENTIAL}`,
+      observaciones: [
+        `credential=${MH_BEARER_CREDENTIAL}`,
+        `credential-percent=${MH_BEARER_CREDENTIAL_PERCENT}`,
+        `credential-form=${MH_BEARER_CREDENTIAL_FORM}`,
+        `authorization=${MH_SECRET_TOKEN}`,
+        `authorization-percent=${MH_SECRET_TOKEN_PERCENT}`,
+        `authorization-form=${MH_SECRET_TOKEN_FORM}`,
+        `separator-percent=${MH_SECRET_TOKEN_PERCENT_SEPARATOR}`,
+        `separator-form=${MH_SECRET_TOKEN_FORM_SEPARATOR}`
+      ],
+      text: `plain ${MH_BEARER_CREDENTIAL_FORM}`,
+      nested: [{ value: `prefix-${MH_SECRET_TOKEN_PERCENT}-suffix` }],
+      [`provider-${MH_BEARER_CREDENTIAL_PERCENT}-key`]: MH_SECRET_TOKEN_FORM
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await transmitTestDte(new MhClient(environment), ambiente);
+
+    expect(result).toMatchObject({
+      accepted: true,
+      estado: "PROCESADO",
+      selloRecibido: "SEAL-[REDACTED]"
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe(receptionUrl);
+    expect(fetchMock.mock.calls[0][1]?.headers).toMatchObject({ Authorization: MH_SECRET_TOKEN });
+    expect(cacheStatement.first).toHaveBeenCalledTimes(1);
+    expect(cacheStatement.run).not.toHaveBeenCalled();
+    expectNoMhSecrets(JSON.stringify(result));
+  });
+
   it("bounds an arbitrary indeterminate estado and sanitizes a plain-text reception response", async () => {
     const environment = testEnv();
     environment.MH_USER_TEST = MH_SECRET_USER;
@@ -290,6 +355,41 @@ function testEnv(): Env {
   };
 }
 
+function cachedTokenEnv(
+  ambiente: "00" | "01",
+  appEnv: "staging" | "production"
+): {
+  environment: Env;
+  cacheStatement: {
+    bind: ReturnType<typeof vi.fn>;
+    first: ReturnType<typeof vi.fn>;
+    run: ReturnType<typeof vi.fn>;
+  };
+} {
+  const cacheStatement = {
+    bind: vi.fn().mockReturnThis(),
+    first: vi.fn().mockResolvedValue({
+      token: MH_SECRET_TOKEN,
+      token_type: "Bearer",
+      expires_at: "2099-01-01T00:00:00.000Z"
+    }),
+    run: vi.fn().mockResolvedValue({})
+  };
+  const environment = testEnv();
+  environment.DB = { prepare: vi.fn().mockReturnValue(cacheStatement) } as unknown as D1Database;
+  environment.APP_ENV = appEnv;
+  if (ambiente === "00") {
+    environment.MH_USER_TEST = MH_SECRET_USER;
+    environment.MH_PASSWORD_TEST = MH_SECRET_PASSWORD;
+  } else {
+    environment.MH_USER_PROD = MH_SECRET_USER;
+    environment.MH_PASSWORD_PROD = MH_SECRET_PASSWORD;
+    environment.MH_AUTH_URL_PROD = "https://api.dtes.mh.gob.sv/seguridad/auth";
+    environment.MH_RECEPCION_URL_PROD = "https://api.dtes.mh.gob.sv/fesv/recepciondte";
+  }
+  return { environment, cacheStatement };
+}
+
 function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(body), {
     status: init.status ?? 200,
@@ -297,9 +397,9 @@ function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
   });
 }
 
-async function transmitTestDte(client: MhClient) {
+async function transmitTestDte(client: MhClient, ambiente: "00" | "01" = "00") {
   return client.transmitDte({
-    ambiente: "00",
+    ambiente,
     version: 2,
     tipoDte: "15",
     codigoGeneracion: "11111111-2222-4333-8444-555555555555",

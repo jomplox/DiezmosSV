@@ -238,13 +238,24 @@ function providerRedactions(
 ): string[] {
   const values = new Set<string>();
   for (const credential of [user, password]) {
-    if (!credential) continue;
-    values.add(credential);
-    values.add(encodeURIComponent(credential));
-    values.add(new URLSearchParams({ value: credential }).toString().slice("value=".length));
+    addProviderRedactionVariants(values, credential);
   }
-  if (authorization) values.add(authorization);
+  addProviderRedactionVariants(values, authorization);
+  const bearer = authorization.match(/^(Bearer)[ \t]+(.+)$/i);
+  const bearerCredential = bearer?.[2]?.trim();
+  if (bearer && bearerCredential) {
+    addProviderRedactionVariants(values, bearerCredential);
+    values.add(`${bearer[1]}%20${bearerCredential}`);
+    values.add(`${bearer[1]}+${bearerCredential}`);
+  }
   return [...values].filter(Boolean).sort((left, right) => right.length - left.length);
+}
+
+function addProviderRedactionVariants(values: Set<string>, value: string | undefined): void {
+  if (!value) return;
+  values.add(value);
+  values.add(encodeURIComponent(value));
+  values.add(new URLSearchParams({ value }).toString().slice("value=".length));
 }
 
 function sanitizeProviderValue(value: unknown, redactions: string[]): unknown {

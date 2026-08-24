@@ -30,7 +30,14 @@ const PIPELINE_MH_SECRET_USER_FORM = "mh+user%2Bcanary%40example.test";
 const PIPELINE_MH_SECRET_PASSWORD = "PW canary+&=/%?";
 const PIPELINE_MH_SECRET_PASSWORD_PERCENT = "PW%20canary%2B%26%3D%2F%25%3F";
 const PIPELINE_MH_SECRET_PASSWORD_FORM = "PW+canary%2B%26%3D%2F%25%3F";
-const PIPELINE_MH_SECRET_TOKEN = `Bearer token:${PIPELINE_MH_SECRET_PASSWORD}:mh-token-canary`;
+const PIPELINE_MH_BEARER_CREDENTIAL = "cache token+credential/%? canary";
+const PIPELINE_MH_BEARER_CREDENTIAL_PERCENT = "cache%20token%2Bcredential%2F%25%3F%20canary";
+const PIPELINE_MH_BEARER_CREDENTIAL_FORM = "cache+token%2Bcredential%2F%25%3F+canary";
+const PIPELINE_MH_SECRET_TOKEN = `bEaReR ${PIPELINE_MH_BEARER_CREDENTIAL}`;
+const PIPELINE_MH_SECRET_TOKEN_PERCENT = "bEaReR%20cache%20token%2Bcredential%2F%25%3F%20canary";
+const PIPELINE_MH_SECRET_TOKEN_FORM = "bEaReR+cache+token%2Bcredential%2F%25%3F+canary";
+const PIPELINE_MH_SECRET_TOKEN_PERCENT_SEPARATOR = `bEaReR%20${PIPELINE_MH_BEARER_CREDENTIAL}`;
+const PIPELINE_MH_SECRET_TOKEN_FORM_SEPARATOR = `bEaReR+${PIPELINE_MH_BEARER_CREDENTIAL}`;
 
 const PIPELINE_MH_SECRET_VARIANTS = [
   PIPELINE_MH_SECRET_USER,
@@ -39,7 +46,14 @@ const PIPELINE_MH_SECRET_VARIANTS = [
   PIPELINE_MH_SECRET_PASSWORD,
   PIPELINE_MH_SECRET_PASSWORD_PERCENT,
   PIPELINE_MH_SECRET_PASSWORD_FORM,
-  PIPELINE_MH_SECRET_TOKEN
+  PIPELINE_MH_BEARER_CREDENTIAL,
+  PIPELINE_MH_BEARER_CREDENTIAL_PERCENT,
+  PIPELINE_MH_BEARER_CREDENTIAL_FORM,
+  PIPELINE_MH_SECRET_TOKEN,
+  PIPELINE_MH_SECRET_TOKEN_PERCENT,
+  PIPELINE_MH_SECRET_TOKEN_FORM,
+  PIPELINE_MH_SECRET_TOKEN_PERCENT_SEPARATOR,
+  PIPELINE_MH_SECRET_TOKEN_FORM_SEPARATOR
 ];
 
 const INTENT_ADDRESS = {
@@ -170,6 +184,25 @@ function stubMhAuthUnavailable(): ReturnType<typeof vi.fn> {
 
 function mhRecepcionCalls(fetchMock: ReturnType<typeof vi.fn>): number {
   return fetchMock.mock.calls.filter((call) => String(call[0]).includes("recepciondte")).length;
+}
+
+function installCachedMhToken(db: InMemoryD1, token: string) {
+  const originalPrepare = db.prepare.bind(db);
+  const cacheStatement = {
+    bind: vi.fn().mockReturnThis(),
+    first: vi.fn().mockResolvedValue({
+      token,
+      token_type: "Bearer",
+      expires_at: "2099-01-01T00:00:00.000Z"
+    }),
+    run: vi.fn().mockResolvedValue({})
+  };
+  vi.spyOn(db, "prepare").mockImplementation((sql) =>
+    sql.includes("FROM mh_tokens")
+      ? cacheStatement as unknown as ReturnType<InMemoryD1["prepare"]>
+      : originalPrepare(sql)
+  );
+  return cacheStatement;
 }
 
 describe("IssuancePipeline.processWompiEvent acceptance", () => {
@@ -392,7 +425,7 @@ describe("IssuancePipeline.processWompiEvent rejection", () => {
     expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DTE_ACCEPTED" }));
   });
 
-  it("keeps echoed MH credentials out of returned, document, audit, and log rejection evidence", async () => {
+  it("keeps cached-token echoes out of returned, document, audit, and log rejection evidence", async () => {
     const db = new InMemoryD1();
     seedIntent(db);
     const eventId = seedEvent(db, unitWebhook());
@@ -400,15 +433,9 @@ describe("IssuancePipeline.processWompiEvent rejection", () => {
     const runtime = await pipelineRuntime(db, sent);
     runtime.MH_USER_TEST = PIPELINE_MH_SECRET_USER;
     runtime.MH_PASSWORD_TEST = PIPELINE_MH_SECRET_PASSWORD;
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const cacheStatement = installCachedMhToken(db, PIPELINE_MH_SECRET_TOKEN);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       const url = String(input);
-      if (url.includes("/seguridad/auth")) {
-        return jsonResponse({
-          status: "OK",
-          body: { token: PIPELINE_MH_SECRET_TOKEN },
-          tokenType: "Bearer"
-        });
-      }
       if (url.includes("recepciondte")) {
         return jsonResponse({
           estado: "RECHAZADO",
@@ -416,18 +443,26 @@ describe("IssuancePipeline.processWompiEvent rejection", () => {
           observaciones: [
             `user=${PIPELINE_MH_SECRET_USER}; encoded=${PIPELINE_MH_SECRET_USER_PERCENT}`,
             `pwd=${PIPELINE_MH_SECRET_PASSWORD}; form=${PIPELINE_MH_SECRET_PASSWORD_FORM}`,
-            `authorization=${PIPELINE_MH_SECRET_TOKEN}`
+            `authorization=${PIPELINE_MH_SECRET_TOKEN}`,
+            `credential=${PIPELINE_MH_BEARER_CREDENTIAL}`,
+            `credential-percent=${PIPELINE_MH_BEARER_CREDENTIAL_PERCENT}`,
+            `credential-form=${PIPELINE_MH_BEARER_CREDENTIAL_FORM}`,
+            `authorization-percent=${PIPELINE_MH_SECRET_TOKEN_PERCENT}`,
+            `authorization-form=${PIPELINE_MH_SECRET_TOKEN_FORM}`,
+            `separator-percent=${PIPELINE_MH_SECRET_TOKEN_PERCENT_SEPARATOR}`,
+            `separator-form=${PIPELINE_MH_SECRET_TOKEN_FORM_SEPARATOR}`
           ],
           descripcionMsg: `description ${PIPELINE_MH_SECRET_PASSWORD_PERCENT}`,
           estadoDetalle: `state ${PIPELINE_MH_SECRET_USER_FORM}`,
-          selloEcho: `seal ${PIPELINE_MH_SECRET_TOKEN}`,
-          text: `text ${PIPELINE_MH_SECRET_PASSWORD}`,
-          nested: [{ evidence: `prefix-${PIPELINE_MH_SECRET_TOKEN}-suffix` }],
-          [`provider-${PIPELINE_MH_SECRET_PASSWORD}-key`]: "nested key evidence"
+          selloEcho: `seal ${PIPELINE_MH_BEARER_CREDENTIAL}`,
+          text: `text ${PIPELINE_MH_SECRET_TOKEN_FORM_SEPARATOR}`,
+          nested: [{ evidence: `prefix-${PIPELINE_MH_SECRET_TOKEN_PERCENT}-suffix` }],
+          [`provider-${PIPELINE_MH_BEARER_CREDENTIAL_PERCENT}-key`]: PIPELINE_MH_SECRET_TOKEN_FORM
         }, { status: 400 });
       }
       throw new Error(`Fetch inesperado en prueba unitaria del pipeline: ${url}`);
-    }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
     const record = await new IssuancePipeline(runtime).processWompiEvent(eventId);
@@ -444,6 +479,11 @@ describe("IssuancePipeline.processWompiEvent rejection", () => {
       summary: "DTE-15-M001P004-000000000000001 RECHAZADO"
     }));
     expect(JSON.parse(String(record!.mh_observaciones_json))[2]).toBe("authorization=[REDACTED]");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe("https://apitest.dtes.mh.gob.sv/fesv/recepciondte");
+    expect(fetchMock.mock.calls[0][1]?.headers).toMatchObject({ Authorization: PIPELINE_MH_SECRET_TOKEN });
+    expect(cacheStatement.first).toHaveBeenCalledTimes(1);
+    expect(cacheStatement.run).not.toHaveBeenCalled();
     expectNoPipelineMhSecrets(JSON.stringify({
       returned: record,
       documents: db.documents,
