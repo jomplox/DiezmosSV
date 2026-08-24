@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
@@ -5,7 +7,7 @@ import { AuthService, hashForStorage, hashPassword } from "../../src/worker/serv
 import { Repository } from "../../src/worker/storage/repository";
 import { utf8Bytes } from "../../src/worker/utils/encoding";
 import { env, InMemoryD1 } from "./support/inMemoryD1";
-import { migratedDatabase } from "./support/migratedDatabase";
+import { migratedDatabase, migratedDatabaseThrough } from "./support/migratedDatabase";
 import { sqliteD1 } from "./support/sqliteD1";
 import { makeDocument as testDocument } from "./fixtures";
 import { installWorkerFetchGlobals } from "./support/workerFetchGlobals";
@@ -33,6 +35,689 @@ describe("public deployment identity", () => {
       appEnv: "staging",
       workerName: "diezmos-sv-staging"
     });
+  });
+});
+
+describe("login step-up migration", () => {
+  it("stores only bounded challenge hashes and exposes an expiry cleanup index", () => {
+    const database = migratedDatabase();
+    try {
+      const table = database
+        .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'login_step_up_challenges'")
+        .get() as { sql: string } | undefined;
+      expect(table, "migration 0045 must create the challenge table").toBeDefined();
+      if (!table) return;
+
+      const indexes = database
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'login_step_up_challenges'")
+        .all()
+        .map((row) => String((row as { name: string }).name));
+      expect(indexes).toContain("idx_login_step_up_challenges_expires");
+
+      const validHash = "a".repeat(64);
+      database.prepare(
+        `INSERT INTO login_step_up_challenges (
+           id, user_id, continuation_token_hash, code_hash,
+           expected_email, expected_auth_generation,
+           expected_password_hash, expected_password_salt, expires_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        "challenge_valid",
+        "user_operator",
+        validHash,
+        "b".repeat(64),
+        "operator@example.org",
+        0,
+        "hash",
+        "salt",
+        "2026-07-04T12:10:00.000Z"
+      );
+      expect(
+        database.prepare(
+          "SELECT continuation_token_hash, code_hash, failed_attempts, consumed_at, invalidated_at FROM login_step_up_challenges"
+        ).get()
+      ).toEqual({
+        continuation_token_hash: validHash,
+        code_hash: "b".repeat(64),
+        failed_attempts: 0,
+        consumed_at: null,
+        invalidated_at: null
+      });
+      expect(() => database.prepare(
+        `INSERT INTO login_step_up_challenges (
+           id, user_id, continuation_token_hash, code_hash,
+           expected_email, expected_auth_generation,
+           expected_password_hash, expected_password_salt, expires_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        "challenge_plaintext",
+        "user_operator",
+        "continuation-token",
+        "123456",
+        "operator@example.org",
+        0,
+        "hash",
+        "salt",
+        "2026-07-04T12:10:00.000Z"
+      )).toThrow(/CHECK constraint failed/);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("atomically consumes a valid SQLite challenge once and exhausts five wrong attempts", async () => {
+    const database = migratedDatabase();
+    try {
+      const repo = new Repository(sqliteD1(database));
+      const snapshot = {
+        userId: "user_operator",
+        expectedEmail: "operator@example.org",
+        expectedAuthGeneration: 0,
+        expectedPasswordHash: "hash",
+        expectedPasswordSalt: "salt"
+      };
+      const firstId = await repo.createLoginStepUpChallenge({
+        ...snapshot,
+        continuationTokenHash: "a".repeat(64),
+        codeHash: "b".repeat(64),
+        expiresAt: "2026-07-04T12:10:00.000Z"
+      });
+      expect(firstId).toMatch(/^login_mfa_/);
+
+      const consumed = await repo.consumeLoginStepUpChallenge({
+        challengeId: firstId!,
+        continuationTokenHash: "a".repeat(64),
+        codeHash: "b".repeat(64),
+        now: "2026-07-04T12:00:00.000Z",
+        maxWrongAttempts: 5
+      });
+      expect(consumed).toMatchObject(snapshot);
+      await expect(repo.consumeLoginStepUpChallenge({
+        challengeId: firstId!,
+        continuationTokenHash: "a".repeat(64),
+        codeHash: "b".repeat(64),
+        now: "2026-07-04T12:00:00.000Z",
+        maxWrongAttempts: 5
+      })).resolves.toBeNull();
+
+      const exhaustedId = await repo.createLoginStepUpChallenge({
+        ...snapshot,
+        continuationTokenHash: "c".repeat(64),
+        codeHash: "d".repeat(64),
+        expiresAt: "2026-07-04T12:10:00.000Z"
+      });
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        await expect(repo.incrementLoginStepUpFailure({
+          challengeId: exhaustedId!,
+          continuationTokenHash: "c".repeat(64),
+          submittedCodeHash: "e".repeat(64),
+          now: "2026-07-04T12:00:00.000Z",
+          maxWrongAttempts: 5
+        })).resolves.toBe(true);
+      }
+      await expect(repo.incrementLoginStepUpFailure({
+        challengeId: exhaustedId!,
+        continuationTokenHash: "c".repeat(64),
+        submittedCodeHash: "e".repeat(64),
+        now: "2026-07-04T12:00:00.000Z",
+        maxWrongAttempts: 5
+      })).resolves.toBe(false);
+      await expect(repo.consumeLoginStepUpChallenge({
+        challengeId: exhaustedId!,
+        continuationTokenHash: "c".repeat(64),
+        codeHash: "d".repeat(64),
+        now: "2026-07-04T12:00:00.000Z",
+        maxWrongAttempts: 5
+      })).resolves.toBeNull();
+    } finally {
+      database.close();
+    }
+  });
+
+  it("atomically caps cumulative SQLite guesses across active reissued challenges", async () => {
+    const database = migratedDatabase();
+    try {
+      const repo = new Repository(sqliteD1(database));
+      const snapshot = {
+        userId: "user_operator",
+        expectedEmail: "operator@example.org",
+        expectedAuthGeneration: 0,
+        expectedPasswordHash: "hash",
+        expectedPasswordSalt: "salt"
+      };
+      const firstId = await repo.createLoginStepUpChallenge({
+        ...snapshot,
+        continuationTokenHash: "1".repeat(64),
+        codeHash: "2".repeat(64),
+        expiresAt: "2026-07-04T12:10:00.000Z"
+      });
+      const secondId = await repo.createLoginStepUpChallenge({
+        ...snapshot,
+        continuationTokenHash: "3".repeat(64),
+        codeHash: "4".repeat(64),
+        expiresAt: "2026-07-04T12:10:00.000Z"
+      });
+
+      const attempts = await Promise.all(
+        Array.from({ length: 6 }, (_, index) => repo.incrementLoginStepUpFailure({
+          challengeId: index % 2 === 0 ? firstId! : secondId!,
+          continuationTokenHash: (index % 2 === 0 ? "1" : "3").repeat(64),
+          submittedCodeHash: "5".repeat(64),
+          now: "2026-07-04T12:00:00.000Z",
+          maxWrongAttempts: 5
+        }))
+      );
+
+      expect(attempts.filter(Boolean)).toHaveLength(5);
+      expect(database.prepare(
+        "SELECT SUM(failed_attempts) AS attempts FROM login_step_up_challenges WHERE consumed_at IS NULL AND invalidated_at IS NULL"
+      ).get()).toEqual({ attempts: 5 });
+      await expect(repo.consumeLoginStepUpChallenge({
+        challengeId: secondId!,
+        continuationTokenHash: "3".repeat(64),
+        codeHash: "4".repeat(64),
+        now: "2026-07-04T12:00:00.000Z",
+        maxWrongAttempts: 5
+      })).resolves.toBeNull();
+
+      const afterExpiryId = await repo.createLoginStepUpChallenge({
+        ...snapshot,
+        continuationTokenHash: "6".repeat(64),
+        codeHash: "7".repeat(64),
+        expiresAt: "2026-07-04T12:20:00.000Z"
+      });
+      await expect(repo.consumeLoginStepUpChallenge({
+        challengeId: afterExpiryId!,
+        continuationTokenHash: "6".repeat(64),
+        codeHash: "7".repeat(64),
+        now: "2026-07-04T12:10:00.001Z",
+        maxWrongAttempts: 5
+      })).resolves.toMatchObject(snapshot);
+    } finally {
+      database.close();
+    }
+  });
+});
+
+describe("provider creation budget migration", () => {
+  const migrationPath = resolve(
+    import.meta.dirname,
+    "../../migrations/0046_provider_creation_budgets.sql"
+  );
+  const legacyIndexMigrationPath = resolve(
+    import.meta.dirname,
+    "../../migrations/0047_provider_creation_legacy_index.sql"
+  );
+
+  it("installs the checked provider ledger, count indexes, and parent evidence columns", () => {
+    const database = migratedDatabase();
+    try {
+      const table = database.prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'provider_creation_claims'"
+      ).get() as { sql: string } | undefined;
+      expect(table, "migration 0046 must create the provider claim ledger").toBeDefined();
+      if (!table) return;
+
+      const indexes = database.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'provider_creation_claims'"
+      ).all().map((row) => String((row as { name: string }).name));
+      expect(indexes).toEqual(expect.arrayContaining([
+        "idx_provider_creation_claims_client_claimed",
+        "idx_provider_creation_claims_provider_claimed",
+        "idx_provider_creation_claims_global_claimed",
+        "idx_provider_creation_claims_expires",
+        "idx_provider_creation_claims_stripe_request"
+      ]));
+
+      expect(database.prepare("PRAGMA table_info(donation_intents)").all())
+        .toEqual(expect.arrayContaining([expect.objectContaining({ name: "provider_creation_claim_id" })]));
+      expect(database.prepare("PRAGMA table_info(stripe_checkout_sessions)").all())
+        .toEqual(expect.arrayContaining([expect.objectContaining({ name: "provider_creation_claim_id" })]));
+      expect(database.prepare("PRAGMA foreign_key_list(donation_intents)").all())
+        .not.toEqual(expect.arrayContaining([expect.objectContaining({ from: "provider_creation_claim_id" })]));
+      expect(database.prepare("PRAGMA foreign_key_list(stripe_checkout_sessions)").all())
+        .not.toEqual(expect.arrayContaining([expect.objectContaining({ from: "provider_creation_claim_id" })]));
+
+      expect(() => database.prepare(
+        `INSERT INTO provider_creation_claims (
+           id, provider, client_key_hash, stripe_request_id, claimed_at, expires_at
+         ) VALUES ('bad_provider', 'PAYPAL', 'client', NULL, '2026-07-04T12:00:00.000Z', '2026-07-04T12:15:00.000Z')`
+      ).run()).toThrow(/CHECK constraint failed/);
+
+      expect(() => database.prepare(
+        `INSERT INTO provider_creation_claims (
+           id, provider, client_key_hash, stripe_request_id, claimed_at, expires_at
+         ) VALUES ('bad_wompi_request', 'WOMPI', 'client', 'request-one', '2026-07-04T12:00:00.000Z', '2026-07-04T12:15:00.000Z')`
+      ).run()).toThrow(/CHECK constraint failed/);
+
+      expect(() => database.prepare(
+        `INSERT INTO provider_creation_claims (
+           id, provider, client_key_hash, stripe_request_id, claimed_at, expires_at
+         ) VALUES ('bad_stripe_request', 'STRIPE', 'client', NULL, '2026-07-04T12:00:00.000Z', '2026-07-04T12:15:00.000Z')`
+      ).run()).toThrow(/CHECK constraint failed/);
+
+      database.prepare(
+        `INSERT INTO provider_creation_claims (
+           id, provider, client_key_hash, stripe_request_id, claimed_at, expires_at
+         ) VALUES (?, 'STRIPE', ?, ?, ?, ?)`
+      ).run(
+        "stripe_claim_one",
+        "client-one",
+        "request-one",
+        "2026-07-04T12:00:00.000Z",
+        "2026-07-04T12:15:00.000Z"
+      );
+      expect(() => database.prepare(
+        `INSERT INTO provider_creation_claims (
+           id, provider, client_key_hash, stripe_request_id, claimed_at, expires_at
+         ) VALUES (?, 'STRIPE', ?, ?, ?, ?)`
+      ).run(
+        "stripe_claim_two",
+        "client-two",
+        "request-one",
+        "2026-07-04T12:00:00.000Z",
+        "2026-07-04T12:15:00.000Z"
+      )).toThrow(/UNIQUE constraint failed/);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("upgrades an exact 0045 database through additive 0046", () => {
+    expect(existsSync(migrationPath), "migration 0046 exists").toBe(true);
+    if (!existsSync(migrationPath)) return;
+    const database = migratedDatabaseThrough("0045");
+    try {
+      expect(database.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'provider_creation_claims'"
+      ).get()).toBeUndefined();
+
+      database.exec(readFileSync(migrationPath, "utf8"));
+
+      expect(database.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'provider_creation_claims'"
+      ).get()).toEqual({ name: "provider_creation_claims" });
+      expect(database.prepare("PRAGMA table_info(donation_intents)").all())
+        .toEqual(expect.arrayContaining([expect.objectContaining({ name: "provider_creation_claim_id" })]));
+      expect(database.prepare("PRAGMA table_info(stripe_checkout_sessions)").all())
+        .toEqual(expect.arrayContaining([expect.objectContaining({ name: "provider_creation_claim_id" })]));
+    } finally {
+      database.close();
+    }
+  });
+
+  it("upgrades an exact 0046 database through additive 0047", () => {
+    expect(existsSync(legacyIndexMigrationPath), "migration 0047 exists").toBe(true);
+    if (!existsSync(legacyIndexMigrationPath)) return;
+    const database = migratedDatabaseThrough("0046");
+    try {
+      expect(database.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_stripe_checkout_legacy_created'"
+      ).get()).toBeUndefined();
+
+      database.exec(readFileSync(legacyIndexMigrationPath, "utf8"));
+
+      expect(database.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_stripe_checkout_legacy_created'"
+      ).get()).toEqual({ name: "idx_stripe_checkout_legacy_created" });
+      expect(database.prepare("PRAGMA index_info(idx_stripe_checkout_legacy_created)").all())
+        .toEqual([expect.objectContaining({ name: "created_at" })]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("searches indexed recent Stripe legacy history while preserving rolling admission", async () => {
+    const database = migratedDatabase();
+    const historyNow = "2026-07-04T12:00:00.000Z";
+    const historyCutoff = "2026-07-04T11:45:00.000Z";
+    const historyExpiresAt = "2026-07-04T12:15:00.000Z";
+    try {
+      const insert = database.prepare(
+        `INSERT INTO stripe_checkout_sessions (
+           id, request_id, request_fingerprint, frequency, gift_type, amount_cents,
+           currency, livemode, status, payment_status, created_at, updated_at
+         ) VALUES (?, ?, 'v2:legacy', 'ONCE', 'TITHE', 1000,
+                   'usd', 0, 'FAILED', 'UNPAID', ?, ?)`
+      );
+      database.exec("BEGIN IMMEDIATE");
+      for (let index = 0; index < 2_000; index += 1) {
+        insert.run(
+          `historic_stripe_${index}`,
+          `historic-stripe-request-${index}`,
+          "2025-01-01T00:00:00.000Z",
+          "2025-01-01T00:00:00.000Z"
+        );
+      }
+      insert.run(
+        "recent_legacy_stripe",
+        "recent-legacy-stripe-request",
+        "2026-07-04T11:59:00.000Z",
+        "2026-07-04T11:59:00.000Z"
+      );
+      database.exec("COMMIT");
+      database.exec("ANALYZE");
+
+      const plan = database.prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT COUNT(*) FROM stripe_checkout_sessions
+          WHERE provider_creation_claim_id IS NULL AND created_at >= ?`
+      ).all(historyCutoff) as Array<{ detail: string }>;
+      const detail = plan.map((step) => step.detail).join("\n");
+      expect(detail).toMatch(
+        /SEARCH stripe_checkout_sessions USING INDEX idx_stripe_checkout_legacy_created \(created_at>\?\)/i
+      );
+      expect(detail).not.toMatch(/SCAN stripe_checkout_sessions/i);
+
+      const repo = new Repository(sqliteD1(database));
+      const first = await claimProviderCreationBudgetForTest(repo, {
+        provider: "STRIPE",
+        clientKeyHash: "large-history-client-one",
+        stripeRequestId: "large-history-request-one",
+        now: historyNow,
+        cutoff: historyCutoff,
+        expiresAt: historyExpiresAt,
+        clientLimit: 20,
+        providerLimit: 2,
+        globalLimit: 20
+      });
+      const second = await claimProviderCreationBudgetForTest(repo, {
+        provider: "STRIPE",
+        clientKeyHash: "large-history-client-two",
+        stripeRequestId: "large-history-request-two",
+        now: historyNow,
+        cutoff: historyCutoff,
+        expiresAt: historyExpiresAt,
+        clientLimit: 20,
+        providerLimit: 2,
+        globalLimit: 20
+      });
+      expect(first.kind).toBe("CLAIMED");
+      expect(second).toEqual({ kind: "LIMITED", scope: "PROVIDER" });
+    } finally {
+      database.close();
+    }
+  });
+});
+
+describe("provider creation budget repository", () => {
+  const now = "2026-07-04T12:00:00.000Z";
+  const cutoff = "2026-07-04T11:45:00.000Z";
+  const expiresAt = "2026-07-04T12:15:00.000Z";
+
+  it("atomically caps concurrent SQLite claims at injected client, provider, and global ceilings", async () => {
+    const clientDatabase = migratedDatabase();
+    const providerDatabase = migratedDatabase();
+    const globalDatabase = migratedDatabase();
+    try {
+      const clientRepo = new Repository(sqliteD1(clientDatabase));
+      const clientClaims = await Promise.all(Array.from({ length: 20 }, () =>
+        claimProviderCreationBudgetForTest(clientRepo, {
+          provider: "WOMPI",
+          clientKeyHash: "same-client",
+          stripeRequestId: null,
+          now,
+          cutoff,
+          expiresAt,
+          clientLimit: 2,
+          providerLimit: 20,
+          globalLimit: 20
+        })
+      ));
+      expect(clientClaims.filter((claim) => claim.kind === "CLAIMED")).toHaveLength(2);
+      expect(clientClaims.filter((claim) => claim.kind === "LIMITED"))
+        .toEqual(expect.arrayContaining([{ kind: "LIMITED", scope: "CLIENT" }]));
+
+      const providerRepo = new Repository(sqliteD1(providerDatabase));
+      const providerClaims = await Promise.all(Array.from({ length: 20 }, (_, index) =>
+        claimProviderCreationBudgetForTest(providerRepo, {
+          provider: "STRIPE",
+          clientKeyHash: `provider-client-${index}`,
+          stripeRequestId: `provider-request-${index}`,
+          now,
+          cutoff,
+          expiresAt,
+          clientLimit: 20,
+          providerLimit: 3,
+          globalLimit: 20
+        })
+      ));
+      expect(providerClaims.filter((claim) => claim.kind === "CLAIMED")).toHaveLength(3);
+      expect(providerClaims.filter((claim) => claim.kind === "LIMITED"))
+        .toEqual(expect.arrayContaining([{ kind: "LIMITED", scope: "PROVIDER" }]));
+
+      const globalRepo = new Repository(sqliteD1(globalDatabase));
+      const globalClaims = await Promise.all(Array.from({ length: 20 }, (_, index) =>
+        claimProviderCreationBudgetForTest(globalRepo, {
+          provider: index % 2 === 0 ? "WOMPI" : "STRIPE",
+          clientKeyHash: `global-client-${index}`,
+          stripeRequestId: index % 2 === 0 ? null : `global-request-${index}`,
+          now,
+          cutoff,
+          expiresAt,
+          clientLimit: 20,
+          providerLimit: 20,
+          globalLimit: 4
+        })
+      ));
+      expect(globalClaims.filter((claim) => claim.kind === "CLAIMED")).toHaveLength(4);
+      expect(globalClaims.filter((claim) => claim.kind === "LIMITED"))
+        .toEqual(expect.arrayContaining([{ kind: "LIMITED", scope: "GLOBAL" }]));
+    } finally {
+      clientDatabase.close();
+      providerDatabase.close();
+      globalDatabase.close();
+    }
+  });
+
+  it("matches the atomic low-ceiling behavior in the in-memory D1 emulator", async () => {
+    const db = new InMemoryD1();
+    const repo = new Repository(db as unknown as D1Database);
+    const claims = await Promise.all(Array.from({ length: 20 }, (_, index) =>
+      claimProviderCreationBudgetForTest(repo, {
+        provider: index % 2 === 0 ? "WOMPI" : "STRIPE",
+        clientKeyHash: `memory-client-${index}`,
+        stripeRequestId: index % 2 === 0 ? null : `memory-request-${index}`,
+        now,
+        cutoff,
+        expiresAt,
+        clientLimit: 20,
+        providerLimit: 20,
+        globalLimit: 4
+      })
+    ));
+
+    expect(claims.filter((claim) => claim.kind === "CLAIMED")).toHaveLength(4);
+    expect(providerClaimsFrom(db)).toHaveLength(4);
+  });
+
+  it("counts legacy per-client claims during the rolling deployment", async () => {
+    const database = migratedDatabase();
+    try {
+      const insert = database.prepare(
+        `INSERT INTO security_rate_limit_claims (
+           id, scope, key_hash, claimed_at, expires_at
+         ) VALUES (?, 'donation_intent', ?, ?, ?)`
+      );
+      for (let index = 0; index < 5; index += 1) {
+        insert.run(`legacy_client_${index}`, "legacy-raw-client-hash", now, expiresAt);
+      }
+      const repo = new Repository(sqliteD1(database));
+
+      const claim = await claimProviderCreationBudgetForTest(repo, {
+        provider: "WOMPI",
+        clientKeyHash: "normalized-client-hash",
+        legacyClientKeyHash: "legacy-raw-client-hash",
+        stripeRequestId: null,
+        now,
+        cutoff,
+        expiresAt,
+        clientLimit: 5,
+        providerLimit: 20,
+        globalLimit: 20
+      });
+
+      expect(claim).toEqual({ kind: "LIMITED", scope: "CLIENT" });
+      expect(database.prepare("SELECT COUNT(*) AS count FROM provider_creation_claims").get())
+        .toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("releases only unused claims and preserves attached Wompi and Stripe evidence", async () => {
+    const database = migratedDatabase();
+    try {
+      const repo = new Repository(sqliteD1(database));
+      const unused = await claimProviderCreationBudgetForTest(repo, {
+        provider: "WOMPI",
+        clientKeyHash: "unused-client",
+        stripeRequestId: null,
+        now,
+        cutoff,
+        expiresAt,
+        clientLimit: 20,
+        providerLimit: 20,
+        globalLimit: 20
+      });
+      expect(unused.kind).toBe("CLAIMED");
+      if (unused.kind !== "CLAIMED") return;
+      await releaseProviderCreationClaimForTest(repo, unused.id);
+      expect(database.prepare(
+        "SELECT COUNT(*) AS count FROM provider_creation_claims WHERE id = ?"
+      ).get(unused.id)).toEqual({ count: 0 });
+
+      const wompi = await claimProviderCreationBudgetForTest(repo, {
+        provider: "WOMPI",
+        clientKeyHash: "wompi-attached-client",
+        stripeRequestId: null,
+        now,
+        cutoff,
+        expiresAt,
+        clientLimit: 20,
+        providerLimit: 20,
+        globalLimit: 20
+      });
+      const stripe = await claimProviderCreationBudgetForTest(repo, {
+        provider: "STRIPE",
+        clientKeyHash: "stripe-attached-client",
+        stripeRequestId: "stripe-attached-request",
+        now,
+        cutoff,
+        expiresAt,
+        clientLimit: 20,
+        providerLimit: 20,
+        globalLimit: 20
+      });
+      expect(wompi.kind).toBe("CLAIMED");
+      expect(stripe.kind).toBe("CLAIMED");
+      if (wompi.kind !== "CLAIMED" || stripe.kind !== "CLAIMED") return;
+
+      database.prepare(
+        `INSERT INTO donation_intents (
+           id, status, amount_cents, donor_document_type, client_ip, expires_at,
+           provider_creation_claim_id, created_at, updated_at
+         ) VALUES (?, 'PENDING', 1000, '13', '203.0.113.1', ?, ?, ?, ?)`
+      ).run("attached_wompi", expiresAt, wompi.id, now, now);
+      database.prepare(
+        `INSERT INTO stripe_checkout_sessions (
+           id, request_id, request_fingerprint, frequency, gift_type, amount_cents,
+           currency, livemode, status, payment_status, provider_creation_claim_id,
+           created_at, updated_at
+         ) VALUES (?, ?, 'v2:test', 'ONCE', 'TITHE', 1000,
+                   'usd', 0, 'CREATING', 'UNPAID', ?, ?, ?)`
+      ).run("attached_stripe", "attached-stripe-request", stripe.id, now, now);
+
+      await releaseProviderCreationClaimForTest(repo, wompi.id);
+      await releaseProviderCreationClaimForTest(repo, stripe.id);
+      expect(database.prepare(
+        "SELECT COUNT(*) AS count FROM provider_creation_claims WHERE id IN (?, ?)"
+      ).get(wompi.id, stripe.id)).toEqual({ count: 2 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("counts unattributed legacy parents globally without double-counting attached parents", async () => {
+    const legacyDatabase = migratedDatabase();
+    const attachedDatabase = migratedDatabase();
+    try {
+      legacyDatabase.prepare(
+        `INSERT INTO donation_intents (
+           id, status, amount_cents, donor_document_type, client_ip, expires_at,
+           created_at, updated_at
+         ) VALUES ('legacy_wompi', 'PENDING', 1000, '13', '198.51.100.1', ?, ?, ?)`
+      ).run(expiresAt, now, now);
+      legacyDatabase.prepare(
+        `INSERT INTO stripe_checkout_sessions (
+           id, request_id, request_fingerprint, frequency, gift_type, amount_cents,
+           currency, livemode, status, payment_status, created_at, updated_at
+         ) VALUES ('legacy_stripe', 'legacy-stripe-request', 'v2:legacy', 'ONCE', 'TITHE',
+                   1000, 'usd', 0, 'CREATING', 'UNPAID', ?, ?)`
+      ).run(now, now);
+      const legacyRepo = new Repository(sqliteD1(legacyDatabase));
+      const legacyStripeProviderClaim = await claimProviderCreationBudgetForTest(legacyRepo, {
+        provider: "STRIPE",
+        clientKeyHash: "legacy-stripe-provider-client",
+        stripeRequestId: "fresh-stripe-request",
+        now,
+        cutoff,
+        expiresAt,
+        clientLimit: 20,
+        providerLimit: 1,
+        globalLimit: 20
+      });
+      expect(legacyStripeProviderClaim).toEqual({ kind: "LIMITED", scope: "PROVIDER" });
+
+      const legacyClaim = await claimProviderCreationBudgetForTest(legacyRepo, {
+          provider: "WOMPI",
+          clientKeyHash: "legacy-global-client",
+          stripeRequestId: null,
+          now,
+          cutoff,
+          expiresAt,
+          clientLimit: 20,
+          providerLimit: 20,
+          globalLimit: 2
+      });
+      expect(legacyClaim).toEqual({ kind: "LIMITED", scope: "GLOBAL" });
+
+      const attachedRepo = new Repository(sqliteD1(attachedDatabase));
+      const first = await claimProviderCreationBudgetForTest(attachedRepo, {
+        provider: "WOMPI",
+        clientKeyHash: "attached-global-one",
+        stripeRequestId: null,
+        now,
+        cutoff,
+        expiresAt,
+        clientLimit: 20,
+        providerLimit: 20,
+        globalLimit: 2
+      });
+      expect(first.kind).toBe("CLAIMED");
+      if (first.kind !== "CLAIMED") return;
+      attachedDatabase.prepare(
+        `INSERT INTO donation_intents (
+           id, status, amount_cents, donor_document_type, client_ip, expires_at,
+           provider_creation_claim_id, created_at, updated_at
+         ) VALUES ('attached_global_wompi', 'PENDING', 1000, '13', '198.51.100.2', ?, ?, ?, ?)`
+      ).run(expiresAt, first.id, now, now);
+      const second = await claimProviderCreationBudgetForTest(attachedRepo, {
+        provider: "STRIPE",
+        clientKeyHash: "attached-global-two",
+        stripeRequestId: "attached-global-request",
+        now,
+        cutoff,
+        expiresAt,
+        clientLimit: 20,
+        providerLimit: 20,
+        globalLimit: 2
+      });
+      expect(second.kind).toBe("CLAIMED");
+    } finally {
+      legacyDatabase.close();
+      attachedDatabase.close();
+    }
   });
 });
 
@@ -436,6 +1121,95 @@ describe("auth rate limiting", () => {
     });
   }
 
+  function loginRequestFrom(email: string, password: string, ip: string) {
+    return new Request("https://example.org/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "CF-Connecting-IP": ip },
+      body: JSON.stringify({ email, password })
+    });
+  }
+
+  function loginMfaRequest(input: { challengeId: string; continuationToken: string; code: string }) {
+    return new Request("https://example.org/api/auth/login/mfa", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input)
+    });
+  }
+
+  function seedDistributedFailures(db: InMemoryD1, email: string, count = 5): void {
+    for (let index = 0; index < count; index += 1) {
+      seedAudit(
+        db,
+        "LOGIN_FAILED",
+        email,
+        `2026-07-04T11:${50 + index}:00.000Z`,
+        `203.0.113.${index + 10}`
+      );
+    }
+  }
+
+  async function seedStepUpAccount(
+    db: InMemoryD1,
+    email = "operator@example.org",
+    password = "Valid#Pass2026"
+  ): Promise<void> {
+    const hashed = await hashPassword(password, "fixed-salt", { enforcePolicy: false });
+    db.users.push({
+      id: "user_operator",
+      email,
+      name: "Operator",
+      role: "OPERATOR",
+      password_hash: hashed.hash,
+      password_salt: hashed.salt,
+      auth_generation: 0,
+      disabled_at: ""
+    });
+    seedDistributedFailures(db, email);
+  }
+
+  function stepUpEmailRuntime(
+    db: InMemoryD1,
+    sentMessages: unknown[],
+    send?: (message: unknown) => Promise<{ messageId: string }>
+  ) {
+    return env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "security@example.org",
+      EMAIL: {
+        send: async (message: unknown) => {
+          sentMessages.push(message);
+          return send ? send(message) : { messageId: "login-step-up-code" };
+        }
+      } as SendEmail
+    });
+  }
+
+  function codeFromMessage(message: unknown): string {
+    return String((message as { text?: string }).text).match(/\b(\d{6})\b/)?.[1] ?? "";
+  }
+
+  function differentCode(code: string): string {
+    return code === "000000" ? "000001" : "000000";
+  }
+
+  async function seededStepUp(input: {
+    db: InMemoryD1;
+    email?: string;
+    password?: string;
+    send?: (message: unknown) => Promise<{ messageId: string }>;
+  }) {
+    const email = input.email ?? "operator@example.org";
+    const password = input.password ?? "Valid#Pass2026";
+    await seedStepUpAccount(input.db, email, password);
+    const sentMessages: unknown[] = [];
+    const response = await worker.fetch(
+      loginRequestFrom(email, password, "198.51.100.90"),
+      stepUpEmailRuntime(input.db, sentMessages, input.send)
+    );
+    return { response, sentMessages };
+  }
+
   describe("aggregate login attempts", () => {
     it("blocks the sixty-first login attempt from one IP across distinct account names", async () => {
       const db = new InMemoryD1();
@@ -713,6 +1487,30 @@ describe("auth rate limiting", () => {
         claimed_at: "2026-07-04T11:00:00.000Z",
         expires_at: "2026-07-04T11:15:00.000Z"
       });
+      const providerClaims = providerClaimsFrom(db);
+      providerClaims.push({
+        id: "expired-provider-claim",
+        provider: "WOMPI",
+        client_key_hash: "expired-provider-hash",
+        stripe_request_id: null,
+        claimed_at: "2026-07-04T11:00:00.000Z",
+        expires_at: "2026-07-04T11:15:00.000Z"
+      });
+      db.loginStepUpChallenges.push({
+        id: "login_mfa_expired",
+        user_id: "user_expired",
+        continuation_token_hash: "a".repeat(64),
+        code_hash: "b".repeat(64),
+        expected_email: "expired@example.org",
+        expected_auth_generation: 0,
+        expected_password_hash: "hash",
+        expected_password_salt: "salt",
+        expires_at: "2026-07-04T11:15:00.000Z",
+        failed_attempts: 0,
+        consumed_at: null,
+        invalidated_at: null,
+        created_at: "2026-07-04T11:00:00.000Z"
+      });
 
       const otherIp = await worker.fetch(
         new Request("https://example.org/api/auth/login", {
@@ -734,6 +1532,8 @@ describe("auth rate limiting", () => {
       expect(db.loginRateLimits.has("expired-hash")).toBe(false);
       expect(db.loginRateLimits.size).toBe(1);
       expect(db.securityRateLimitClaims).toHaveLength(0);
+      expect(providerClaims).toHaveLength(0);
+      expect(db.loginStepUpChallenges).toHaveLength(0);
     });
 
     it("blocks the sixty-first login attempt in the shared unknown IP bucket", async () => {
@@ -837,7 +1637,7 @@ describe("auth rate limiting", () => {
     expect(db.audits).toContainEqual(expect.objectContaining({ action: "LOGIN", entity_id: "user_ok" }));
   });
 
-  it("does not let attacker failures from one IP lock out a victim on another IP", async () => {
+  it("requires a non-locking email step-up after distributed account failures", async () => {
     const db = new InMemoryD1();
     const hashed = await hashPassword("Valid#Pass2026", "fixed-salt", { enforcePolicy: false });
     db.users.push({
@@ -849,25 +1649,444 @@ describe("auth rate limiting", () => {
       password_salt: hashed.salt,
       disabled_at: ""
     });
-    // An attacker seeds the failure threshold for the victim's email from their own IP.
-    for (let i = 0; i < 5; i += 1) {
-      seedAudit(db, "LOGIN_FAILED", "victim@example.org", `2026-07-04T11:5${i}:00.000Z`, "203.0.113.7");
+    db.auditCreatedAt = "2026-07-04T11:59:00.000Z";
+    for (let index = 0; index < 5; index += 1) {
+      const failed = await worker.fetch(
+        loginRequestFrom(
+          "victim@example.org",
+          "Wrong#Pass2026",
+          `203.0.113.${index + 10}`
+        ),
+        env(db)
+      );
+      expect(failed.status).toBe(401);
+    }
+    const sentMessages: unknown[] = [];
+
+    // Correct credentials from a fresh IP are not locked out, but they also must not
+    // mint a session until the emailed one-time code is completed.
+    const response = await worker.fetch(
+      loginRequestFrom("victim@example.org", "Valid#Pass2026", "198.51.100.4"),
+      env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "security@example.org",
+        EMAIL: {
+          send: async (message: unknown) => {
+            sentMessages.push(message);
+            return { messageId: "login-step-up-code" };
+          }
+        } as SendEmail
+      })
+    );
+
+    expect(response.status).toBe(202);
+    const challenge = await response.json() as Record<string, unknown>;
+    expect(challenge).toMatchObject({
+      mfaRequired: true,
+      challengeId: expect.any(String),
+      continuationToken: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+      expiresAt: "2026-07-04T12:10:00.000Z"
+    });
+    expect(challenge).not.toHaveProperty("token");
+    expect(challenge).not.toHaveProperty("user");
+    expect(db.sessions).toHaveLength(0);
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0]).toMatchObject({ to: "victim@example.org" });
+    expect(String((sentMessages[0] as { text?: string }).text)).toMatch(/\b\d{6}\b/);
+    expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "LOGIN", entity_id: "user_victim" }));
+  });
+
+  it("atomically caps concurrent challenge issuance across rotating IPs without creating a session", async () => {
+    const db = new InMemoryD1();
+    await seedStepUpAccount(db);
+    const currentStoredPassword = await hashForStorage("Valid#Pass2026", { enforcePolicy: false });
+    db.users[0].password_hash = currentStoredPassword.hash;
+    db.users[0].password_salt = currentStoredPassword.salt;
+    const sentMessages: unknown[] = [];
+    const runtime = stepUpEmailRuntime(db, sentMessages);
+
+    const responses = await Promise.all(
+      Array.from({ length: 6 }, (_, index) => worker.fetch(
+        loginRequestFrom("operator@example.org", "Valid#Pass2026", `198.51.100.${100 + index}`),
+        runtime
+      ))
+    );
+
+    expect(responses.map((response) => response.status).sort()).toEqual([202, 202, 202, 202, 202, 503]);
+    const limited = responses.find((response) => response.status === 503);
+    await expect(limited?.json()).resolves.toEqual({
+      error: "login_mfa_unavailable",
+      message: "No se pudo enviar el código de verificación. Intente de nuevo en unos minutos."
+    });
+    expect(db.loginStepUpChallenges).toHaveLength(5);
+    expect(sentMessages).toHaveLength(5);
+    expect(db.sessions).toHaveLength(0);
+    expect(db.audits.filter((audit) => audit.action === "LOGIN_FAILED")).toHaveLength(5);
+    expect([...db.loginRateLimits.values()].filter((row) => row.attempt_count === 5)).toHaveLength(1);
+
+    const auditJson = JSON.stringify(db.audits);
+    for (const response of responses.filter((candidate) => candidate.status === 202)) {
+      const challenge = await response.json() as { continuationToken: string };
+      expect(auditJson).not.toContain(challenge.continuationToken);
+    }
+    for (const message of sentMessages) {
+      expect(auditJson).not.toContain(codeFromMessage(message));
     }
 
-    // The victim, arriving from a different IP with the correct password, must not be
-    // throttled by the attacker's failures.
+    db.users[0].auth_generation = 1;
+    const afterGenerationChange = await worker.fetch(
+      loginRequestFrom("operator@example.org", "Valid#Pass2026", "198.51.100.106"),
+      runtime
+    );
+    expect(afterGenerationChange.status).toBe(202);
+    expect(sentMessages).toHaveLength(6);
+    expect(db.loginStepUpChallenges).toHaveLength(6);
+    expect(db.sessions).toHaveLength(0);
+  });
+
+  it("shares one five-guess budget across concurrent submissions to multiple active challenges", async () => {
+    const db = new InMemoryD1();
+    await seedStepUpAccount(db);
+    const sentMessages: unknown[] = [];
+    const runtime = stepUpEmailRuntime(db, sentMessages);
+    const issuedResponses = [
+      await worker.fetch(loginRequestFrom("operator@example.org", "Valid#Pass2026", "198.51.100.110"), runtime),
+      await worker.fetch(loginRequestFrom("operator@example.org", "Valid#Pass2026", "198.51.100.111"), runtime)
+    ];
+    const challenges = await Promise.all(issuedResponses.map((response) => response.json())) as Array<{
+      challengeId: string;
+      continuationToken: string;
+    }>;
+    const codes = sentMessages.map(codeFromMessage);
+
+    const wrongResponses = await Promise.all(
+      Array.from({ length: 6 }, (_, index) => {
+        const challengeIndex = index % 2;
+        return worker.fetch(loginMfaRequest({
+          ...challenges[challengeIndex],
+          code: differentCode(codes[challengeIndex])
+        }), env(db));
+      })
+    );
+
+    expect(wrongResponses.every((response) => response.status === 400)).toBe(true);
+    expect(db.loginStepUpChallenges.reduce((sum, challenge) => sum + challenge.failed_attempts, 0)).toBe(5);
+    const correctAfterExhaustion = await worker.fetch(
+      loginMfaRequest({ ...challenges[1], code: codes[1] }),
+      env(db)
+    );
+    expect(correctAfterExhaustion.status).toBe(400);
+    expect(db.sessions).toHaveLength(0);
+  });
+
+  it("does not regain code guesses by exhausting one challenge and reissuing another", async () => {
+    const db = new InMemoryD1();
+    await seedStepUpAccount(db);
+    const sentMessages: unknown[] = [];
+    const runtime = stepUpEmailRuntime(db, sentMessages);
+    const firstResponse = await worker.fetch(
+      loginRequestFrom("operator@example.org", "Valid#Pass2026", "198.51.100.120"),
+      runtime
+    );
+    const first = await firstResponse.json() as { challengeId: string; continuationToken: string };
+    const firstCode = codeFromMessage(sentMessages[0]);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const wrong = await worker.fetch(
+        loginMfaRequest({ ...first, code: differentCode(firstCode) }),
+        env(db)
+      );
+      expect(wrong.status).toBe(400);
+    }
+
+    const secondResponse = await worker.fetch(
+      loginRequestFrom("operator@example.org", "Valid#Pass2026", "198.51.100.121"),
+      runtime
+    );
+    expect(secondResponse.status).toBe(202);
+    const second = await secondResponse.json() as { challengeId: string; continuationToken: string };
+    const secondCode = codeFromMessage(sentMessages[1]);
+    const bypass = await worker.fetch(loginMfaRequest({ ...second, code: secondCode }), env(db));
+
+    expect(bypass.status).toBe(400);
+    expect(db.sessions).toHaveLength(0);
+  });
+
+  it("resets the aggregate guess budget only after expiry or a new auth generation", async () => {
+    const expiredDb = new InMemoryD1();
+    const expiredIssued = await seededStepUp({ db: expiredDb });
+    const expiredChallenge = await expiredIssued.response.json() as { challengeId: string; continuationToken: string };
+    const expiredCode = codeFromMessage(expiredIssued.sentMessages[0]);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await worker.fetch(loginMfaRequest({ ...expiredChallenge, code: differentCode(expiredCode) }), env(expiredDb));
+    }
+    vi.setSystemTime(new Date("2026-07-04T12:10:00.001Z"));
+    for (let index = 0; index < 5; index += 1) {
+      seedAudit(
+        expiredDb,
+        "LOGIN_FAILED",
+        "operator@example.org",
+        `2026-07-04T12:0${5 + index}:00.000Z`,
+        `203.0.113.${30 + index}`
+      );
+    }
+    const freshMessages: unknown[] = [];
+    const freshRuntime = stepUpEmailRuntime(expiredDb, freshMessages);
+    const freshResponse = await worker.fetch(
+      loginRequestFrom("operator@example.org", "Valid#Pass2026", "198.51.100.130"),
+      freshRuntime
+    );
+    expect(freshResponse.status).toBe(202);
+    const freshChallenge = await freshResponse.json() as { challengeId: string; continuationToken: string };
+    const afterExpiry = await worker.fetch(
+      loginMfaRequest({ ...freshChallenge, code: codeFromMessage(freshMessages[0]) }),
+      env(expiredDb)
+    );
+    expect(afterExpiry.status).toBe(200);
+
+    vi.setSystemTime(new Date("2026-07-04T12:00:00.000Z"));
+    const generationDb = new InMemoryD1();
+    const generationIssued = await seededStepUp({ db: generationDb });
+    const generationChallenge = await generationIssued.response.json() as { challengeId: string; continuationToken: string };
+    const generationCode = codeFromMessage(generationIssued.sentMessages[0]);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await worker.fetch(loginMfaRequest({ ...generationChallenge, code: differentCode(generationCode) }), env(generationDb));
+    }
+    generationDb.users[0].auth_generation = 1;
+    const nextGenerationMessages: unknown[] = [];
+    const nextGenerationRuntime = stepUpEmailRuntime(generationDb, nextGenerationMessages);
+    const nextGenerationResponse = await worker.fetch(
+      loginRequestFrom("operator@example.org", "Valid#Pass2026", "198.51.100.131"),
+      nextGenerationRuntime
+    );
+    expect(nextGenerationResponse.status).toBe(202);
+    const nextGenerationChallenge = await nextGenerationResponse.json() as { challengeId: string; continuationToken: string };
+    const afterGenerationChange = await worker.fetch(
+      loginMfaRequest({ ...nextGenerationChallenge, code: codeFromMessage(nextGenerationMessages[0]) }),
+      env(generationDb)
+    );
+    expect(afterGenerationChange.status).toBe(200);
+  });
+
+  it("completes the emailed challenge once and rejects a replay generically", async () => {
+    const db = new InMemoryD1();
+    const { response, sentMessages } = await seededStepUp({ db });
+    expect(response.status).toBe(202);
+    const challenge = await response.json() as {
+      challengeId: string;
+      continuationToken: string;
+    };
+    const code = String((sentMessages[0] as { text?: string }).text).match(/\b(\d{6})\b/)?.[1];
+    expect(code).toMatch(/^\d{6}$/);
+
+    const completed = await worker.fetch(loginMfaRequest({ ...challenge, code: code! }), env(db));
+    expect(completed.status).toBe(200);
+    await expect(completed.json()).resolves.toMatchObject({
+      user: { id: "user_operator", email: "operator@example.org", role: "OPERATOR" },
+      token: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+      expiresAt: "2026-07-05T12:00:00.000Z"
+    });
+    expect(db.sessions).toHaveLength(1);
+    expect(db.audits).toContainEqual(expect.objectContaining({ action: "LOGIN", entity_id: "user_operator" }));
+
+    const replay = await worker.fetch(loginMfaRequest({ ...challenge, code: code! }), env(db));
+    expect(replay.status).toBe(400);
+    await expect(replay.json()).resolves.toEqual({
+      error: "invalid_login_mfa_challenge",
+      message: "El código no es válido o ya expiró. Inicie sesión nuevamente."
+    });
+    expect(db.sessions).toHaveLength(1);
+  });
+
+  it("bounds wrong codes at five attempts and then rejects the correct code generically", async () => {
+    const db = new InMemoryD1();
+    const { response, sentMessages } = await seededStepUp({ db });
+    const challenge = await response.json() as { challengeId: string; continuationToken: string };
+    const code = String((sentMessages[0] as { text?: string }).text).match(/\b(\d{6})\b/)?.[1] ?? "";
+    const wrongCode = code === "000000" ? "000001" : "000000";
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const wrong = await worker.fetch(loginMfaRequest({ ...challenge, code: wrongCode }), env(db));
+      expect(wrong.status).toBe(400);
+      await expect(wrong.json()).resolves.toMatchObject({ error: "invalid_login_mfa_challenge" });
+    }
+    const exhausted = await worker.fetch(loginMfaRequest({ ...challenge, code }), env(db));
+    expect(exhausted.status).toBe(400);
+    await expect(exhausted.json()).resolves.toMatchObject({ error: "invalid_login_mfa_challenge" });
+    expect(db.sessions).toHaveLength(0);
+  });
+
+  it("allows only one concurrent completion to create a session", async () => {
+    const db = new InMemoryD1();
+    const { response, sentMessages } = await seededStepUp({ db });
+    const challenge = await response.json() as { challengeId: string; continuationToken: string };
+    const code = String((sentMessages[0] as { text?: string }).text).match(/\b(\d{6})\b/)?.[1] ?? "";
+
+    const completions = await Promise.all([
+      worker.fetch(loginMfaRequest({ ...challenge, code }), env(db)),
+      worker.fetch(loginMfaRequest({ ...challenge, code }), env(db))
+    ]);
+
+    expect(completions.map((result) => result.status).sort()).toEqual([200, 400]);
+    expect(db.sessions).toHaveLength(1);
+  });
+
+  it("rejects expired and credential-stale challenges without creating a session", async () => {
+    const expiredDb = new InMemoryD1();
+    const expiredIssued = await seededStepUp({ db: expiredDb });
+    const expiredChallenge = await expiredIssued.response.json() as { challengeId: string; continuationToken: string };
+    const expiredCode = String((expiredIssued.sentMessages[0] as { text?: string }).text).match(/\b(\d{6})\b/)?.[1] ?? "";
+    vi.setSystemTime(new Date("2026-07-04T12:10:00.001Z"));
+    const expired = await worker.fetch(loginMfaRequest({ ...expiredChallenge, code: expiredCode }), env(expiredDb));
+    expect(expired.status).toBe(400);
+    expect(expiredDb.sessions).toHaveLength(0);
+
+    vi.setSystemTime(new Date("2026-07-04T12:00:00.000Z"));
+    const changedDb = new InMemoryD1();
+    const changedIssued = await seededStepUp({ db: changedDb });
+    const changedChallenge = await changedIssued.response.json() as { challengeId: string; continuationToken: string };
+    const changedCode = String((changedIssued.sentMessages[0] as { text?: string }).text).match(/\b(\d{6})\b/)?.[1] ?? "";
+    changedDb.users[0].auth_generation = 1;
+    const changed = await worker.fetch(loginMfaRequest({ ...changedChallenge, code: changedCode }), env(changedDb));
+    expect(changed.status).toBe(400);
+    expect(changedDb.sessions).toHaveLength(0);
+  });
+
+  it.each([
+    ["email", (user: Record<string, unknown>) => { user.email = "changed@example.org"; }],
+    ["password hash", (user: Record<string, unknown>) => { user.password_hash = "changed-hash"; }],
+    ["password salt", (user: Record<string, unknown>) => { user.password_salt = "changed-salt"; }],
+    ["disabled state", (user: Record<string, unknown>) => { user.disabled_at = "2026-07-04T12:00:00.000Z"; }]
+  ] as const)("rejects a post-issuance challenge after the user %s changes", async (_field, mutateUser) => {
+    const db = new InMemoryD1();
+    const issued = await seededStepUp({ db });
+    const challenge = await issued.response.json() as { challengeId: string; continuationToken: string };
+    const code = codeFromMessage(issued.sentMessages[0]);
+    mutateUser(db.users[0]);
+
+    const response = await worker.fetch(loginMfaRequest({ ...challenge, code }), env(db));
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "invalid_login_mfa_challenge",
+      message: "El código no es válido o ya expiró. Inicie sesión nuevamente."
+    });
+    expect(db.sessions).toHaveLength(0);
+  });
+
+  it("invalidates the challenge and returns a generic 503 when email delivery fails", async () => {
+    const db = new InMemoryD1();
+    const { response } = await seededStepUp({
+      db,
+      send: async () => {
+        throw new Error("provider secret detail");
+      }
+    });
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: "login_mfa_unavailable",
+      message: "No se pudo enviar el código de verificación. Intente de nuevo en unos minutos."
+    });
+    expect(db.sessions).toHaveLength(0);
+    expect(db.loginStepUpChallenges).toHaveLength(1);
+    expect(db.loginStepUpChallenges[0].invalidated_at).not.toBeNull();
+  });
+
+  it("counts failed deliveries toward the aggregate issuance cap without reopening a flood path", async () => {
+    const db = new InMemoryD1();
+    await seedStepUpAccount(db);
+    const sentMessages: unknown[] = [];
+    const runtime = stepUpEmailRuntime(db, sentMessages, async () => {
+      throw new Error("provider detail must stay private");
+    });
+
+    const responses = [];
+    for (let index = 0; index < 6; index += 1) {
+      responses.push(await worker.fetch(
+        loginRequestFrom("operator@example.org", "Valid#Pass2026", `198.51.100.${140 + index}`),
+        runtime
+      ));
+    }
+
+    expect(responses.every((response) => response.status === 503)).toBe(true);
+    for (const response of responses) {
+      await expect(response.json()).resolves.toEqual({
+        error: "login_mfa_unavailable",
+        message: "No se pudo enviar el código de verificación. Intente de nuevo en unos minutos."
+      });
+    }
+    expect(sentMessages).toHaveLength(5);
+    expect(db.loginStepUpChallenges).toHaveLength(5);
+    expect(db.loginStepUpChallenges.every((challenge) => challenge.invalidated_at !== null)).toBe(true);
+    expect(db.sessions).toHaveLength(0);
+    expect(JSON.stringify(db.audits)).not.toContain("provider detail must stay private");
+  });
+
+  it("keeps wrong credentials generic and audited after the account threshold", async () => {
+    const db = new InMemoryD1();
+    const hashed = await hashPassword("Valid#Pass2026", "fixed-salt", { enforcePolicy: false });
+    db.users.push({
+      id: "user_wrong",
+      email: "wrong@example.org",
+      name: "Wrong Test",
+      role: "VIEWER",
+      password_hash: hashed.hash,
+      password_salt: hashed.salt,
+      disabled_at: ""
+    });
+    seedDistributedFailures(db, "wrong@example.org");
+
     const response = await worker.fetch(
-      new Request("https://example.org/api/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "CF-Connecting-IP": "198.51.100.4" },
-        body: JSON.stringify({ email: "victim@example.org", password: "Valid#Pass2026" })
-      }),
+      loginRequestFrom("wrong@example.org", "Wrong#Pass2026", "198.51.100.91"),
       env(db)
     );
 
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ user: { email: "victim@example.org", role: "ADMIN" } });
-    expect(db.audits).toContainEqual(expect.objectContaining({ action: "LOGIN", entity_id: "user_victim" }));
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({ error: "auth_error", message: "Credenciales inválidas" });
+    expect(db.audits.filter((audit) => audit.action === "LOGIN_FAILED")).toHaveLength(6);
+    expect(db.sessions).toHaveLength(0);
+    expect(db.loginStepUpChallenges).toHaveLength(0);
+  });
+
+  it("never sends a code or issues a challenge for disabled and unknown accounts", async () => {
+    const db = new InMemoryD1();
+    const hashed = await hashPassword("Valid#Pass2026", "fixed-salt", { enforcePolicy: false });
+    db.users.push({
+      id: "user_disabled",
+      email: "disabled@example.org",
+      name: "Disabled",
+      role: "VIEWER",
+      password_hash: hashed.hash,
+      password_salt: hashed.salt,
+      disabled_at: "2026-07-01T00:00:00.000Z"
+    });
+    seedDistributedFailures(db, "disabled@example.org");
+    seedDistributedFailures(db, "unknown@example.org");
+    const sentMessages: unknown[] = [];
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "security@example.org",
+      EMAIL: {
+        send: async (message: unknown) => {
+          sentMessages.push(message);
+          return { messageId: "must-not-send" };
+        }
+      } as SendEmail
+    });
+
+    const disabled = await worker.fetch(
+      loginRequestFrom("disabled@example.org", "Valid#Pass2026", "198.51.100.92"),
+      runtime
+    );
+    const unknown = await worker.fetch(
+      loginRequestFrom("unknown@example.org", "Valid#Pass2026", "198.51.100.93"),
+      runtime
+    );
+
+    expect(disabled.status).toBe(401);
+    expect(unknown.status).toBe(401);
+    expect(sentMessages).toHaveLength(0);
+    expect(db.loginStepUpChallenges).toHaveLength(0);
   });
 
   it("still throttles repeated failures from the same IP", async () => {
@@ -1446,4 +2665,56 @@ function bootstrapRequest(options: { token?: string; password?: string } = {}, c
       password: options.password ?? "Long-enough1!"
     })
   });
+}
+
+type ProviderBudgetTestInput = {
+  provider: "WOMPI" | "STRIPE";
+  clientKeyHash: string;
+  legacyClientKeyHash?: string;
+  stripeRequestId: string | null;
+  now: string;
+  cutoff: string;
+  expiresAt: string;
+  clientLimit: number;
+  providerLimit: number;
+  globalLimit: number;
+};
+
+type ProviderBudgetTestResult =
+  | { kind: "CLAIMED"; id: string }
+  | { kind: "DUPLICATE"; id: string }
+  | { kind: "LIMITED"; scope: "CLIENT" | "PROVIDER" | "GLOBAL" };
+
+async function claimProviderCreationBudgetForTest(
+  repo: Repository,
+  input: ProviderBudgetTestInput
+): Promise<ProviderBudgetTestResult> {
+  const method = (repo as unknown as {
+    claimProviderCreationBudget?: (value: ProviderBudgetTestInput) => Promise<ProviderBudgetTestResult>;
+  }).claimProviderCreationBudget;
+  expect(method, "repository exposes the provider creation claim boundary").toBeTypeOf("function");
+  if (!method) return { kind: "LIMITED", scope: "GLOBAL" };
+  return method.call(repo, {
+    ...input,
+    legacyClientKeyHash: input.legacyClientKeyHash ?? input.clientKeyHash
+  });
+}
+
+async function releaseProviderCreationClaimForTest(
+  repo: Repository,
+  id: string
+): Promise<void> {
+  const method = (repo as unknown as {
+    releaseUnusedProviderCreationClaim?: (claimId: string) => Promise<void>;
+  }).releaseUnusedProviderCreationClaim;
+  expect(method, "repository exposes safe provider claim release").toBeTypeOf("function");
+  if (!method) return;
+  await method.call(repo, id);
+}
+
+function providerClaimsFrom(db: InMemoryD1): Array<Record<string, unknown>> {
+  const claims = (db as unknown as { providerCreationClaims?: Array<Record<string, unknown>> })
+    .providerCreationClaims;
+  expect(claims, "the in-memory D1 mirrors provider creation claims").toBeInstanceOf(Array);
+  return claims ?? [];
 }

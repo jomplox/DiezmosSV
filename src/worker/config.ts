@@ -18,7 +18,11 @@ export function isMockMode(env: Env): boolean {
   // Explicit opt-in: external services are only mocked when MOCK_EXTERNAL_SERVICES
   // is exactly "true". Any other value — including unset — performs real calls, so
   // a forgotten flag fails safe toward production behavior rather than silent mocks.
-  return env.MOCK_EXTERNAL_SERVICES === "true";
+  const enabled = env.MOCK_EXTERNAL_SERVICES === "true";
+  if (enabled && env.APP_ENV?.trim().toLowerCase() === "production") {
+    throw new Error("MOCK_EXTERNAL_SERVICES no puede habilitarse en producción");
+  }
+  return enabled;
 }
 
 export function getEmisorConfig(env: Env): EmisorConfig {
@@ -171,5 +175,55 @@ export function getMhCertificateXml(env: Env): string {
 export function mhEndpoint(env: Env, name: "auth" | "recepcion" | "anulacion", ambiente: "00" | "01"): string {
   const suffix = ambiente === "01" ? "PROD" : "TEST";
   const key = `MH_${name.toUpperCase()}_URL_${suffix}` as keyof Env;
-  return requireSecret(env, key);
+  const value = requireSecret(env, key);
+  const expected = MH_ENDPOINTS[ambiente][name];
+  if (!isExpectedMhEndpoint(value, expected)) {
+    throw new Error(`MH endpoint ${String(key)} debe ser ${expected}`);
+  }
+  return value;
+}
+
+const MH_ENDPOINTS = {
+  "00": {
+    auth: "https://apitest.dtes.mh.gob.sv/seguridad/auth",
+    recepcion: "https://apitest.dtes.mh.gob.sv/fesv/recepciondte",
+    anulacion: "https://apitest.dtes.mh.gob.sv/fesv/anulardte"
+  },
+  "01": {
+    auth: "https://api.dtes.mh.gob.sv/seguridad/auth",
+    recepcion: "https://api.dtes.mh.gob.sv/fesv/recepciondte",
+    anulacion: "https://api.dtes.mh.gob.sv/fesv/anulardte"
+  }
+} as const;
+
+export function resolveMhTestAuthFallbackEndpoint(env: Env): string | null {
+  const value = env.MH_AUTH_URL_TEST_FALLBACK;
+  if (value === undefined || value === "") {
+    return null;
+  }
+  if (value === MH_ENDPOINTS["00"].auth) {
+    return null;
+  }
+  if (value === MH_ENDPOINTS["01"].auth) {
+    return value;
+  }
+  throw new Error(
+    `MH_AUTH_URL_TEST_FALLBACK debe ser ${MH_ENDPOINTS["00"].auth}, ${MH_ENDPOINTS["01"].auth}, o estar vacío`
+  );
+}
+
+function isExpectedMhEndpoint(value: string, expected: string): boolean {
+  if (value !== value.trim()) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:"
+      && url.username === ""
+      && url.password === ""
+      && url.port === ""
+      && url.search === ""
+      && url.hash === ""
+      && `${url.origin}${url.pathname}` === expected;
+  } catch {
+    return false;
+  }
 }

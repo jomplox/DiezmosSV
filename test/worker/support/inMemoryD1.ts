@@ -26,6 +26,7 @@ export class FakeArchiveBucket {
   readonly contentTypes = new Map<string, string>();
   readonly putCalls: Array<{ key: string; bytes: Uint8Array }> = [];
   readonly headCalls: string[] = [];
+  readonly getCalls: string[] = [];
   readonly deleteCalls: string[] = [];
 
   async put(key: string, value: unknown, options?: { httpMetadata?: { contentType?: string } }): Promise<R2Object> {
@@ -82,6 +83,7 @@ export class FakeArchiveBucket {
   }
 
   async get(key: string): Promise<R2ObjectBody | null> {
+    this.getCalls.push(key);
     const bytes = this.objects.get(key);
     if (!bytes) {
       return null;
@@ -129,6 +131,31 @@ export interface SecurityRateLimitClaimRow {
   subject_key_hash?: string | null;
   claimed_at: string;
   expires_at: string;
+}
+
+export interface ProviderCreationClaimRow {
+  id: string;
+  provider: "WOMPI" | "STRIPE";
+  client_key_hash: string;
+  stripe_request_id: string | null;
+  claimed_at: string;
+  expires_at: string;
+}
+
+export interface LoginStepUpChallengeRow {
+  id: string;
+  user_id: string;
+  continuation_token_hash: string;
+  code_hash: string;
+  expected_email: string;
+  expected_auth_generation: number;
+  expected_password_hash: string;
+  expected_password_salt: string;
+  expires_at: string;
+  failed_attempts: number;
+  consumed_at: string | null;
+  invalidated_at: string | null;
+  created_at: string;
 }
 
 export function withWompiIssuanceDefaults(
@@ -180,6 +207,8 @@ export class InMemoryD1 {
   readonly audits: Array<Record<string, unknown>> = [];
   readonly loginRateLimits = new Map<string, LoginRateLimitRow>();
   readonly securityRateLimitClaims: SecurityRateLimitClaimRow[] = [];
+  readonly providerCreationClaims: ProviderCreationClaimRow[] = [];
+  readonly loginStepUpChallenges: LoginStepUpChallengeRow[] = [];
   readonly documents: DteDocumentRecord[] = [];
   readonly preparedSql: string[] = [];
   readonly sequencePrefixes: string[] = [];
@@ -220,6 +249,7 @@ export class InMemoryD1 {
   beforeDocumentSignedUpdate: (() => void | Promise<void>) | null = null;
   beforeWompiIssuanceClaim: (() => void | Promise<void>) | null = null;
   beforeWompiIssuanceRetryClaim: (() => void | Promise<void>) | null = null;
+  beforeWompiEventInsert: (() => void | Promise<void>) | null = null;
   beforePostAcceptFinalizationClaim: (() => void | Promise<void>) | null = null;
   beforePostAcceptEmailDispatchMark: (() => void | Promise<void>) | null = null;
   beforeAuditCount: ((action: string, entityId: string) => Promise<void>) | null = null;
@@ -431,6 +461,161 @@ export class Statement {
   }
 
   async first<T>(): Promise<T | null> {
+    if (
+      this.sql.includes("RETENTION_EXPORT_COMPLETED")
+      && this.sql.includes("entity_type = 'retention_export'")
+      && this.sql.includes("ORDER BY created_at DESC, id DESC")
+    ) {
+      const month = String(this.args[0]);
+      const row = this.db.audits
+        .filter(
+          (audit) =>
+            audit.action === "RETENTION_EXPORT_COMPLETED"
+            && audit.entity_type === "retention_export"
+            && audit.entity_id === month
+        )
+        .sort(
+          (left, right) =>
+            String(right.created_at).localeCompare(String(left.created_at))
+            || String(right.id).localeCompare(String(left.id))
+        )[0];
+      return row
+        ? {
+            id: String(row.id),
+            metadataJson: String(row.metadata_json),
+            createdAt: String(row.created_at)
+          } as T
+        : null;
+    }
+    if (
+      this.sql.includes("INSERT INTO login_step_up_challenges") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [
+        id,
+        continuationTokenHash,
+        codeHash,
+        expiresAt,
+        userId,
+        expectedEmail,
+        expectedAuthGeneration,
+        expectedPasswordHash,
+        expectedPasswordSalt
+      ] = this.args;
+      const user = this.db.users.find(
+        (row) =>
+          row.id === userId &&
+          !row.disabled_at &&
+          row.email === expectedEmail &&
+          Number(row.auth_generation ?? 0) === Number(expectedAuthGeneration) &&
+          row.password_hash === expectedPasswordHash &&
+          row.password_salt === expectedPasswordSalt
+      );
+      if (!user || this.db.loginStepUpChallenges.some((row) => row.continuation_token_hash === continuationTokenHash)) {
+        return null;
+      }
+      this.db.loginStepUpChallenges.push({
+        id: String(id),
+        user_id: String(userId),
+        continuation_token_hash: String(continuationTokenHash),
+        code_hash: String(codeHash),
+        expected_email: String(expectedEmail),
+        expected_auth_generation: Number(expectedAuthGeneration),
+        expected_password_hash: String(expectedPasswordHash),
+        expected_password_salt: String(expectedPasswordSalt),
+        expires_at: String(expiresAt),
+        failed_attempts: 0,
+        consumed_at: null,
+        invalidated_at: null,
+        created_at: new Date().toISOString()
+      });
+      return { id } as T;
+    }
+    if (
+      this.sql.includes("UPDATE login_step_up_challenges") &&
+      this.sql.includes("SET consumed_at = ?") &&
+      this.sql.includes("RETURNING id, user_id")
+    ) {
+      const [consumedAt, challengeId, continuationTokenHash, codeHash, now, aggregateNow, maxWrongAttempts] = this.args;
+      const challenge = this.db.loginStepUpChallenges.find(
+        (row) =>
+          row.id === challengeId &&
+          row.continuation_token_hash === continuationTokenHash &&
+          row.code_hash === codeHash &&
+          row.consumed_at === null &&
+          row.invalidated_at === null &&
+          row.expires_at > String(now)
+      );
+      const aggregateAttempts = challenge
+        ? this.db.loginStepUpChallenges
+          .filter((row) =>
+            row.user_id === challenge.user_id &&
+            row.expected_auth_generation === challenge.expected_auth_generation &&
+            row.consumed_at === null &&
+            row.invalidated_at === null &&
+            row.expires_at > String(aggregateNow)
+          )
+          .reduce((sum, row) => sum + row.failed_attempts, 0)
+        : Number(maxWrongAttempts);
+      const user = challenge && this.db.users.find(
+        (row) =>
+          row.id === challenge.user_id &&
+          !row.disabled_at &&
+          row.email === challenge.expected_email &&
+          Number(row.auth_generation ?? 0) === challenge.expected_auth_generation &&
+          row.password_hash === challenge.expected_password_hash &&
+          row.password_salt === challenge.expected_password_salt
+      );
+      if (!challenge || !user || aggregateAttempts >= Number(maxWrongAttempts)) return null;
+      challenge.consumed_at = String(consumedAt);
+      return {
+        id: challenge.id,
+        user_id: challenge.user_id,
+        expected_email: challenge.expected_email,
+        expected_auth_generation: challenge.expected_auth_generation,
+        expected_password_hash: challenge.expected_password_hash,
+        expected_password_salt: challenge.expected_password_salt
+      } as T;
+    }
+    if (
+      this.sql.includes("UPDATE login_step_up_challenges") &&
+      this.sql.includes("SET failed_attempts = failed_attempts + 1") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [challengeId, continuationTokenHash, submittedCodeHash, now, aggregateNow, maxWrongAttempts] = this.args;
+      const challenge = this.db.loginStepUpChallenges.find(
+        (row) =>
+          row.id === challengeId &&
+          row.continuation_token_hash === continuationTokenHash &&
+          row.code_hash !== submittedCodeHash &&
+          row.consumed_at === null &&
+          row.invalidated_at === null &&
+          row.expires_at > String(now)
+      );
+      const aggregateAttempts = challenge
+        ? this.db.loginStepUpChallenges
+          .filter((row) =>
+            row.user_id === challenge.user_id &&
+            row.expected_auth_generation === challenge.expected_auth_generation &&
+            row.consumed_at === null &&
+            row.invalidated_at === null &&
+            row.expires_at > String(aggregateNow)
+          )
+          .reduce((sum, row) => sum + row.failed_attempts, 0)
+        : Number(maxWrongAttempts);
+      const user = challenge && this.db.users.find(
+        (row) =>
+          row.id === challenge.user_id &&
+          !row.disabled_at &&
+          row.email === challenge.expected_email &&
+          Number(row.auth_generation ?? 0) === challenge.expected_auth_generation &&
+          row.password_hash === challenge.expected_password_hash &&
+          row.password_salt === challenge.expected_password_salt
+      );
+      if (!challenge || !user || aggregateAttempts >= Number(maxWrongAttempts)) return null;
+      challenge.failed_attempts += 1;
+      return { id: challenge.id } as T;
+    }
     if (
       this.sql.includes("MAX(generation)") &&
       this.sql.includes("FROM stripe_retention_generations")
@@ -840,6 +1025,201 @@ export class Statement {
       document.status = "SIGNED";
       document.updated_at = String(updatedAt);
       return { id: document.id } as T;
+    }
+    if (this.sql.includes("INSERT INTO provider_creation_claims")) {
+      const [
+        id,
+        provider,
+        clientKeyHash,
+        stripeRequestId,
+        claimedAt,
+        expiresAt,
+        countClientKeyHash,
+        clientCutoff,
+        excludedClientRequestId,
+        legacyClientKeyHash,
+        legacyClientCutoff,
+        clientLimit,
+        countProvider,
+        providerCutoff,
+        excludedProviderRequestId,
+        legacyProvider,
+        donationLegacyCutoff,
+        stripeLegacyCutoff,
+        providerLimit,
+        globalCutoff,
+        excludedGlobalRequestId,
+        globalDonationCutoff,
+        globalStripeCutoff,
+        globalLimit
+      ] = this.args;
+      const normalizedProvider = String(provider) as "WOMPI" | "STRIPE";
+      const normalizedRequestId = stripeRequestId == null ? null : String(stripeRequestId);
+      if (
+        (normalizedProvider === "WOMPI" && normalizedRequestId !== null) ||
+        (normalizedProvider === "STRIPE" && normalizedRequestId === null)
+      ) {
+        throw new Error("CHECK constraint failed: provider_creation_claims");
+      }
+      const matchingRequest = normalizedRequestId === null
+        ? null
+        : this.db.providerCreationClaims.find(
+            (claim) => claim.provider === "STRIPE" && claim.stripe_request_id === normalizedRequestId
+          ) ?? null;
+      const includedClaim = (claim: ProviderCreationClaimRow, excludedRequestId: unknown): boolean =>
+        claim.provider !== "STRIPE"
+        || claim.stripe_request_id !== (excludedRequestId == null ? null : String(excludedRequestId));
+      const clientCount = this.db.providerCreationClaims.filter(
+        (claim) =>
+          claim.client_key_hash === String(countClientKeyHash) &&
+          claim.claimed_at >= String(clientCutoff) &&
+          includedClaim(claim, excludedClientRequestId)
+      ).length + this.db.securityRateLimitClaims.filter(
+        (claim) =>
+          claim.scope === "donation_intent" &&
+          claim.key_hash === String(legacyClientKeyHash) &&
+          claim.claimed_at >= String(legacyClientCutoff)
+      ).length;
+      const providerClaimCount = this.db.providerCreationClaims.filter(
+        (claim) =>
+          claim.provider === String(countProvider) &&
+          claim.claimed_at >= String(providerCutoff) &&
+          includedClaim(claim, excludedProviderRequestId)
+      ).length;
+      const providerLegacyCount = String(legacyProvider) === "WOMPI"
+        ? this.db.donationIntents.filter(
+            (intent) =>
+              (intent.provider_creation_claim_id ?? null) === null &&
+              String(intent.created_at) >= String(donationLegacyCutoff)
+          ).length
+        : this.db.stripeCheckoutSessions.filter(
+            (checkout) =>
+              (checkout.provider_creation_claim_id ?? null) === null &&
+              String(checkout.created_at) >= String(stripeLegacyCutoff)
+          ).length;
+      const globalClaimCount = this.db.providerCreationClaims.filter(
+        (claim) =>
+          claim.claimed_at >= String(globalCutoff) &&
+          includedClaim(claim, excludedGlobalRequestId)
+      ).length;
+      const globalLegacyCount = this.db.donationIntents.filter(
+        (intent) =>
+          (intent.provider_creation_claim_id ?? null) === null &&
+          String(intent.created_at) >= String(globalDonationCutoff)
+      ).length + this.db.stripeCheckoutSessions.filter(
+        (checkout) =>
+          (checkout.provider_creation_claim_id ?? null) === null &&
+          String(checkout.created_at) >= String(globalStripeCutoff)
+      ).length;
+      if (
+        clientCount >= Number(clientLimit) ||
+        providerClaimCount + providerLegacyCount >= Number(providerLimit) ||
+        globalClaimCount + globalLegacyCount >= Number(globalLimit)
+      ) {
+        return null;
+      }
+      if (matchingRequest) {
+        if (matchingRequest.expires_at > String(claimedAt)) return null;
+        matchingRequest.client_key_hash = String(clientKeyHash);
+        matchingRequest.claimed_at = String(claimedAt);
+        matchingRequest.expires_at = String(expiresAt);
+        return { id: matchingRequest.id } as T;
+      }
+      const claim: ProviderCreationClaimRow = {
+        id: String(id),
+        provider: normalizedProvider,
+        client_key_hash: String(clientKeyHash),
+        stripe_request_id: normalizedRequestId,
+        claimed_at: String(claimedAt),
+        expires_at: String(expiresAt)
+      };
+      this.db.providerCreationClaims.push(claim);
+      return { id: claim.id } as T;
+    }
+    if (
+      this.sql.includes("AS client_count") &&
+      this.sql.includes("AS provider_count") &&
+      this.sql.includes("AS global_count")
+    ) {
+      const [
+        clientKeyHash,
+        clientCutoff,
+        excludedClientRequestId,
+        legacyClientKeyHash,
+        legacyClientCutoff,
+        provider,
+        providerCutoff,
+        excludedProviderRequestId,
+        legacyProvider,
+        donationLegacyCutoff,
+        stripeLegacyCutoff,
+        globalCutoff,
+        excludedGlobalRequestId,
+        globalDonationCutoff,
+        globalStripeCutoff
+      ] = this.args;
+      const includedClaim = (claim: ProviderCreationClaimRow, excludedRequestId: unknown): boolean =>
+        claim.provider !== "STRIPE"
+        || claim.stripe_request_id !== (excludedRequestId == null ? null : String(excludedRequestId));
+      const clientCount = this.db.providerCreationClaims.filter(
+        (claim) =>
+          claim.client_key_hash === String(clientKeyHash) &&
+          claim.claimed_at >= String(clientCutoff) &&
+          includedClaim(claim, excludedClientRequestId)
+      ).length + this.db.securityRateLimitClaims.filter(
+        (claim) =>
+          claim.scope === "donation_intent" &&
+          claim.key_hash === String(legacyClientKeyHash) &&
+          claim.claimed_at >= String(legacyClientCutoff)
+      ).length;
+      const providerCount = this.db.providerCreationClaims.filter(
+        (claim) =>
+          claim.provider === String(provider) &&
+          claim.claimed_at >= String(providerCutoff) &&
+          includedClaim(claim, excludedProviderRequestId)
+      ).length + (String(legacyProvider) === "WOMPI"
+        ? this.db.donationIntents.filter(
+            (intent) =>
+              (intent.provider_creation_claim_id ?? null) === null &&
+              String(intent.created_at) >= String(donationLegacyCutoff)
+          ).length
+        : this.db.stripeCheckoutSessions.filter(
+            (checkout) =>
+              (checkout.provider_creation_claim_id ?? null) === null &&
+              String(checkout.created_at) >= String(stripeLegacyCutoff)
+          ).length);
+      const globalCount = this.db.providerCreationClaims.filter(
+        (claim) =>
+          claim.claimed_at >= String(globalCutoff) &&
+          includedClaim(claim, excludedGlobalRequestId)
+      ).length + this.db.donationIntents.filter(
+        (intent) =>
+          (intent.provider_creation_claim_id ?? null) === null &&
+          String(intent.created_at) >= String(globalDonationCutoff)
+      ).length + this.db.stripeCheckoutSessions.filter(
+        (checkout) =>
+          (checkout.provider_creation_claim_id ?? null) === null &&
+          String(checkout.created_at) >= String(globalStripeCutoff)
+      ).length;
+      return {
+        client_count: clientCount,
+        provider_count: providerCount,
+        global_count: globalCount
+      } as T;
+    }
+    if (
+      this.sql.includes("SELECT id FROM provider_creation_claims") &&
+      this.sql.includes("stripe_request_id = ?")
+    ) {
+      const [stripeRequestId, cutoff, now] = this.args;
+      const claim = this.db.providerCreationClaims.find(
+        (candidate) =>
+          candidate.provider === "STRIPE" &&
+          candidate.stripe_request_id === String(stripeRequestId) &&
+          candidate.claimed_at >= String(cutoff) &&
+          candidate.expires_at > String(now)
+      );
+      return (claim ? { id: claim.id } : null) as T | null;
     }
     if (this.sql.includes("INSERT INTO security_rate_limit_claims")) {
       const scope = this.sql.includes("'donation_intent'")
@@ -1669,6 +2049,22 @@ export class Statement {
             audit.entity_id === entityId &&
             String(audit.created_at) >= String(sinceIso) &&
             (audit.actor_ip ?? null) === (actorIp ?? null)
+        ).length
+      } as T;
+    }
+    if (
+      this.sql.includes("SELECT COUNT(*) AS count") &&
+      this.sql.includes("action = 'LOGIN_FAILED'") &&
+      this.sql.includes("entity_type = 'user'")
+    ) {
+      const [entityId, sinceIso] = this.args.map(String);
+      return {
+        count: this.db.audits.filter(
+          (audit) =>
+            audit.action === "LOGIN_FAILED" &&
+            audit.entity_type === "user" &&
+            audit.entity_id === entityId &&
+            String(audit.created_at) >= sinceIso
         ).length
       } as T;
     }
@@ -2862,6 +3258,32 @@ export class Statement {
         }
       }
     }
+    if (
+      this.sql.includes("DELETE FROM provider_creation_claims") &&
+      this.sql.includes("NOT EXISTS")
+    ) {
+      const [id] = this.args.map(String);
+      const attached = this.db.donationIntents.some(
+        (intent) => intent.provider_creation_claim_id === id
+      ) || this.db.stripeCheckoutSessions.some(
+        (checkout) => checkout.provider_creation_claim_id === id
+      );
+      if (!attached) {
+        const index = this.db.providerCreationClaims.findIndex((claim) => claim.id === id);
+        if (index >= 0) {
+          this.db.providerCreationClaims.splice(index, 1);
+          changes += 1;
+        }
+      }
+    } else if (this.sql.includes("DELETE FROM provider_creation_claims")) {
+      const [now] = this.args.map(String);
+      for (let index = this.db.providerCreationClaims.length - 1; index >= 0; index -= 1) {
+        if (this.db.providerCreationClaims[index].expires_at <= now) {
+          this.db.providerCreationClaims.splice(index, 1);
+          changes += 1;
+        }
+      }
+    }
     if (this.sql.includes("INSERT OR IGNORE INTO document_sequences")) {
       this.db.sequencePrefixes.push(String(this.args[1]));
     }
@@ -2872,6 +3294,32 @@ export class Statement {
           this.db.loginRateLimits.delete(key);
           changes += 1;
         }
+      }
+    }
+    if (this.sql.includes("DELETE FROM login_step_up_challenges")) {
+      const [now] = this.args.map(String);
+      for (let index = this.db.loginStepUpChallenges.length - 1; index >= 0; index -= 1) {
+        if (this.db.loginStepUpChallenges[index].expires_at <= now) {
+          this.db.loginStepUpChallenges.splice(index, 1);
+          changes += 1;
+        }
+      }
+    }
+    if (
+      this.sql.includes("UPDATE login_step_up_challenges") &&
+      this.sql.includes("SET invalidated_at = ?")
+    ) {
+      const [invalidatedAt, challengeId, continuationTokenHash] = this.args.map(String);
+      const challenge = this.db.loginStepUpChallenges.find(
+        (row) =>
+          row.id === challengeId &&
+          row.continuation_token_hash === continuationTokenHash &&
+          row.consumed_at === null &&
+          row.invalidated_at === null
+      );
+      if (challenge) {
+        challenge.invalidated_at = invalidatedAt;
+        changes = 1;
       }
     }
     if (this.sql.includes("INSERT INTO users")) {
@@ -3449,6 +3897,9 @@ export class Statement {
       }
     }
     if (this.sql.includes("INSERT") && this.sql.includes("INTO wompi_events")) {
+      const beforeInsert = this.db.beforeWompiEventInsert;
+      this.db.beforeWompiEventInsert = null;
+      await beforeInsert?.();
       const [
         id,
         transactionId,
@@ -3503,7 +3954,7 @@ export class Statement {
         expiresAt,
         giftType,
         datosTokenHash,
-        rateLimitClaimId
+        providerCreationClaimId
       ] = this.args;
       this.db.donationIntents.push({
         id: String(id),
@@ -3528,7 +3979,10 @@ export class Statement {
         document_id: null,
         client_ip: clientIp == null ? null : String(clientIp),
         datos_token_hash: datosTokenHash == null ? null : String(datosTokenHash),
-        rate_limit_claim_id: rateLimitClaimId == null ? null : String(rateLimitClaimId),
+        rate_limit_claim_id: null,
+        provider_creation_claim_id: providerCreationClaimId == null
+          ? null
+          : String(providerCreationClaimId),
         // paid_at (migration 0016): stamped only by the webhook's markIntentPaid,
         // never on create — a fresh intent has not been paid.
         paid_at: null,

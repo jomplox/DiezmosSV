@@ -2,7 +2,7 @@ import { isMockMode } from "../config";
 import type { DteDocumentRecord, Env } from "../types";
 import { bytesToBase64, sha256Hex, utf8Bytes } from "../utils/encoding";
 import { isRecord } from "../utils/guards";
-import { dteEmailHtml, passwordResetEmailHtml } from "./emailHtml";
+import { dteEmailHtml, loginStepUpEmailHtml, passwordResetEmailHtml } from "./emailHtml";
 import { resolveEmailReplyToAddress, resolveEmailSenderName } from "./emailSender";
 import { assertSafeEmailSubject, DEFAULT_EMAIL_TEMPLATES, renderEmailTemplate, TRANSITORIO_RECEIPT_TEMPLATE, type EmailEvidenceType, type EmailTemplateSettings, type EmailTemplateValue } from "./emailTemplates";
 import { DTE_PDF_RENDERER_VERSION, loadPdfBrandingLogo, renderDtePdf } from "./pdf";
@@ -388,6 +388,28 @@ export class EmailService {
         `${link}\n\n` +
         `Si usted no solicitó este cambio, ignore este mensaje; su contraseña actual sigue vigente.`,
       html: passwordResetEmailHtml(name, link, expiresMinutes, {
+        organizationName: branding.organizationName,
+        brandColor: branding.brandColor,
+        supportEmail: branding.supportEmail,
+        logoUrl: branding.logoUrl
+      }),
+      attachments: []
+    };
+    return this.dispatch(payload, []);
+  }
+
+  async sendLoginStepUpCode(toEmail: string, name: string, code: string, expiresMinutes: number): Promise<unknown> {
+    const branding = this.resolveBranding();
+    const payload: EmailPayload = {
+      from: this.resolveFrom(),
+      to: toEmail,
+      subject: `Código de verificación - ${branding.organizationName}`,
+      text:
+        `Hola ${name},\n\n` +
+        `Para proteger su cuenta después de varios intentos fallidos, confirme este inicio de sesión con el código de un solo uso.\n\n` +
+        `Código de verificación: ${code}\n\n` +
+        `Vence en ${expiresMinutes} minutos. Si usted no intentó iniciar sesión, no comparta este código y puede ignorar este mensaje.`,
+      html: loginStepUpEmailHtml(name, code, expiresMinutes, {
         organizationName: branding.organizationName,
         brandColor: branding.brandColor,
         supportEmail: branding.supportEmail,

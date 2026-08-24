@@ -24,6 +24,48 @@ type SentEmail = {
   headers?: Record<string, string>;
 };
 
+const PIPELINE_MH_SECRET_USER = "mh user+canary@example.test";
+const PIPELINE_MH_SECRET_USER_PERCENT = "mh%20user%2Bcanary%40example.test";
+const PIPELINE_MH_SECRET_USER_FORM = "mh+user%2Bcanary%40example.test";
+const PIPELINE_MH_SECRET_PASSWORD = "PW canary+&=/%?";
+const PIPELINE_MH_SECRET_PASSWORD_PERCENT = "PW%20canary%2B%26%3D%2F%25%3F";
+const PIPELINE_MH_SECRET_PASSWORD_FORM = "PW+canary%2B%26%3D%2F%25%3F";
+const PIPELINE_MH_BEARER_CREDENTIAL = "cache token+credential/%? canary";
+const PIPELINE_MH_BEARER_CREDENTIAL_PERCENT = "cache%20token%2Bcredential%2F%25%3F%20canary";
+const PIPELINE_MH_BEARER_CREDENTIAL_FORM = "cache+token%2Bcredential%2F%25%3F+canary";
+const PIPELINE_MH_SECRET_TOKEN = `bEaReR ${PIPELINE_MH_BEARER_CREDENTIAL}`;
+const PIPELINE_MH_SECRET_TOKEN_PERCENT = "bEaReR%20cache%20token%2Bcredential%2F%25%3F%20canary";
+const PIPELINE_MH_SECRET_TOKEN_FORM = "bEaReR+cache+token%2Bcredential%2F%25%3F+canary";
+const PIPELINE_MH_SECRET_TOKEN_PERCENT_SEPARATOR = `bEaReR%20${PIPELINE_MH_BEARER_CREDENTIAL}`;
+const PIPELINE_MH_SECRET_TOKEN_FORM_SEPARATOR = `bEaReR+${PIPELINE_MH_BEARER_CREDENTIAL}`;
+const PIPELINE_MH_OWS_SECRET_TOKEN = ` \t${PIPELINE_MH_SECRET_TOKEN}\t `;
+const PIPELINE_MH_OWS_SECRET_TOKEN_PERCENT = "%20%09bEaReR%20cache%20token%2Bcredential%2F%25%3F%20canary%09%20";
+const PIPELINE_MH_OWS_SECRET_TOKEN_FORM = "+%09bEaReR+cache+token%2Bcredential%2F%25%3F+canary%09+";
+const PIPELINE_MH_NUMERIC_USER = "59281476035192";
+const PIPELINE_MH_NUMERIC_PASSWORD = "84720693145827";
+
+const PIPELINE_MH_SECRET_VARIANTS = [
+  PIPELINE_MH_SECRET_USER,
+  PIPELINE_MH_SECRET_USER_PERCENT,
+  PIPELINE_MH_SECRET_USER_FORM,
+  PIPELINE_MH_SECRET_PASSWORD,
+  PIPELINE_MH_SECRET_PASSWORD_PERCENT,
+  PIPELINE_MH_SECRET_PASSWORD_FORM,
+  PIPELINE_MH_BEARER_CREDENTIAL,
+  PIPELINE_MH_BEARER_CREDENTIAL_PERCENT,
+  PIPELINE_MH_BEARER_CREDENTIAL_FORM,
+  PIPELINE_MH_SECRET_TOKEN,
+  PIPELINE_MH_SECRET_TOKEN_PERCENT,
+  PIPELINE_MH_SECRET_TOKEN_FORM,
+  PIPELINE_MH_SECRET_TOKEN_PERCENT_SEPARATOR,
+  PIPELINE_MH_SECRET_TOKEN_FORM_SEPARATOR,
+  PIPELINE_MH_OWS_SECRET_TOKEN,
+  PIPELINE_MH_OWS_SECRET_TOKEN_PERCENT,
+  PIPELINE_MH_OWS_SECRET_TOKEN_FORM,
+  PIPELINE_MH_NUMERIC_USER,
+  PIPELINE_MH_NUMERIC_PASSWORD
+];
+
 const INTENT_ADDRESS = {
   departamento: "05",
   municipio: "24",
@@ -152,6 +194,25 @@ function stubMhAuthUnavailable(): ReturnType<typeof vi.fn> {
 
 function mhRecepcionCalls(fetchMock: ReturnType<typeof vi.fn>): number {
   return fetchMock.mock.calls.filter((call) => String(call[0]).includes("recepciondte")).length;
+}
+
+function installCachedMhToken(db: InMemoryD1, token: string) {
+  const originalPrepare = db.prepare.bind(db);
+  const cacheStatement = {
+    bind: vi.fn().mockReturnThis(),
+    first: vi.fn().mockResolvedValue({
+      token,
+      token_type: "Bearer",
+      expires_at: "2099-01-01T00:00:00.000Z"
+    }),
+    run: vi.fn().mockResolvedValue({})
+  };
+  vi.spyOn(db, "prepare").mockImplementation((sql) =>
+    sql.includes("FROM mh_tokens")
+      ? cacheStatement as unknown as ReturnType<InMemoryD1["prepare"]>
+      : originalPrepare(sql)
+  );
+  return cacheStatement;
 }
 
 describe("IssuancePipeline.processWompiEvent acceptance", () => {
@@ -373,11 +434,201 @@ describe("IssuancePipeline.processWompiEvent rejection", () => {
     expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DONATION_INTENT_COMPLETED" }));
     expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DTE_ACCEPTED" }));
   });
+
+  it("keeps cached-token echoes out of returned, document, audit, and log rejection evidence", async () => {
+    const db = new InMemoryD1();
+    seedIntent(db);
+    const eventId = seedEvent(db, unitWebhook());
+    const sent: SentEmail[] = [];
+    const runtime = await pipelineRuntime(db, sent);
+    runtime.MH_USER_TEST = PIPELINE_MH_SECRET_USER;
+    runtime.MH_PASSWORD_TEST = PIPELINE_MH_SECRET_PASSWORD;
+    const cacheStatement = installCachedMhToken(db, PIPELINE_MH_OWS_SECRET_TOKEN);
+    let sentAuthorization: string | null = null;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("recepciondte")) {
+        sentAuthorization = new Request(input, init).headers.get("Authorization");
+        return jsonResponse({
+          estado: "RECHAZADO",
+          selloRecibido: null,
+          observaciones: [
+            `user=${PIPELINE_MH_SECRET_USER}; encoded=${PIPELINE_MH_SECRET_USER_PERCENT}`,
+            `pwd=${PIPELINE_MH_SECRET_PASSWORD}; form=${PIPELINE_MH_SECRET_PASSWORD_FORM}`,
+            `authorization=${PIPELINE_MH_SECRET_TOKEN}`,
+            `credential=${PIPELINE_MH_BEARER_CREDENTIAL}`,
+            `credential-percent=${PIPELINE_MH_BEARER_CREDENTIAL_PERCENT}`,
+            `credential-form=${PIPELINE_MH_BEARER_CREDENTIAL_FORM}`,
+            `authorization-percent=${PIPELINE_MH_SECRET_TOKEN_PERCENT}`,
+            `authorization-form=${PIPELINE_MH_SECRET_TOKEN_FORM}`,
+            `separator-percent=${PIPELINE_MH_SECRET_TOKEN_PERCENT_SEPARATOR}`,
+            `separator-form=${PIPELINE_MH_SECRET_TOKEN_FORM_SEPARATOR}`,
+            `stored-authorization=${PIPELINE_MH_OWS_SECRET_TOKEN}`,
+            `stored-percent=${PIPELINE_MH_OWS_SECRET_TOKEN_PERCENT}`,
+            `stored-form=${PIPELINE_MH_OWS_SECRET_TOKEN_FORM}`
+          ],
+          descripcionMsg: `description ${PIPELINE_MH_SECRET_PASSWORD_PERCENT}`,
+          estadoDetalle: `state ${PIPELINE_MH_SECRET_USER_FORM}`,
+          selloEcho: `seal ${PIPELINE_MH_BEARER_CREDENTIAL}`,
+          text: `text ${PIPELINE_MH_SECRET_TOKEN_FORM_SEPARATOR}`,
+          nested: [{ evidence: `prefix-${PIPELINE_MH_SECRET_TOKEN_PERCENT}-suffix` }],
+          [`provider-${PIPELINE_MH_BEARER_CREDENTIAL_PERCENT}-key`]: PIPELINE_MH_SECRET_TOKEN_FORM
+        }, { status: 400 });
+      }
+      throw new Error(`Fetch inesperado en prueba unitaria del pipeline: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const record = await new IssuancePipeline(runtime).processWompiEvent(eventId);
+    const capturedLogs = errorLog.mock.calls;
+    errorLog.mockRestore();
+
+    expect(record).toMatchObject({
+      status: "REJECTED",
+      mh_estado: "RECHAZADO",
+      sello_recibido: null
+    });
+    expect(db.audits).toContainEqual(expect.objectContaining({
+      action: "DTE_REJECTED",
+      summary: "DTE-15-M001P004-000000000000001 RECHAZADO"
+    }));
+    expect(JSON.parse(String(record!.mh_observaciones_json))[2]).toBe("authorization=[REDACTED]");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe("https://apitest.dtes.mh.gob.sv/fesv/recepciondte");
+    expect(sentAuthorization).toBe(PIPELINE_MH_SECRET_TOKEN);
+    expect(cacheStatement.first).toHaveBeenCalledTimes(1);
+    expect(cacheStatement.run).not.toHaveBeenCalled();
+    expectNoPipelineMhSecrets(JSON.stringify({
+      returned: record,
+      documents: db.documents,
+      rejectionAudits: db.audits.filter((audit) => audit.action === "DTE_REJECTED"),
+      logs: capturedLogs
+    }));
+  });
+
+  it("keeps all-numeric MH credential echoes out of durable rejection evidence", async () => {
+    const db = new InMemoryD1();
+    seedIntent(db);
+    const eventId = seedEvent(db, unitWebhook());
+    const runtime = await pipelineRuntime(db, []);
+    runtime.MH_USER_TEST = PIPELINE_MH_NUMERIC_USER;
+    runtime.MH_PASSWORD_TEST = PIPELINE_MH_NUMERIC_PASSWORD;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/seguridad/auth")) {
+        return jsonResponse({
+          status: "OK",
+          body: { token: "Bearer pipeline-numeric-sanitizer-token" },
+          tokenType: "Bearer"
+        });
+      }
+      if (url.includes("recepciondte")) {
+        return jsonResponse({
+          estado: "RECHAZADO",
+          selloRecibido: null,
+          observaciones: [
+            Number(PIPELINE_MH_NUMERIC_USER),
+            Number(PIPELINE_MH_NUMERIC_PASSWORD),
+            17,
+            false
+          ],
+          nested: {
+            userEcho: Number(PIPELINE_MH_NUMERIC_USER),
+            passwordEcho: Number(PIPELINE_MH_NUMERIC_PASSWORD),
+            unrelatedNumber: 9,
+            unrelatedBoolean: false
+          }
+        }, { status: 400 });
+      }
+      throw new Error(`Fetch inesperado en prueba unitaria del pipeline: ${url}`);
+    }));
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const record = await new IssuancePipeline(runtime).processWompiEvent(eventId);
+    const capturedLogs = errorLog.mock.calls;
+    errorLog.mockRestore();
+
+    expect(record).toMatchObject({
+      status: "REJECTED",
+      mh_estado: "RECHAZADO",
+      sello_recibido: null
+    });
+    expect(JSON.parse(String(record!.mh_observaciones_json))).toEqual([
+      "[REDACTED]",
+      "[REDACTED]",
+      "17",
+      "false"
+    ]);
+    expect(db.audits).toContainEqual(expect.objectContaining({
+      action: "DTE_REJECTED",
+      summary: "DTE-15-M001P004-000000000000001 RECHAZADO"
+    }));
+    expectNoPipelineMhSecrets(JSON.stringify({
+      returned: record,
+      documents: db.documents,
+      rejectionAudits: db.audits.filter((audit) => audit.action === "DTE_REJECTED"),
+      logs: capturedLogs
+    }));
+  });
+
+  it("retains the fiscal claim and bounds durable evidence for an indeterminate MH estado", async () => {
+    const db = new InMemoryD1();
+    seedIntent(db);
+    const eventId = seedEvent(db, unitWebhook());
+    const sent: SentEmail[] = [];
+    const runtime = await pipelineRuntime(db, sent);
+    runtime.MH_USER_TEST = PIPELINE_MH_SECRET_USER;
+    runtime.MH_PASSWORD_TEST = PIPELINE_MH_SECRET_PASSWORD;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/seguridad/auth")) {
+        return jsonResponse({
+          status: "OK",
+          body: { token: PIPELINE_MH_SECRET_TOKEN },
+          tokenType: "Bearer"
+        });
+      }
+      if (url.includes("recepciondte")) {
+        return jsonResponse({
+          estado: `PENDIENTE ${PIPELINE_MH_SECRET_USER} ${PIPELINE_MH_SECRET_TOKEN}`,
+          selloRecibido: null,
+          observaciones: [`pending ${PIPELINE_MH_SECRET_PASSWORD_FORM}`],
+          nested: { evidence: `nested ${PIPELINE_MH_SECRET_PASSWORD_PERCENT}` }
+        });
+      }
+      throw new Error(`Fetch inesperado en prueba unitaria del pipeline: ${url}`);
+    }));
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const error = await new IssuancePipeline(runtime)
+      .processWompiEvent(eventId)
+      .catch((caught: unknown) => caught);
+    const capturedLogs = errorLog.mock.calls;
+    errorLog.mockRestore();
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe(
+      "Ministerio de Hacienda devolvió un resultado no definitivo: ESTADO_NO_RECONOCIDO"
+    );
+    expect(db.documents[0]).toMatchObject({
+      status: "SIGNED",
+      fiscal_operation_claim_id: expect.stringMatching(/^fiscal_/),
+      transmission_deferred_at: null
+    });
+    expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DTE_REJECTED" }));
+    expectNoPipelineMhSecrets(JSON.stringify({
+      error: { name: (error as Error).name, message: (error as Error).message, stack: (error as Error).stack },
+      documents: db.documents,
+      audits: db.audits,
+      logs: capturedLogs
+    }));
+  });
 });
 
 describe("IssuancePipeline deferred transmission", () => {
   const AUTH_OUTAGE_REASON =
-    "Falló la autenticación con el Ministerio de Hacienda: 503 MH no disponible";
+    "Falló la autenticación con el Ministerio de Hacienda (HTTP 503)";
 
   it("defers to SIGNED + transmission_deferred_at and sends the transitorio receipt", async () => {
     const db = new InMemoryD1();
@@ -507,6 +758,12 @@ describe("IssuancePipeline deferred transmission", () => {
     expect(db.emailDeliveries.filter((row) => row.document_id === "doc_redefer")).toHaveLength(1);
   });
 });
+
+function expectNoPipelineMhSecrets(evidence: string): void {
+  for (const secret of PIPELINE_MH_SECRET_VARIANTS) {
+    expect(evidence).not.toContain(secret);
+  }
+}
 
 describe("IssuancePipeline receipt email claim behavior", () => {
   function acceptedAdvancedDocument(): DteDocumentRecord {

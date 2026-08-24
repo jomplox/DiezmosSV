@@ -14,8 +14,12 @@ const SAFE_ACTION_SUMMARIES: Record<string, string> = {
   USER_PASSWORD_RESET: "Contraseña de usuario restablecida"
 };
 
+export function hasAccountAuditAudience(role: Role): boolean {
+  return role === "ADMIN" || role === "OWNER";
+}
+
 export function projectAuditRows(rows: Array<Record<string, unknown>>, role: Role): Array<Record<string, unknown>> {
-  if (role === "ADMIN" || role === "OWNER") {
+  if (hasAccountAuditAudience(role)) {
     return rows;
   }
   return rows.map((row) => ({
@@ -35,4 +39,11 @@ export function projectAuditRows(rows: Array<Record<string, unknown>>, role: Rol
     metadata_json: "{}",
     created_at: row.created_at
   }));
+}
+
+export function projectContingencyEvents(rows: Array<Record<string, unknown>>, role: Role): Array<Record<string, unknown>> {
+  if (hasAccountAuditAudience(role)) {
+    return rows;
+  }
+  return rows.map(({ created_by: _createdBy, ...event }) => event);
 }

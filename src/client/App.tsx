@@ -42,6 +42,7 @@ import { filterAuditEntries } from "./auditFilter";
 import { createLatestRequestGate, filterPreCdeFailures } from "./preCdeFailures";
 import { defaultInvalidationForm, invalidationFormValidationMessage, invalidationRequestBody, type InvalidationFormInput } from "./invalidationForm";
 import { passwordResetConfirmValidationMessage } from "./passwordReset";
+import { LoginMfaStep, submitLoginMfa, type LoginMfaChallenge, type LoginSessionResult } from "./loginMfa";
 import { isDonarGraciasPath, isDonarPath, isStripeResultPath } from "./donation";
 import { DonarGraciasPage, DonarPage } from "./donarPage";
 import { StripeResultPage } from "./stripeResultPage";
@@ -1261,14 +1262,34 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     }
   }
 
-  async function login(email: string, password: string) {
-    const result = await api<{ user: User; token: string }>("/api/auth/login", "", { method: "POST", body: { email, password } });
+  function establishSession(result: LoginSessionResult): void {
     resetAccountState();
     localStorage.setItem("diezmos_token", result.token);
     localStorage.setItem("diezmos_user", JSON.stringify(result.user));
     setToken(result.token);
     setUser(result.user);
     setAuthNotice("");
+  }
+
+  async function login(email: string, password: string): Promise<LoginMfaChallenge | null> {
+    const result = await api<LoginSessionResult | LoginMfaChallenge>("/api/auth/login", "", {
+      method: "POST",
+      body: { email, password }
+    });
+    if ("mfaRequired" in result) {
+      return result;
+    }
+    establishSession(result);
+    return null;
+  }
+
+  async function completeLoginMfa(challenge: LoginMfaChallenge, code: string): Promise<void> {
+    const result = await submitLoginMfa(
+      challenge,
+      code,
+      (path, options) => api<LoginSessionResult>(path, "", options)
+    );
+    establishSession(result);
   }
 
   async function bootstrap(email: string, name: string, password: string, setupToken: string) {
@@ -2808,6 +2829,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
         notice={authNotice}
         branding={branding}
         onLogin={login}
+        onLoginMfa={completeLoginMfa}
         onBootstrap={bootstrap}
         onRequestReset={requestPasswordReset}
         onConfirmReset={confirmPasswordReset}
@@ -3784,6 +3806,7 @@ function AuthScreen({
   notice,
   branding,
   onLogin,
+  onLoginMfa,
   onBootstrap,
   onRequestReset,
   onConfirmReset,
@@ -3792,19 +3815,23 @@ function AuthScreen({
   initialResetToken: string | null;
   notice?: string;
   branding: Branding;
-  onLogin: (email: string, password: string) => Promise<void>;
+  onLogin: (email: string, password: string) => Promise<LoginMfaChallenge | null>;
+  onLoginMfa: (challenge: LoginMfaChallenge, code: string) => Promise<void>;
   onBootstrap: (email: string, name: string, password: string, setupToken: string) => Promise<void>;
   onRequestReset: (email: string) => Promise<void>;
   onConfirmReset: (token: string, password: string) => Promise<void>;
   bootstrapAvailable: boolean;
 }) {
   const [resetToken] = useState(initialResetToken);
-  const [mode, setMode] = useState<"login" | "bootstrap" | "reset-request" | "reset-confirm">(resetToken ? "reset-confirm" : "login");
+  const [mode, setMode] = useState<"login" | "login-mfa" | "bootstrap" | "reset-request" | "reset-confirm">(resetToken ? "reset-confirm" : "login");
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [setupToken, setSetupToken] = useState("");
+  const [loginMfaChallenge, setLoginMfaChallenge] = useState<LoginMfaChallenge | null>(null);
+  const [loginMfaCode, setLoginMfaCode] = useState("");
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [localNotice, setLocalNotice] = useState("");
   const authLogoSrc = brandingDonorLogoSrc(branding.donorLogoVersion) ?? brandingLogoSrc(branding.logoVersion);
@@ -3821,6 +3848,8 @@ function AuthScreen({
     setLocalNotice("");
     setPassword("");
     setConfirmPassword("");
+    setLoginMfaChallenge(null);
+    setLoginMfaCode("");
   }
 
   return (
@@ -3829,9 +3858,17 @@ function AuthScreen({
         className="auth-card"
         onSubmit={async (event) => {
           event.preventDefault();
+          if (busy) return;
           setError("");
+          setBusy(true);
           try {
-            if (mode === "bootstrap") {
+            if (mode === "login-mfa") {
+              if (!loginMfaChallenge) {
+                switchMode("login");
+                return;
+              }
+              await onLoginMfa(loginMfaChallenge, loginMfaCode);
+            } else if (mode === "bootstrap") {
               await onBootstrap(email, name, password, setupToken);
             } else if (mode === "reset-request") {
               await onRequestReset(email);
@@ -3847,10 +3884,18 @@ function AuthScreen({
               switchMode("login");
               setLocalNotice("Contraseña actualizada. Inicie sesión con su nueva contraseña.");
             } else {
-              await onLogin(email, password);
+              const challenge = await onLogin(email, password);
+              if (challenge) {
+                setLoginMfaChallenge(challenge);
+                setLoginMfaCode("");
+                setPassword("");
+                setMode("login-mfa");
+              }
             }
           } catch (err) {
             setError(userFacingErrorMessage(err instanceof Error ? err.message : String(err)));
+          } finally {
+            setBusy(false);
           }
         }}
       >
@@ -3869,8 +3914,8 @@ function AuthScreen({
         {mode === "reset-request" && <p className="auth-hint">Ingrese su correo y le enviaremos un enlace para restablecer la contraseña.</p>}
         {mode === "reset-confirm" && <p className="auth-hint">Cree su nueva contraseña para completar el restablecimiento.</p>}
         {mode === "bootstrap" && <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Nombre" aria-label="Nombre" />}
-        {mode !== "reset-confirm" && <input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Correo" aria-label="Correo" type="email" />}
-        {mode !== "reset-request" && (
+        {mode !== "reset-confirm" && mode !== "login-mfa" && <input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Correo" aria-label="Correo" type="email" />}
+        {mode !== "reset-request" && mode !== "login-mfa" && (
           <input
             value={password}
             onChange={(event) => setPassword(event.target.value)}
@@ -3897,18 +3942,28 @@ function AuthScreen({
             type="password"
           />
         )}
+        {mode === "login-mfa" && (
+          <LoginMfaStep code={loginMfaCode} busy={busy} onCodeChange={setLoginMfaCode} />
+        )}
         {(localNotice || notice) && !error && <p className="auth-notice">{localNotice || notice}</p>}
         {error && <p className="error">{error}</p>}
-        <button className="primary" type="submit">
-          <KeyRound size={16} />
-          {mode === "reset-request" ? "Enviar enlace" : mode === "reset-confirm" ? "Guardar contraseña" : "Continuar"}
-        </button>
+        {mode !== "login-mfa" && (
+          <button className="primary" type="submit" disabled={busy}>
+            <KeyRound size={16} />
+            {mode === "reset-request" ? "Enviar enlace" : mode === "reset-confirm" ? "Guardar contraseña" : "Continuar"}
+          </button>
+        )}
         {mode === "login" && (
           <button type="button" className="link-button" onClick={() => switchMode("reset-request")}>
             ¿Olvidó su contraseña?
           </button>
         )}
         {(mode === "reset-request" || mode === "reset-confirm") && (
+          <button type="button" className="link-button" onClick={() => switchMode("login")}>
+            Volver a iniciar sesión
+          </button>
+        )}
+        {mode === "login-mfa" && (
           <button type="button" className="link-button" onClick={() => switchMode("login")}>
             Volver a iniciar sesión
           </button>

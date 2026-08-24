@@ -48,6 +48,7 @@ collectTree("DTE/Credentials");
 collectExact("WompiWebhookSample.json");
 collectExact("node_modules/.cache/wrangler/wrangler-account.json");
 collectExact("node_modules/.mf/cf.json");
+collectTree("tmp/pdfs");
 
 collectMatchingTree("DTE", (name) => /\.(?:csv|xlsx|pdf)$/i.test(name) || /_OCR\.md$/i.test(name) || /_by_PaddleOCR.*\.md$/i.test(name));
 collectMatchingTree("examples", (name) => /^DTE-.*\.(?:json|pdf)$/i.test(name));

@@ -1,17 +1,17 @@
-import { Repository, RETENTION_SNAPSHOT_TABLES, RETENTION_WINDOWED_TABLES } from "../storage/repository";
+import { Repository } from "../storage/repository";
 import type { AuthUser } from "./auth";
 import type { Env } from "../types";
-import { sha256Hex } from "../utils/encoding";
+import { sha256Hex, utf8Bytes } from "../utils/encoding";
 import { newId } from "../utils/ids";
 import { sendOperationalAlert } from "./alerts";
 import {
-  DOCUMENT_SEQUENCES_SNAPSHOT,
-  FISCAL_CORRECTION_LATEST_SNAPSHOT,
+  RETENTION_CANONICAL_TABLES,
   RETENTION_KEY_ROOT,
+  canonicalRetentionManifestJson,
   elSalvadorMonth,
+  parseRetentionManifest,
   previousElSalvadorMonth,
   retentionManifestKey,
-  retentionTableKey,
   type RetentionManifest
 } from "./retention";
 
@@ -51,14 +51,22 @@ interface BackupVerifyFile {
 export interface BackupVerifyResult {
   ok: boolean;
   files: BackupVerifyFile[];
+  reason?: BackupVerifyFailureReason;
 }
 
-const RETENTION_DOWNLOAD_TABLES = new Set<string>([
-  ...RETENTION_WINDOWED_TABLES,
-  ...RETENTION_SNAPSHOT_TABLES,
-  FISCAL_CORRECTION_LATEST_SNAPSHOT,
-  DOCUMENT_SEQUENCES_SNAPSHOT
-]);
+type BackupVerifyFailureReason =
+  | "manifest_invalid"
+  | "anchor_missing"
+  | "anchor_invalid"
+  | "anchor_mismatch"
+  | "object_mismatch";
+
+type ManifestReadResult =
+  | { status: "absent" }
+  | { status: "invalid" }
+  | { status: "valid"; manifest: RetentionManifest };
+
+const RETENTION_DOWNLOAD_TABLES = new Set<string>(RETENTION_CANONICAL_TABLES);
 
 export async function isManifestedBackupTable(env: Env, month: string, table: string): Promise<boolean> {
   return (await manifestedBackupTableKey(env, month, table)) !== null;
@@ -72,22 +80,17 @@ export async function manifestedBackupTableKey(
   if (!RETENTION_DOWNLOAD_TABLES.has(table)) {
     return null;
   }
-  const manifest = await getManifest(env, month);
-  if (
-    manifest === null
-    || typeof manifest.tables !== "object"
-    || manifest.tables === null
-    || !Object.hasOwn(manifest.tables, table)
-  ) {
+  const manifestResult = await readManifest(env, month);
+  if (manifestResult.status !== "valid") {
     return null;
   }
-  return tableObjectKey(month, table, manifest.tables[table]);
+  return manifestResult.manifest.tables[table].key;
 }
 
 // Ground truth is the set of manifests in R2, never the audit log. A month is
-// "archivado" only when its manifest.json exists and parses; the current (still
-// open) El Salvador month is always "en_curso"; every other expected month with
-// no manifest is "faltante".
+// "archivado" only when its manifest.json passes the exact v2 schema; the current
+// (still open) El Salvador month is always "en_curso"; every other expected month
+// without a valid manifest is "faltante".
 export async function listBackupMonths(env: Env, repo: Repository, now: Date): Promise<BackupsGrid> {
   const manifests = await listArchivedManifests(env);
   const earliestDocIso = await repo.earliestDteDocumentCreatedAt();
@@ -140,16 +143,30 @@ export async function listBackupMonths(env: Env, repo: Repository, now: Date): P
 // RETENTION_VERIFY_FAILED and fires an operational alert, so silent tampering or
 // bit-rot does not wait for someone to reopen the panel.
 export async function verifyBackupMonth(env: Env, repo: Repository, month: string, actor: AuthUser): Promise<BackupVerifyResult | null> {
-  const manifest = await getManifest(env, month);
-  if (!manifest) {
+  const manifestResult = await readManifest(env, month);
+  if (manifestResult.status === "absent") {
     return null;
   }
   const incidentId = newId("retention_verify");
+  if (manifestResult.status === "invalid") {
+    return failBackupVerification(env, repo, month, actor, incidentId, "manifest_invalid", []);
+  }
+  const manifest = manifestResult.manifest;
+
+  const anchor = await repo.getLatestRetentionExportCompletionAudit(month);
+  if (!anchor) {
+    return failBackupVerification(env, repo, month, actor, incidentId, "anchor_missing", []);
+  }
+  const manifestSha256 = await sha256Hex(utf8Bytes(canonicalRetentionManifestJson(manifest)));
+  const anchorStatus = retentionAnchorStatus(anchor.metadataJson, manifest, manifestSha256);
+  if (anchorStatus !== "valid") {
+    return failBackupVerification(env, repo, month, actor, incidentId, anchorStatus, []);
+  }
 
   const files: BackupVerifyFile[] = [];
-  for (const [table, entry] of Object.entries(manifest.tables)) {
-    const key = tableObjectKey(month, table, entry);
-    const object = key ? await env.ARCHIVE.get(key) : null;
+  for (const table of RETENTION_CANONICAL_TABLES) {
+    const entry = manifest.tables[table];
+    const object = await env.ARCHIVE.get(entry.key);
     if (!object) {
       files.push({ table, ok: false, expected: entry.sha256, actual: "" });
       continue;
@@ -171,25 +188,159 @@ export async function verifyBackupMonth(env: Env, repo: Repository, month: strin
     });
   } else {
     const mismatches = files.filter((file) => !file.ok).map((file) => file.table);
-    await repo.createAudit({
-      actorType: "USER",
-      actorId: actor.id,
-      action: "RETENTION_VERIFY_FAILED",
-      entityType: "retention_export",
-      entityId: month,
-      summary: `Respaldo de ${month} con discrepancias: ${mismatches.join(", ")}`,
-      metadata: { month, mismatches, files, incidentId }
-    });
-    await sendOperationalAlert(env, repo, {
-      kind: "RETENTION_VERIFY_FAILED",
-      title: `Respaldo de ${month} corrupto o alterado`,
-      detail: `La verificación del respaldo de ${month} falló. Archivos con discrepancia: ${mismatches.join(", ")}.`,
-      entityType: "retention_export",
-      entityId: month,
-      incidentId
-    });
+    return failBackupVerification(
+      env,
+      repo,
+      month,
+      actor,
+      incidentId,
+      "object_mismatch",
+      mismatches,
+      files
+    );
   }
   return { ok, files };
+}
+
+async function failBackupVerification(
+  env: Env,
+  repo: Repository,
+  month: string,
+  actor: AuthUser,
+  incidentId: string,
+  reason: BackupVerifyFailureReason,
+  tables: string[],
+  files: BackupVerifyFile[] = []
+): Promise<BackupVerifyResult> {
+  const canonicalTables = RETENTION_CANONICAL_TABLES.filter((table) => tables.includes(table));
+  await repo.createAudit({
+    actorType: "USER",
+    actorId: actor.id,
+    action: "RETENTION_VERIFY_FAILED",
+    entityType: "retention_export",
+    entityId: month,
+    summary: `Verificación de respaldo ${month} fallida (${reason})`,
+    metadata: { month, reason, tables: canonicalTables, incidentId }
+  });
+  await sendOperationalAlert(env, repo, {
+    kind: "RETENTION_VERIFY_FAILED",
+    title: `Verificación de respaldo ${month} fallida`,
+    detail: canonicalTables.length > 0
+      ? `La verificación falló (${reason}) en: ${canonicalTables.join(", ")}.`
+      : `La verificación falló (${reason}) antes de validar archivos.`,
+    entityType: "retention_export",
+    entityId: month,
+    incidentId
+  });
+  return { ok: false, reason, files };
+}
+
+function retentionAnchorStatus(
+  metadataJson: unknown,
+  manifest: RetentionManifest,
+  manifestSha256: string
+): "valid" | "anchor_invalid" | "anchor_mismatch" {
+  if (typeof metadataJson !== "string") return "anchor_invalid";
+  let metadata: unknown;
+  try {
+    metadata = JSON.parse(metadataJson);
+  } catch {
+    return "anchor_invalid";
+  }
+  if (!isRecord(metadata)) return "anchor_invalid";
+
+  const legacyFields = ["month", "totalRows", "tables"] as const;
+  const newFields = ["month", "runId", "generatedAt", "totalRows", "tables", "manifestSha256"] as const;
+  const isLegacy = hasExactFields(metadata, legacyFields);
+  const isNew = hasExactFields(metadata, newFields);
+  if (!isLegacy && !isNew) return "anchor_invalid";
+  if (
+    typeof metadata.month !== "string"
+    || !Number.isSafeInteger(metadata.totalRows)
+    || Number(metadata.totalRows) < 0
+  ) {
+    return "anchor_invalid";
+  }
+
+  const tableStatus = anchorTableStatus(metadata.tables, manifest);
+  if (tableStatus !== "valid") return tableStatus;
+  const expectedTotalRows = RETENTION_CANONICAL_TABLES.reduce(
+    (sum, table) => sum + manifest.tables[table].rowCount,
+    0
+  );
+  if (metadata.month !== manifest.month || metadata.totalRows !== expectedTotalRows) {
+    return "anchor_mismatch";
+  }
+  if (isLegacy) return "valid";
+
+  if (
+    typeof metadata.runId !== "string"
+    || !/^[A-Za-z0-9_-]{1,100}$/.test(metadata.runId)
+    || typeof metadata.generatedAt !== "string"
+    || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(metadata.generatedAt)
+    || Number.isNaN(new Date(metadata.generatedAt).getTime())
+    || new Date(metadata.generatedAt).toISOString() !== metadata.generatedAt
+    || typeof metadata.manifestSha256 !== "string"
+    || !/^[0-9a-f]{64}$/.test(metadata.manifestSha256)
+  ) {
+    return "anchor_invalid";
+  }
+  return metadata.runId === manifest.runId
+    && metadata.generatedAt === manifest.generatedAt
+    && metadata.manifestSha256 === manifestSha256
+    ? "valid"
+    : "anchor_mismatch";
+}
+
+function anchorTableStatus(
+  value: unknown,
+  manifest: RetentionManifest
+): "valid" | "anchor_invalid" | "anchor_mismatch" {
+  if (!isRecord(value)) return "anchor_invalid";
+  const tableNames = Object.keys(value);
+  if (
+    tableNames.length !== RETENTION_CANONICAL_TABLES.length
+    || RETENTION_CANONICAL_TABLES.some((table) => !Object.hasOwn(value, table))
+  ) {
+    return "anchor_invalid";
+  }
+  for (const table of RETENTION_CANONICAL_TABLES) {
+    const entry = value[table];
+    if (!hasExactFields(entry, ["key", "rowCount", "sha256"] as const)) {
+      return "anchor_invalid";
+    }
+    if (
+      typeof entry.key !== "string"
+      || !Number.isSafeInteger(entry.rowCount)
+      || Number(entry.rowCount) < 0
+      || typeof entry.sha256 !== "string"
+      || !/^[0-9a-f]{64}$/.test(entry.sha256)
+    ) {
+      return "anchor_invalid";
+    }
+    const expected = manifest.tables[table];
+    if (
+      entry.key !== expected.key
+      || entry.rowCount !== expected.rowCount
+      || entry.sha256 !== expected.sha256
+    ) {
+      return "anchor_mismatch";
+    }
+  }
+  return "valid";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactFields<const Fields extends readonly string[]>(
+  value: unknown,
+  fields: Fields
+): value is Record<Fields[number], unknown> {
+  return isRecord(value)
+    && Object.keys(value).length === fields.length
+    && fields.every((field) => Object.hasOwn(value, field));
 }
 
 // Collects every R2 object of a month's archive (the manifest.json plus each table's
@@ -208,17 +359,18 @@ export async function collectBackupMonthObjects(env: Env, month: string): Promis
   let totalBytes = manifestBytes.byteLength;
   enforceBackupArchiveLimit(totalBytes);
 
-  let manifest: RetentionManifest;
+  let parsed: unknown;
   try {
-    manifest = JSON.parse(new TextDecoder().decode(manifestBytes)) as RetentionManifest;
+    parsed = JSON.parse(new TextDecoder().decode(manifestBytes));
   } catch {
     return null;
   }
+  const manifest = parseRetentionManifest(parsed, month);
+  if (!manifest) return null;
 
   const entries: Array<{ name: string; data: Uint8Array }> = [{ name: "manifest.json", data: manifestBytes }];
-  for (const [table, manifestEntry] of Object.entries(manifest.tables)) {
-    const key = tableObjectKey(month, table, manifestEntry);
-    const object = key ? await env.ARCHIVE.get(key) : null;
+  for (const table of RETENTION_CANONICAL_TABLES) {
+    const object = await env.ARCHIVE.get(manifest.tables[table].key);
     if (!object) {
       continue;
     }
@@ -231,38 +383,25 @@ export async function collectBackupMonthObjects(env: Env, month: string): Promis
   return entries;
 }
 
-function tableObjectKey(
-  month: string,
-  table: string,
-  entry: RetentionManifest["tables"][string]
-): string | null {
-  if (!entry.key) {
-    return retentionTableKey(month, table);
-  }
-  const prefix = `${RETENTION_KEY_ROOT}/${month.slice(0, 4)}/${month}/runs/`;
-  const suffix = `/${table}.ndjson`;
-  if (!entry.key.startsWith(prefix) || !entry.key.endsWith(suffix)) {
-    return null;
-  }
-  const runId = entry.key.slice(prefix.length, -suffix.length);
-  return /^[A-Za-z0-9_-]{1,100}$/.test(runId) ? entry.key : null;
-}
-
 function enforceBackupArchiveLimit(totalBytes: number): void {
   if (totalBytes > BACKUP_MONTH_DOWNLOAD_MAX_BYTES) {
     throw new BackupArchiveTooLargeError(BACKUP_MONTH_DOWNLOAD_MAX_BYTES);
   }
 }
 
-async function getManifest(env: Env, month: string): Promise<RetentionManifest | null> {
+async function readManifest(env: Env, month: string): Promise<ManifestReadResult> {
   const object = await env.ARCHIVE.get(retentionManifestKey(month));
   if (!object) {
-    return null;
+    return { status: "absent" };
   }
   try {
-    return JSON.parse(new TextDecoder().decode(new Uint8Array(await object.arrayBuffer()))) as RetentionManifest;
+    const parsed: unknown = JSON.parse(
+      new TextDecoder().decode(new Uint8Array(await object.arrayBuffer()))
+    );
+    const manifest = parseRetentionManifest(parsed, month);
+    return manifest ? { status: "valid", manifest } : { status: "invalid" };
   } catch {
-    return null;
+    return { status: "invalid" };
   }
 }
 
@@ -276,9 +415,9 @@ async function listArchivedManifests(env: Env): Promise<Map<string, RetentionMan
     if (!/^\d{4}-\d{2}$/.test(month)) {
       continue;
     }
-    const manifest = await getManifest(env, month);
-    if (manifest) {
-      manifests.set(month, manifest);
+    const manifestResult = await readManifest(env, month);
+    if (manifestResult.status === "valid") {
+      manifests.set(month, manifestResult.manifest);
     }
   }
   return manifests;
