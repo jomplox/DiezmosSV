@@ -48,17 +48,19 @@ describe("production HSTS policy", () => {
         controller.close();
       }
     }, { highWaterMark: 0 });
+    const assetHeaders = new Headers({
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "public, max-age=60",
+      ETag: '"asset-v2"',
+      "Content-Security-Policy": "default-src 'self'; script-src 'self'",
+      "Strict-Transport-Security": "max-age=60; includeSubDomains; preload"
+    });
+    assetHeaders.append("Set-Cookie", "asset_cookie=1; Path=/; Secure");
+    assetHeaders.append("Set-Cookie", "session_cookie=2; Path=/admin; HttpOnly; Secure");
     const assetResponse = new Response(body, {
       status: 202,
       statusText: "Asset response",
-      headers: {
-        "Content-Type": "text/html; charset=utf-8",
-        "Cache-Control": "public, max-age=60",
-        ETag: '"asset-v2"',
-        "Set-Cookie": "asset_cookie=1; Path=/; Secure",
-        "Content-Security-Policy": "default-src 'self'; script-src 'self'",
-        "Strict-Transport-Security": "max-age=60; includeSubDomains; preload"
-      }
+      headers: assetHeaders
     });
 
     const response = await worker.fetch(
@@ -76,7 +78,10 @@ describe("production HSTS policy", () => {
     expect(response.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
     expect(response.headers.get("Cache-Control")).toBe("public, max-age=60");
     expect(response.headers.get("ETag")).toBe('"asset-v2"');
-    expect(response.headers.get("Set-Cookie")).toBe("asset_cookie=1; Path=/; Secure");
+    expect(response.headers.getSetCookie()).toEqual([
+      "asset_cookie=1; Path=/; Secure",
+      "session_cookie=2; Path=/admin; HttpOnly; Secure"
+    ]);
     expect(response.headers.get("Content-Security-Policy")).toContain("default-src 'self'");
     expect(response.headers.get("Content-Security-Policy")).toContain("frame-ancestors 'none'");
     expect(response.headers.get("X-Frame-Options")).toBe("DENY");
