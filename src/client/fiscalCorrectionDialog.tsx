@@ -282,7 +282,7 @@ export function FiscalCorrectionDialog({
       tipoDocumento,
       ...(tipoDocumento === "36"
         ? {}
-        : { nrc: null, codActividad: null, descActividad: null })
+        : { nrc: null })
     });
   }
 
@@ -411,7 +411,6 @@ export function FiscalCorrectionDialog({
             </CorrectionField>
 
             {businessFields && (
-              <>
                 <CorrectionField label="NRC">
                   <input
                     name="nrc"
@@ -420,6 +419,9 @@ export function FiscalCorrectionDialog({
                     inputMode="numeric"
                   />
                 </CorrectionField>
+            )}
+            {(domestic || businessFields) && (
+              <>
                 <CorrectionField label="Actividad económica">
                   <CorrectionSelect
                     name="codActividad"

@@ -370,7 +370,7 @@ describe("document email resend", () => {
       email_type: "dteReceipt",
       document_status_at_send: "ACCEPTED",
       template_version: expect.stringMatching(/^dteReceipt:sha256:[a-f0-9]{64}$/),
-      pdf_renderer_version: "cde-pdf:v4",
+      pdf_renderer_version: "cde-pdf:v5",
       pdf_sha256: pdfSha256,
       dte_json_sha256: await sha256Hex(dteJsonBytes),
       provider_delivery_id: providerDeliveryId,
