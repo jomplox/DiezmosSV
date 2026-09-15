@@ -266,9 +266,35 @@ describe("audit actor context", () => {
     expect(systemRow?.actor_ip ?? null).toBeNull();
   });
 
-  it("applies the lower-role audit projection on scoped, document-detail, and contingency responses", async () => {
+  it.each(["VIEWER", "OPERATOR"] as const)("rejects every user-scoped audit filter before preparing audit SQL for %s", async (role) => {
+    const userScopeQueries = [
+      "entityType=user&entityId=user_admin",
+      "entityType=user&entityId=arbitrary-account-id",
+      "entityType=user",
+      "entityType=user&entityId=",
+      "entityType=%75ser&entityId=user_admin",
+      "entityType=user&entityType=dte_document&entityId=user_admin"
+    ];
+
+    for (const query of userScopeQueries) {
+      const db = authedDb(role, new InMemoryD1());
+      db.preparedSql.length = 0;
+
+      const response = await worker.fetch(
+        new Request(`https://example.org/api/audit?${query}`, {
+          headers: { Authorization: "Bearer test-token" }
+        }),
+        env(db)
+      );
+
+      expect(response.status, query).toBe(403);
+      expect(db.preparedSql.some((sql) => sql.includes("FROM audit_logs")), query).toBe(false);
+    }
+  });
+
+  it.each(["VIEWER", "OPERATOR"] as const)("keeps non-user audit scopes available with the lower-role projection for %s", async (role) => {
     const db = new InMemoryD1();
-    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    db.sessionUser = { id: `user_${role.toLowerCase()}`, email: `${role.toLowerCase()}@example.org`, name: role, role };
     db.users.push({
       id: "user_admin",
       email: "admin@example.org",
@@ -279,17 +305,6 @@ describe("audit actor context", () => {
       disabled_at: "",
       created_at: "2026-06-26T01:46:47.015Z",
       updated_at: "2026-06-26T01:46:47.015Z"
-    });
-    db.documents.push(testDocument({ id: "doc_projection" }));
-    db.contingencies.push({
-      id: "cont_projection",
-      environment: "00",
-      status: "OPEN",
-      reason: "MH TEST no disponible",
-      tipo_contingencia: 2,
-      started_at: "2026-06-26T01:00:00.000Z",
-      ended_at: null,
-      created_at: "2026-06-26T01:00:00.000Z"
     });
     const sensitiveContext = JSON.stringify({ city: "San Salvador", country: "SV" });
     db.audits.push(
@@ -335,35 +350,76 @@ describe("audit actor context", () => {
     );
 
     const headers = { Authorization: "Bearer test-token" };
-    const [scopedResponse, documentResponse, contingencyResponse] = await Promise.all([
+    const [userScopedResponse, documentResponse, contingencyResponse] = await Promise.all([
       worker.fetch(
         new Request("https://example.org/api/audit?entityType=user&entityId=user_operator", { headers }),
         env(db)
       ),
-      worker.fetch(new Request("https://example.org/api/documents/doc_projection", { headers }), env(db)),
-      worker.fetch(new Request("https://example.org/api/contingency", { headers }), env(db))
+      worker.fetch(
+        new Request("https://example.org/api/audit?entityType=dte_document&entityId=doc_projection", { headers }),
+        env(db)
+      ),
+      worker.fetch(
+        new Request("https://example.org/api/audit?entityType=contingency_period&entityId=cont_projection", { headers }),
+        env(db)
+      )
     ]);
 
-    expect(scopedResponse.status).toBe(200);
+    expect(userScopedResponse.status).toBe(403);
     expect(documentResponse.status).toBe(200);
     expect(contingencyResponse.status).toBe(200);
-    const scoped = (await scopedResponse.json()) as { audit: Array<Record<string, unknown>> };
     const document = (await documentResponse.json()) as { audit: Array<Record<string, unknown>> };
-    const contingency = (await contingencyResponse.json()) as { contingency: { audit: Array<Record<string, unknown>> } };
+    const contingency = (await contingencyResponse.json()) as { audit: Array<Record<string, unknown>> };
 
-    expect(scoped.audit[0]).toMatchObject({
-      actor_id: null,
-      actor_name: null,
-      actor_email: null,
-      actor_ip: null,
-      actor_context: null,
-      entity_id: null,
-      summary: "Usuario actualizado",
-      metadata_json: "{}"
-    });
-    for (const row of [document.audit[0], contingency.contingency.audit[0]]) {
+    for (const row of [document.audit[0], contingency.audit[0]]) {
       expect(row).toMatchObject({ actor_email: null, actor_ip: null, actor_context: null });
     }
+  });
+
+  it.each(["ADMIN", "OWNER"] as const)("retains account-scoped audit identity and context for %s", async (role) => {
+    const db = authedDb(role, new InMemoryD1());
+    db.users.push({
+      id: "user_admin",
+      email: "admin@example.org",
+      name: "Ada Admin",
+      role: "ADMIN",
+      password_hash: "h",
+      password_salt: "s",
+      disabled_at: "",
+      created_at: "2026-06-26T01:46:47.015Z",
+      updated_at: "2026-06-26T01:46:47.015Z"
+    });
+    db.audits.push({
+      id: "audit_user_scoped_identity",
+      actor_type: "USER",
+      actor_id: "user_admin",
+      action: "USER_UPDATED",
+      entity_type: "user",
+      entity_id: "user_operator",
+      summary: "Usuario actualizado",
+      metadata_json: "{}",
+      actor_ip: "190.86.1.2",
+      actor_context: JSON.stringify({ city: "San Salvador", country: "SV" }),
+      created_at: "2026-06-26T01:46:47.015Z"
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/audit?entityType=user&entityId=user_operator", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { audit: Array<Record<string, unknown>> };
+    expect(body.audit[0]).toMatchObject({
+      actor_id: "user_admin",
+      actor_name: "Ada Admin",
+      actor_email: "admin@example.org",
+      actor_ip: "190.86.1.2",
+      entity_id: "user_operator"
+    });
+    expect(JSON.parse(String(body.audit[0]?.actor_context))).toMatchObject({ city: "San Salvador" });
   });
 
   it("returns sensitive audit actor fields for ADMIN users", async () => {

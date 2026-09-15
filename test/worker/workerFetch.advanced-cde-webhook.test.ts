@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
 import { EnvironmentNotAllowedError } from "../../src/worker/services/environmentPolicy";
 import { IssuancePipeline } from "../../src/worker/services/pipeline";
+import type { WompiWebhook } from "../../src/worker/types";
 import { TEST_RESEND_REQUEST_ID } from "./support/documentDeliveryFixtures";
 import {
   advancedCdeDraft,
@@ -13,6 +14,128 @@ import { installWorkerFetchGlobals } from "./support/workerFetchGlobals";
 import { signWompiBody } from "./support/workerFetchHelpers";
 
 installWorkerFetchGlobals();
+
+const WOMPI_WEBHOOK_SECRET = "wompi-secret";
+
+function collisionWebhook(overrides: Partial<WompiWebhook> = {}): WompiWebhook {
+  const base: WompiWebhook = {
+    IdCuenta: "acct_1",
+    FechaTransaccion: "2026-06-27T10:00:00-06:00",
+    Monto: "25.00",
+    IdTransaccion: "collision-transaction",
+    ResultadoTransaccion: "ExitosaAprobada",
+    CodigoAutorizacion: "000001",
+    IdIntentoPago: null,
+    Cantidad: 1,
+    EsProductiva: false,
+    EnlacePago: {
+      Id: 555,
+      IdentificadorEnlaceComercio: "di_collision"
+    },
+    Cliente: {
+      Nombre: "Example",
+      Apellidos: "Person",
+      Direccion: "canonical-address",
+      EMail: "donor@example.org",
+      Celular: "70000005"
+    }
+  };
+  return {
+    ...base,
+    ...overrides,
+    EnlacePago: { ...base.EnlacePago, ...overrides.EnlacePago },
+    Cliente: { ...base.Cliente, ...overrides.Cliente }
+  };
+}
+
+function seedCanonicalWompiEvent(
+  db: InMemoryD1,
+  payload: WompiWebhook,
+  id = "wompi_collision_canonical",
+  rawBody = JSON.stringify(payload)
+): Record<string, unknown> {
+  const firstName = payload.Cliente?.Nombre?.trim() ?? "";
+  const lastName = payload.Cliente?.Apellidos?.trim() ?? "";
+  const row: Record<string, unknown> = {
+    id,
+    transaction_id: payload.IdTransaccion,
+    payment_link_id:
+      payload.ResultadoTransaccion === "ExitosaAprobada"
+      && (payload.EnlacePago?.IdentificadorEnlaceComercio?.trim() ?? "").startsWith("di_")
+        ? payload.EnlacePago?.Id ?? null
+        : null,
+    environment: payload.EsProductiva ? "01" : "00",
+    result: payload.ResultadoTransaccion,
+    amount_cents: Math.round(Number(payload.Monto) * 100),
+    donor_email: payload.Cliente?.EMail ?? null,
+    donor_name: `${firstName} ${lastName}`.trim() || "Donante",
+    raw_body: rawBody,
+    headers_json: "{}",
+    received_at: "2026-06-26T01:46:47.015Z",
+    processed_at: null,
+    created_document_id: null,
+    issuance_claim_id: null,
+    issuance_claimed_at: null,
+    issuance_status: null,
+    control_prefix: null,
+    control_sequence: null,
+    reserved_numero_control: null,
+    reserved_codigo_generacion: null,
+    issuance_attempt_count: 0,
+    issuance_attempt_id: null,
+    issuance_error_code: null,
+    issuance_error_message: null,
+    issuance_last_attempt_at: null,
+    stalled_requeue_epoch_at: null,
+    issuance_failed_at: null,
+    issuance_dead_lettered_at: null
+  };
+  db.wompiEvents.push(row);
+  return row;
+}
+
+function seedCollisionIntent(db: InMemoryD1): void {
+  db.donationIntents.push({
+    id: "di_collision",
+    status: "LINK_CREATED",
+    amount_cents: 2500,
+    donor_document: "10000001-9",
+    wompi_id_enlace: 555,
+    donor_phone: null,
+    direccion_complemento: null,
+    paid_at: null
+  });
+}
+
+async function postSignedWompi(
+  db: InMemoryD1,
+  payload: WompiWebhook,
+  send: ReturnType<typeof vi.fn>
+): Promise<Response> {
+  return postRawSignedWompi(db, JSON.stringify(payload), send);
+}
+
+async function postRawSignedWompi(
+  db: InMemoryD1,
+  rawBody: string,
+  send: ReturnType<typeof vi.fn>
+): Promise<Response> {
+  return worker.fetch(
+    new Request("https://example.org/webhooks/wompi", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        wompi_hash: await signWompiBody(rawBody, WOMPI_WEBHOOK_SECRET)
+      },
+      body: rawBody
+    }),
+    env(db, {
+      APP_ENV: "staging",
+      WOMPI_API_SECRET: WOMPI_WEBHOOK_SECRET,
+      ISSUANCE_QUEUE: { send } as unknown as Queue
+    })
+  );
+}
 
 describe("advanced CDE generation", () => {
   it.each(["/api/test/dte/advanced-template", "/api/test/dte/advanced"])(
@@ -489,6 +612,324 @@ describe("advanced CDE generation", () => {
 });
 
 describe("Wompi webhook integration", () => {
+  const strictBodyEdges: Array<{
+    name: string;
+    marker: string;
+    mutateIncoming: (raw: Record<string, unknown>) => void;
+  }> = [
+    {
+      name: "explicit null instead of a missing member",
+      marker: "IdExterno",
+      mutateIncoming: (raw) => {
+        raw.IdExterno = null;
+      }
+    },
+    {
+      name: "a duplicate documented alias",
+      marker: "999.00",
+      mutateIncoming: (raw) => {
+        raw.monto = "999.00";
+      }
+    },
+    {
+      name: "a numeric string instead of a number",
+      marker: "Cantidad",
+      mutateIncoming: (raw) => {
+        raw.Cantidad = "1";
+      }
+    }
+  ];
+
+  it.each(
+    (["same-ID", "alternate-ID"] as const).flatMap((replayKind) =>
+      strictBodyEdges.map((edge) => ({ replayKind, ...edge }))
+    )
+  )("rejects a $replayKind replay with $name", async ({ replayKind, marker, mutateIncoming }) => {
+    const db = new InMemoryD1();
+    seedCollisionIntent(db);
+    const alternate = replayKind === "alternate-ID";
+    const storedPayload = collisionWebhook({
+      IdTransaccion: alternate ? "lossless-stored-transaction" : "collision-transaction"
+    });
+    const storedRaw = structuredClone(storedPayload) as unknown as Record<string, unknown>;
+    const incomingRaw = structuredClone(storedPayload) as unknown as Record<string, unknown>;
+    mutateIncoming(incomingRaw);
+    if (alternate) {
+      incomingRaw.IdTransaccion = "lossless-alternate-transaction";
+    }
+    seedCanonicalWompiEvent(
+      db,
+      storedPayload,
+      "wompi_lossless_canonical",
+      JSON.stringify(storedRaw)
+    );
+    const canonicalBefore = structuredClone(db.wompiEvents);
+    const send = vi.fn();
+
+    const response = await postRawSignedWompi(db, JSON.stringify(incomingRaw), send);
+    const responseBody = await response.json();
+
+    expect(response.status).toBe(409);
+    expect(responseBody).toEqual({ error: "wompi_event_conflict" });
+    expect(send).not.toHaveBeenCalled();
+    expect(db.donationIntents[0].paid_at).toBeNull();
+    expect(db.wompiEvents).toEqual(canonicalBefore);
+    const audit = db.audits.find((row) => row.action === "WOMPI_EVENT_CONFLICT");
+    expect(audit).toMatchObject({
+      entity_type: "wompi_event",
+      entity_id: "wompi_lossless_canonical",
+      summary: "Evento Wompi rechazado por conflicto con el registro canónico"
+    });
+    expect(JSON.parse(String(audit!.metadata_json))).toEqual({
+      reason: "canonical_mismatch",
+      fields: ["normalized_body"]
+    });
+    const boundedOutput = JSON.stringify({ responseBody, audit });
+    expect(boundedOutput).not.toContain(marker);
+    expect(boundedOutput).not.toContain(String(incomingRaw.IdTransaccion));
+  });
+
+  it.each(
+    (["same-ID", "alternate-ID"] as const).flatMap((replayKind) => [
+      {
+        replayKind,
+        name: "an added unknown provider field",
+        mutateStored: (_raw: Record<string, unknown>): void => {},
+        mutateIncoming: (raw: Record<string, unknown>) => {
+          raw.ProviderEvidence = {
+            nested: { decision: "provider-added-after-first-delivery" },
+            steps: [1, { approved: true }]
+          };
+        }
+      },
+      {
+        replayKind,
+        name: "changed unknown provider metadata",
+        mutateStored: (raw: Record<string, unknown>) => {
+          raw.ProviderEvidence = { history: [1, 2] };
+        },
+        mutateIncoming: (raw: Record<string, unknown>) => {
+          raw.ProviderEvidence = { history: [2, 1] };
+        }
+      },
+      {
+        replayKind,
+        name: "a later authorization code",
+        mutateStored: (raw: Record<string, unknown>) => {
+          raw.CodigoAutorizacion = null;
+        },
+        mutateIncoming: (raw: Record<string, unknown>) => {
+          raw.CodigoAutorizacion = "provider-filled-later";
+        }
+      }
+    ])
+  )("accepts a $replayKind replay with $name and repairs downstream processing", async ({
+    replayKind,
+    mutateStored,
+    mutateIncoming
+  }) => {
+    const db = new InMemoryD1();
+    seedCollisionIntent(db);
+    const alternate = replayKind === "alternate-ID";
+    const storedPayload = collisionWebhook({
+      IdTransaccion: alternate ? "benign-stored-transaction" : "collision-transaction"
+    });
+    const storedRaw = structuredClone(storedPayload) as unknown as Record<string, unknown>;
+    const incomingRaw = structuredClone(storedPayload) as unknown as Record<string, unknown>;
+    mutateStored(storedRaw);
+    mutateIncoming(incomingRaw);
+    if (alternate) {
+      incomingRaw.IdTransaccion = "benign-alternate-transaction";
+    }
+    const canonicalRawBody = JSON.stringify(storedRaw);
+    seedCanonicalWompiEvent(
+      db,
+      storedPayload,
+      "wompi_benign_canonical",
+      canonicalRawBody
+    );
+    const send = vi.fn();
+
+    const response = await postRawSignedWompi(db, JSON.stringify(incomingRaw), send);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      wompiEventId: "wompi_benign_canonical",
+      inserted: false,
+      queued: true
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(db.donationIntents[0].paid_at).not.toBeNull();
+    expect(db.wompiEvents).toHaveLength(1);
+    expect(db.wompiEvents[0].raw_body).toBe(canonicalRawBody);
+    expect(db.audits.find((row) => row.action === "WOMPI_EVENT_CONFLICT")).toBeUndefined();
+    expect(db.audits.find((row) => row.action === "WOMPI_DUPLICATE")?.entity_id)
+      .toBe("wompi_benign_canonical");
+  });
+
+  it.each([
+    {
+      name: "environment",
+      stored: collisionWebhook({ EsProductiva: true }),
+      incoming: collisionWebhook(),
+      fields: ["environment", "normalized_body"]
+    },
+    {
+      name: "result",
+      stored: collisionWebhook({ ResultadoTransaccion: "Denegada" }),
+      incoming: collisionWebhook(),
+      fields: ["result", "normalized_body"]
+    },
+    {
+      name: "amount",
+      stored: collisionWebhook({ Monto: "20.00" }),
+      incoming: collisionWebhook(),
+      fields: ["amount", "normalized_body"]
+    },
+    {
+      name: "payment link",
+      stored: collisionWebhook({ EnlacePago: { Id: 556 } }),
+      incoming: collisionWebhook(),
+      fields: ["payment_link", "normalized_body"]
+    },
+    {
+      name: "commerce intent",
+      stored: collisionWebhook({
+        EnlacePago: { IdentificadorEnlaceComercio: "di_other_intent" }
+      }),
+      incoming: collisionWebhook(),
+      fields: ["commerce_intent", "normalized_body"]
+    },
+    {
+      name: "normalized body",
+      stored: collisionWebhook(),
+      incoming: collisionWebhook({
+        Cliente: { Direccion: "incoming-private-collision-value" }
+      }),
+      fields: ["normalized_body"]
+    }
+  ])("rejects a same-transaction $name collision without trusting incoming values", async ({
+    stored,
+    incoming,
+    fields
+  }) => {
+    const db = new InMemoryD1();
+    seedCollisionIntent(db);
+    seedCanonicalWompiEvent(db, stored);
+    const canonicalBefore = structuredClone(db.wompiEvents);
+    const send = vi.fn();
+
+    const response = await postSignedWompi(db, incoming, send);
+    const responseBody = await response.json();
+
+    expect(response.status).toBe(409);
+    expect(responseBody).toEqual({ error: "wompi_event_conflict" });
+    expect(send).not.toHaveBeenCalled();
+    expect(db.donationIntents[0].paid_at).toBeNull();
+    expect(db.wompiEvents).toEqual(canonicalBefore);
+    const audit = db.audits.find((row) => row.action === "WOMPI_EVENT_CONFLICT");
+    expect(audit).toMatchObject({
+      entity_type: "wompi_event",
+      entity_id: "wompi_collision_canonical",
+      summary: "Evento Wompi rechazado por conflicto con el registro canónico"
+    });
+    expect(JSON.parse(String(audit!.metadata_json))).toEqual({
+      reason: "canonical_mismatch",
+      fields
+    });
+    const boundedOutput = JSON.stringify({ responseBody, audit });
+    expect(boundedOutput).not.toContain(incoming.IdTransaccion);
+    expect(boundedOutput).not.toContain("incoming-private-collision-value");
+  });
+
+  it("rejects when transaction and payment-link lookups identify different canonical rows", async () => {
+    const db = new InMemoryD1();
+    seedCollisionIntent(db);
+    seedCanonicalWompiEvent(
+      db,
+      collisionWebhook({ EnlacePago: { Id: 556 } }),
+      "wompi_by_transaction"
+    );
+    seedCanonicalWompiEvent(
+      db,
+      collisionWebhook({ IdTransaccion: "other-transaction" }),
+      "wompi_by_payment_link"
+    );
+    const canonicalBefore = structuredClone(db.wompiEvents);
+    const send = vi.fn();
+
+    const response = await postSignedWompi(db, collisionWebhook(), send);
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({ error: "wompi_event_conflict" });
+    expect(send).not.toHaveBeenCalled();
+    expect(db.donationIntents[0].paid_at).toBeNull();
+    expect(db.wompiEvents).toEqual(canonicalBefore);
+    const audit = db.audits.find((row) => row.action === "WOMPI_EVENT_CONFLICT");
+    expect(audit).toMatchObject({
+      entity_type: "wompi_event",
+      entity_id: "wompi_by_transaction",
+      summary: "Evento Wompi rechazado por conflicto con el registro canónico"
+    });
+    expect(JSON.parse(String(audit!.metadata_json))).toEqual({
+      reason: "identity_lookup_conflict",
+      fields: ["identity"]
+    });
+  });
+
+  it("re-reads and compares a conflicting event inserted during the uniqueness race", async () => {
+    const db = new InMemoryD1();
+    seedCollisionIntent(db);
+    const stored = collisionWebhook({
+      Cliente: { Direccion: "canonical-race-address" }
+    });
+    db.beforeWompiEventInsert = () => {
+      seedCanonicalWompiEvent(db, stored, "wompi_concurrent_winner");
+    };
+    const send = vi.fn();
+
+    const response = await postSignedWompi(db, collisionWebhook(), send);
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({ error: "wompi_event_conflict" });
+    expect(send).not.toHaveBeenCalled();
+    expect(db.donationIntents[0].paid_at).toBeNull();
+    expect(db.wompiEvents).toHaveLength(1);
+    expect(db.wompiEvents[0].raw_body).toBe(JSON.stringify(stored));
+    expect(db.audits.find((row) => row.action === "WOMPI_EVENT_CONFLICT")).toBeDefined();
+  });
+
+  it("rejects an alternate transaction identifier when any other normalized body value changes", async () => {
+    const db = new InMemoryD1();
+    seedCollisionIntent(db);
+    const stored = collisionWebhook({ IdTransaccion: "payment-link-display-id" });
+    seedCanonicalWompiEvent(db, stored);
+    const canonicalBefore = structuredClone(db.wompiEvents);
+    const send = vi.fn();
+
+    const response = await postSignedWompi(
+      db,
+      collisionWebhook({
+        IdTransaccion: "delayed-webhook-uuid",
+        Cliente: { Direccion: "alternate-transaction-private-collision" }
+      }),
+      send
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({ error: "wompi_event_conflict" });
+    expect(send).not.toHaveBeenCalled();
+    expect(db.donationIntents[0].paid_at).toBeNull();
+    expect(db.wompiEvents).toEqual(canonicalBefore);
+    const audit = db.audits.find((row) => row.action === "WOMPI_EVENT_CONFLICT");
+    expect(JSON.parse(String(audit!.metadata_json))).toEqual({
+      reason: "canonical_mismatch",
+      fields: ["normalized_body"]
+    });
+    expect(JSON.stringify(audit)).not.toContain("alternate-transaction-private-collision");
+  });
+
   it("accepts a signed official Wompi webhook and queues approved payments", async () => {
     const db = new InMemoryD1();
     const queued: unknown[] = [];
@@ -544,6 +985,61 @@ describe("Wompi webhook integration", () => {
       wompiEventId: db.wompiEvents[0].id,
       issuanceAttemptId: expect.any(String)
     }]);
+  });
+
+  it("accepts an exact replay whose JSON aliases and member order normalize identically", async () => {
+    const db = new InMemoryD1();
+    seedCollisionIntent(db);
+    const send = vi.fn();
+    const canonicalPayload = collisionWebhook();
+    const canonicalRawBody = JSON.stringify({
+      ...canonicalPayload,
+      ProviderEvidence: {
+        nested: { first: 1, second: 2 }
+      }
+    });
+
+    const first = await postRawSignedWompi(db, canonicalRawBody, send);
+    const replayRawBody = JSON.stringify({
+      ProviderEvidence: {
+        nested: { second: 2, first: 1 }
+      },
+      cliente: {
+        celular: "70000005",
+        email: "donor@example.org",
+        direccion: "canonical-address",
+        apellidos: "Person",
+        nombre: "Example"
+      },
+      enlacePago: {
+        identificadorEnlaceComercio: "di_collision",
+        id: 555
+      },
+      esProductiva: false,
+      cantidad: 1,
+      idIntentoPago: null,
+      codigoAutorizacion: "000001",
+      resultadoTransaccion: "ExitosaAprobada",
+      idTransaccion: "collision-transaction",
+      monto: "25.00",
+      fechaTransaccion: "2026-06-27T10:00:00-06:00",
+      idCuenta: "acct_1"
+    });
+    const replay = await postRawSignedWompi(db, replayRawBody, send);
+
+    expect(first.status).toBe(202);
+    expect(replay.status).toBe(200);
+    await expect(replay.json()).resolves.toMatchObject({
+      ok: true,
+      inserted: false,
+      queued: false
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(db.donationIntents[0].paid_at).not.toBeNull();
+    expect(db.wompiEvents).toHaveLength(1);
+    expect(db.wompiEvents[0].raw_body).toBe(canonicalRawBody);
+    expect(db.audits.find((row) => row.action === "WOMPI_DUPLICATE")?.summary)
+      .toBe("collision-transaction ExitosaAprobada");
   });
 
   it("deduplicates one approved payment link even when Wompi uses a different transaction id later", async () => {
@@ -608,6 +1104,8 @@ describe("Wompi webhook integration", () => {
       payment_link_id: 555
     });
     expect(queued).toHaveLength(1);
+    const duplicate = db.audits.find((row) => row.action === "WOMPI_DUPLICATE");
+    expect(duplicate?.summary).toBe("display-id-from-payment-link-api ExitosaAprobada");
   });
 
   it("stores but quarantines a signed webhook whose ambiente is incompatible with the deployment", async () => {

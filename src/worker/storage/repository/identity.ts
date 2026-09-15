@@ -19,6 +19,18 @@ export class UserMutationConflictError extends Error {
   }
 }
 
+export interface LoginStepUpCredentialSnapshot {
+  userId: string;
+  expectedEmail: string;
+  expectedAuthGeneration: number;
+  expectedPasswordHash: string;
+  expectedPasswordSalt: string;
+}
+
+export interface ConsumedLoginStepUpChallenge extends LoginStepUpCredentialSnapshot {
+  challengeId: string;
+}
+
 export async function getUserRole(
   db: D1Database,
   id: string
@@ -334,6 +346,190 @@ export async function createSessionIfCredentialsCurrent(
       .bind(id, input.tokenHash, input.expiresAt, createdAt, ...guard)
   ]);
   return Number(results[2]?.meta?.changes ?? 0) === 1;
+}
+
+export async function createLoginStepUpChallenge(
+  db: D1Database,
+  input: LoginStepUpCredentialSnapshot & {
+    continuationTokenHash: string;
+    codeHash: string;
+    expiresAt: string;
+  }
+): Promise<string | null> {
+  const id = newId("login_mfa");
+  const row = await db
+    .prepare(
+      `INSERT INTO login_step_up_challenges (
+         id, user_id, continuation_token_hash, code_hash,
+         expected_email, expected_auth_generation,
+         expected_password_hash, expected_password_salt, expires_at
+       )
+       SELECT ?, id, ?, ?, email, auth_generation, password_hash, password_salt, ?
+         FROM users
+        WHERE id = ?
+          AND disabled_at IS NULL
+          AND email = ?
+          AND auth_generation = ?
+          AND password_hash = ?
+          AND password_salt = ?
+       RETURNING id`
+    )
+    .bind(
+      id,
+      input.continuationTokenHash,
+      input.codeHash,
+      input.expiresAt,
+      input.userId,
+      input.expectedEmail,
+      input.expectedAuthGeneration,
+      input.expectedPasswordHash,
+      input.expectedPasswordSalt
+    )
+    .first<{ id: string }>();
+  return row?.id ?? null;
+}
+
+export async function consumeLoginStepUpChallenge(
+  db: D1Database,
+  input: {
+    challengeId: string;
+    continuationTokenHash: string;
+    codeHash: string;
+    now: string;
+    maxWrongAttempts: number;
+  }
+): Promise<ConsumedLoginStepUpChallenge | null> {
+  const row = await db
+    .prepare(
+      `UPDATE login_step_up_challenges
+          SET consumed_at = ?
+        WHERE id = ?
+          AND continuation_token_hash = ?
+          AND code_hash = ?
+          AND consumed_at IS NULL
+          AND invalidated_at IS NULL
+          AND expires_at > ?
+          AND (
+            SELECT COALESCE(SUM(cohort.failed_attempts), 0)
+              FROM login_step_up_challenges AS cohort
+             WHERE cohort.user_id = login_step_up_challenges.user_id
+               AND cohort.expected_auth_generation = login_step_up_challenges.expected_auth_generation
+               AND cohort.consumed_at IS NULL
+               AND cohort.invalidated_at IS NULL
+               AND cohort.expires_at > ?
+          ) < ?
+          AND EXISTS (
+            SELECT 1 FROM users
+             WHERE users.id = login_step_up_challenges.user_id
+               AND users.disabled_at IS NULL
+               AND users.email = login_step_up_challenges.expected_email
+               AND users.auth_generation = login_step_up_challenges.expected_auth_generation
+               AND users.password_hash = login_step_up_challenges.expected_password_hash
+               AND users.password_salt = login_step_up_challenges.expected_password_salt
+          )
+      RETURNING id, user_id, expected_email, expected_auth_generation,
+                expected_password_hash, expected_password_salt`
+    )
+    .bind(
+      input.now,
+      input.challengeId,
+      input.continuationTokenHash,
+      input.codeHash,
+      input.now,
+      input.now,
+      input.maxWrongAttempts
+    )
+    .first<Record<string, string | number>>();
+  if (!row) return null;
+  return {
+    challengeId: String(row.id),
+    userId: String(row.user_id),
+    expectedEmail: String(row.expected_email),
+    expectedAuthGeneration: Number(row.expected_auth_generation),
+    expectedPasswordHash: String(row.expected_password_hash),
+    expectedPasswordSalt: String(row.expected_password_salt)
+  };
+}
+
+export async function incrementLoginStepUpFailure(
+  db: D1Database,
+  input: {
+    challengeId: string;
+    continuationTokenHash: string;
+    submittedCodeHash: string;
+    now: string;
+    maxWrongAttempts: number;
+  }
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `UPDATE login_step_up_challenges
+          SET failed_attempts = failed_attempts + 1
+        WHERE id = ?
+          AND continuation_token_hash = ?
+          AND code_hash <> ?
+          AND consumed_at IS NULL
+          AND invalidated_at IS NULL
+          AND expires_at > ?
+          AND (
+            SELECT COALESCE(SUM(cohort.failed_attempts), 0)
+              FROM login_step_up_challenges AS cohort
+             WHERE cohort.user_id = login_step_up_challenges.user_id
+               AND cohort.expected_auth_generation = login_step_up_challenges.expected_auth_generation
+               AND cohort.consumed_at IS NULL
+               AND cohort.invalidated_at IS NULL
+               AND cohort.expires_at > ?
+          ) < ?
+          AND EXISTS (
+            SELECT 1 FROM users
+             WHERE users.id = login_step_up_challenges.user_id
+               AND users.disabled_at IS NULL
+               AND users.email = login_step_up_challenges.expected_email
+               AND users.auth_generation = login_step_up_challenges.expected_auth_generation
+               AND users.password_hash = login_step_up_challenges.expected_password_hash
+               AND users.password_salt = login_step_up_challenges.expected_password_salt
+          )
+      RETURNING id`
+    )
+    .bind(
+      input.challengeId,
+      input.continuationTokenHash,
+      input.submittedCodeHash,
+      input.now,
+      input.now,
+      input.maxWrongAttempts
+    )
+    .first<{ id: string }>();
+  return Boolean(row);
+}
+
+export async function invalidateLoginStepUpChallenge(
+  db: D1Database,
+  challengeId: string,
+  continuationTokenHash: string,
+  invalidatedAt: string
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE login_step_up_challenges
+          SET invalidated_at = ?
+        WHERE id = ?
+          AND continuation_token_hash = ?
+          AND consumed_at IS NULL
+          AND invalidated_at IS NULL`
+    )
+    .bind(invalidatedAt, challengeId, continuationTokenHash)
+    .run();
+}
+
+export async function deleteExpiredLoginStepUpChallenges(
+  db: D1Database,
+  now: string
+): Promise<void> {
+  await db
+    .prepare("DELETE FROM login_step_up_challenges WHERE expires_at <= ?")
+    .bind(now)
+    .run();
 }
 
 export async function getSessionUser(

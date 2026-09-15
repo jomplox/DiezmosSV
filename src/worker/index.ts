@@ -3,7 +3,7 @@ import { buildAdvancedCdeDocument, buildDirectCdeDocument, buildInvalidacionEven
 import { certificateExpiry, signMhDocument } from "./domain/signer";
 import { ambienteFromWompi, isApprovedDonation, normalizeWompiWebhook, verifyWompiHash, WompiPayloadError, wompiHashHeader, wompiWebhookFromPaymentLink } from "./domain/wompi";
 import { ALERT_EMAIL_SETTING_KEY, normalizeAlertRecipients, sendOperationalAlert } from "./services/alerts";
-import { AuthError, AuthService, BootstrapUnavailableError, PASSWORD_RESET_TTL_MINUTES, PasswordPolicyError, PasswordResetError, requireRole, type AuthUser, type Role, UserNotFoundError } from "./services/auth";
+import { AuthError, AuthService, BootstrapUnavailableError, InvalidLoginStepUpChallengeError, LOGIN_STEP_UP_TTL_MINUTES, PASSWORD_RESET_TTL_MINUTES, PasswordPolicyError, PasswordResetError, requireRole, type AuthUser, type Role, UserNotFoundError } from "./services/auth";
 import {
   CredentialWriterConfigError,
   StripeCredentialValidationError,
@@ -29,6 +29,10 @@ import {
   IntentValidationError,
   INTENT_THROTTLE_LIMIT,
   INTENT_THROTTLE_WINDOW_MINUTES,
+  PROVIDER_CREATION_CLIENT_LIMIT,
+  PROVIDER_CREATION_GLOBAL_LIMIT,
+  PROVIDER_CREATION_PROVIDER_LIMIT,
+  providerCreationRateIdentity,
   isDraftIntentBody,
   validateDatosInput,
   validateDraftIntentInput,
@@ -113,7 +117,7 @@ import { MhClient, MhPreDispatchError } from "./services/mhClient";
 import { IssuancePipeline } from "./services/pipeline";
 import { loadPdfBrandingLogo, renderDtePdf } from "./services/pdf";
 import { auditContextFrom } from "./services/requestContext";
-import { projectAuditRows } from "./services/auditProjection";
+import { hasAccountAuditAudience, projectAuditRows, projectContingencyEvents } from "./services/auditProjection";
 import { BackupArchiveTooLargeError, BACKUP_MONTH_DOWNLOAD_MAX_BYTES, collectBackupMonthObjects, manifestedBackupTableKey, listBackupMonths, verifyBackupMonth } from "./services/backups";
 import { zipStored } from "./utils/zip";
 import { previousElSalvadorMonth, retentionManifestKey, runRetentionExport } from "./services/retention";
@@ -180,6 +184,7 @@ const WOMPI_RECONCILIATION_RECHECK_MS = 10 * 60 * 1000;
 const AUTH_THROTTLE_WINDOW_MINUTES = 15;
 const LOGIN_FAILED_LIMIT = 5;
 const LOGIN_IP_ATTEMPT_LIMIT = 60;
+const LOGIN_MFA_ISSUANCE_LIMIT = 5;
 const PASSWORD_RESET_PAIR_LIMIT = 3;
 const PASSWORD_RESET_ACCOUNT_LIMIT = 3;
 const BOOTSTRAP_ATTEMPT_LIMIT = 10;
@@ -194,6 +199,7 @@ const STRIPE_PORTAL_IP_LIMIT = 10;
 const STRIPE_PORTAL_CUSTOMER_LIMIT = 5;
 const STRIPE_PORTAL_AGGREGATE_LIMIT = 100;
 const STRIPE_PORTAL_PATH = "/api/donations/stripe/portal";
+const STRICT_TRANSPORT_SECURITY = "max-age=31536000";
 
 // Public donation endpoints parse untrusted JSON before validation and rate-limit
 // admission. Cap bodies at 16 KiB (normal payloads are a few hundred bytes) so an
@@ -273,8 +279,108 @@ async function rateLimitKey(value: string | null): Promise<string> {
   return sha256Hex(utf8Bytes(value?.trim() || "unknown"));
 }
 
+async function providerCreationClientKeys(clientIp: string | null): Promise<{
+  clientKeyHash: string;
+  legacyClientKeyHash: string;
+}> {
+  const [clientKeyHash, legacyClientKeyHash] = await Promise.all([
+    rateLimitKey(providerCreationRateIdentity(clientIp)),
+    rateLimitKey(clientIp)
+  ]);
+  return { clientKeyHash, legacyClientKeyHash };
+}
+
+function loginMfaUnavailableResponse(): Response {
+  return jsonResponse(
+    {
+      error: "login_mfa_unavailable",
+      message: "No se pudo enviar el código de verificación. Intente de nuevo en unos minutos."
+    },
+    { status: 503 }
+  );
+}
+
 function intentThrottleExpiresIso(): string {
   return new Date(Date.now() + INTENT_THROTTLE_WINDOW_MINUTES * 60_000).toISOString();
+}
+
+function providerCreationClientLimitedResponse(): Response {
+  return jsonResponse(
+    {
+      error: "too_many_attempts",
+      message: "Demasiados intentos. Espere 15 minutos e intente de nuevo."
+    },
+    { status: 429, headers: { "Cache-Control": "no-store" } }
+  );
+}
+
+async function providerCreationLimitedResponse(
+  ctx: ApiRouteContext,
+  provider: "WOMPI" | "STRIPE",
+  claim: Extract<
+    Awaited<ReturnType<Repository["claimProviderCreationBudget"]>>,
+    { kind: "LIMITED" }
+  >,
+  now: string
+): Promise<Response> {
+  if (claim.scope === "CLIENT") {
+    return providerCreationClientLimitedResponse();
+  }
+  const capacityClaim = claim;
+  const limit = capacityClaim.scope === "GLOBAL"
+    ? PROVIDER_CREATION_GLOBAL_LIMIT
+    : PROVIDER_CREATION_PROVIDER_LIMIT;
+  const windowMs = INTENT_THROTTLE_WINDOW_MINUTES * 60_000;
+  const bucketStart = new Date(
+    Math.floor(Date.parse(now) / windowMs) * windowMs
+  ).toISOString();
+  const entityId = capacityClaim.scope === "GLOBAL"
+    ? `global:${bucketStart}`
+    : `${provider.toLowerCase()}:${bucketStart}`;
+  const evidenceTask = (async () => {
+    try {
+      await ctx.repo.createAuditIfAbsent({
+        action: "PROVIDER_CREATION_CAPACITY_EXHAUSTED",
+        entityType: "provider_creation_capacity",
+        entityId,
+        summary: "Capacidad temporal de creación de entregas agotada",
+        metadata: {
+          scope: capacityClaim.scope,
+          provider,
+          windowMinutes: INTENT_THROTTLE_WINDOW_MINUTES,
+          limit
+        }
+      });
+    } catch (error) {
+      logWorkerError(ctx.env, "provider_creation_capacity_audit_failed", error);
+    }
+    try {
+      await sendOperationalAlert(ctx.env, ctx.repo, {
+        kind: "PROVIDER_CREATION_CAPACITY_EXHAUSTED",
+        title: "Capacidad temporal de entregas agotada",
+        detail: capacityClaim.scope === "GLOBAL"
+          ? `El límite global de ${limit} creaciones en ${INTENT_THROTTLE_WINDOW_MINUTES} minutos fue alcanzado.`
+          : `El límite de ${provider} de ${limit} creaciones en ${INTENT_THROTTLE_WINDOW_MINUTES} minutos fue alcanzado.`,
+        entityType: "provider_creation_capacity",
+        entityId,
+        incidentId: entityId
+      });
+    } catch (error) {
+      logWorkerError(ctx.env, "provider_creation_capacity_alert_failed", error);
+    }
+  })();
+  if (ctx.executionContext) {
+    ctx.executionContext.waitUntil(evidenceTask);
+  } else {
+    await evidenceTask;
+  }
+  return jsonResponse(
+    {
+      error: "donation_service_busy",
+      message: "No pudimos preparar su entrega en este momento. Intente de nuevo en unos minutos."
+    },
+    { status: 503, headers: { "Cache-Control": "no-store" } }
+  );
 }
 
 async function listAuditForUser(
@@ -430,47 +536,57 @@ function emergencyDonationShutdownResponse(request: Request, env: Env, url: URL)
   });
 }
 
+async function handleFetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
+  try {
+    const url = new URL(request.url);
+    const shutdownResponse = emergencyDonationShutdownResponse(request, env, url);
+    if (shutdownResponse) {
+      return shutdownResponse;
+    }
+    if (url.pathname.startsWith("/api/")) {
+      return await handleApi(request, env, url, ctx);
+    }
+    if (url.pathname === "/webhooks/wompi") {
+      return await handleWompiWebhook(request, env);
+    }
+    if (url.pathname === "/webhooks/stripe") {
+      return await handleStripeWebhook(request, env, ctx);
+    }
+    const documentRedirect = redirectToCanonicalDocument(env, url);
+    if (documentRedirect) {
+      return documentRedirect;
+    }
+    return documentResponseWithSecurityHeaders(await env.ASSETS.fetch(request));
+  } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      return jsonResponse({ error: "request_body_too_large", message: "La solicitud es demasiado grande." }, { status: 413 });
+    }
+    if (error instanceof InvalidJsonBodyError) {
+      return jsonResponse({ error: "invalid_json_body", message: "La solicitud no contiene JSON válido." }, { status: 400 });
+    }
+    if (error instanceof AuthError) {
+      return jsonResponse({ error: "auth_error", message: error.message }, { status: error.status });
+    }
+    if (error instanceof EnvironmentNotAllowedError) {
+      return jsonResponse({ error: error.code, message: error.message }, { status: 409 });
+    }
+    if (error instanceof PaymentCollectionDisabledError) {
+      return jsonResponse({ error: error.code, message: error.message }, { status: 503 });
+    }
+    logWorkerError(env, "unhandled_worker_request_error", error);
+    return jsonResponse({ error: "internal_error", message: "Ocurrió un error interno." }, { status: 500 });
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
-    try {
-      const url = new URL(request.url);
-      const shutdownResponse = emergencyDonationShutdownResponse(request, env, url);
-      if (shutdownResponse) {
-        return shutdownResponse;
-      }
-      if (url.pathname.startsWith("/api/")) {
-        return await handleApi(request, env, url, ctx);
-      }
-      if (url.pathname === "/webhooks/wompi") {
-        return await handleWompiWebhook(request, env);
-      }
-      if (url.pathname === "/webhooks/stripe") {
-        return await handleStripeWebhook(request, env, ctx);
-      }
-      const documentRedirect = redirectToCanonicalDocument(env, url);
-      if (documentRedirect) {
-        return documentRedirect;
-      }
-      return documentResponseWithSecurityHeaders(await env.ASSETS.fetch(request));
-    } catch (error) {
-      if (error instanceof RequestBodyTooLargeError) {
-        return jsonResponse({ error: "request_body_too_large", message: "La solicitud es demasiado grande." }, { status: 413 });
-      }
-      if (error instanceof InvalidJsonBodyError) {
-        return jsonResponse({ error: "invalid_json_body", message: "La solicitud no contiene JSON válido." }, { status: 400 });
-      }
-      if (error instanceof AuthError) {
-        return jsonResponse({ error: "auth_error", message: error.message }, { status: error.status });
-      }
-      if (error instanceof EnvironmentNotAllowedError) {
-        return jsonResponse({ error: error.code, message: error.message }, { status: 409 });
-      }
-      if (error instanceof PaymentCollectionDisabledError) {
-        return jsonResponse({ error: error.code, message: error.message }, { status: 503 });
-      }
-      logWorkerError(env, "unhandled_worker_request_error", error);
-      return jsonResponse({ error: "internal_error", message: "Ocurrió un error interno." }, { status: 500 });
+    const response = await handleFetch(request, env, ctx);
+    if (deploymentEnvironmentPolicy(env).appEnv !== "production") {
+      return response;
     }
+    const wrappedResponse = new Response(response.body, response);
+    wrappedResponse.headers.set("Strict-Transport-Security", STRICT_TRANSPORT_SECURITY);
+    return wrappedResponse;
   },
 
   async queue(batch: MessageBatch<IssuanceMessage>, env: Env): Promise<void> {
@@ -639,6 +755,7 @@ async function handleScheduled(event: ScheduledEvent, env: Env): Promise<void> {
   const now = nowIso();
   await repo.deleteExpiredLoginRateLimits(now);
   await repo.deleteExpiredSecurityRateLimitClaims(now);
+  await repo.deleteExpiredLoginStepUpChallenges(now);
   if (env.STRIPE_MOCK_MODE === "1" || env.STRIPE_RESTRICTED_KEY?.trim()) {
     try {
       for (let processed = 0; processed < 25; processed += 1) {
@@ -906,6 +1023,9 @@ async function handleWompiWebhook(request: Request, env: Env): Promise<Response>
     insertedAction: "WOMPI_RECEIVED",
     duplicateAction: "WOMPI_DUPLICATE"
   });
+  if (ingested.conflict) {
+    return jsonResponse({ error: "wompi_event_conflict" }, { status: 409 });
+  }
   return jsonResponse({
     ok: true,
     wompiEventId: ingested.wompiEventId,
@@ -1027,21 +1147,49 @@ async function ingestTrustedWompiPayload(
   inserted: boolean;
   queued: boolean;
   environmentAllowed: boolean;
+  conflict: boolean;
 }> {
   // The signed webhook or authenticated payment-link response remains the event's
   // fiscal environment, but the deployment capability decides whether this Worker
   // may issue it. Incompatible events are retained as evidence and quarantined.
-  const environment = ambienteFromWompi(payload);
+  const incomingEnvironment = ambienteFromWompi(payload);
+  const insertion = await repo.insertWompiEvent(
+    payload,
+    rawBody,
+    headers,
+    incomingEnvironment
+  );
+  if (insertion.kind === "conflict") {
+    await repo.createAudit({
+      action: "WOMPI_EVENT_CONFLICT",
+      entityType: "wompi_event",
+      entityId: insertion.record.id,
+      summary: "Evento Wompi rechazado por conflicto con el registro canónico",
+      metadata: {
+        reason: insertion.reason,
+        fields: insertion.fields
+      }
+    });
+    return {
+      wompiEventId: insertion.record.id,
+      inserted: false,
+      queued: false,
+      environmentAllowed: false,
+      conflict: true
+    };
+  }
+  const { record, canonicalPayload } = insertion;
+  const inserted = insertion.kind === "inserted";
+  const environment = ambienteFromWompi(canonicalPayload);
   const policy = deploymentEnvironmentPolicy(env);
   const environmentAllowed = policy.allowedAmbiente === environment;
-  const { record, inserted } = await repo.insertWompiEvent(payload, rawBody, headers, environment);
   const action = inserted ? source.insertedAction : source.duplicateAction;
   if (action) {
     await repo.createAudit({
       action,
       entityType: "wompi_event",
       entityId: record.id,
-      summary: `${payload.IdTransaccion} ${payload.ResultadoTransaccion}`,
+      summary: `${canonicalPayload.IdTransaccion} ${canonicalPayload.ResultadoTransaccion}`,
       metadata: source.auditMetadata
     });
   }
@@ -1064,10 +1212,10 @@ async function ingestTrustedWompiPayload(
   // Runs on replays too (markIntentPaid is idempotent). Wrapped defensively — a
   // bad/unknown intent id must never break webhook processing.
   if (environmentAllowed) {
-    await markIntentPaidFromWebhook(env, repo, payload);
+    await markIntentPaidFromWebhook(env, repo, canonicalPayload);
   }
   let queued = false;
-  if (environmentAllowed && isApprovedDonation(payload)) {
+  if (environmentAllowed && isApprovedDonation(canonicalPayload)) {
     // Claim on duplicates too. If a previous delivery inserted the event but failed
     // before queueing it, the CAS repairs that gap; an already-queued event returns null.
     const attemptId = await repo.claimInitialWompiIssuanceAttempt(record.id);
@@ -1080,7 +1228,8 @@ async function ingestTrustedWompiPayload(
     wompiEventId: record.id,
     inserted,
     queued,
-    environmentAllowed
+    environmentAllowed,
+    conflict: false
   };
 }
 
@@ -1312,25 +1461,36 @@ async function handleCreateDonationIntent(ctx: ApiRouteContext): Promise<Respons
     throw error;
   }
   const claimNow = nowIso();
-  const rateLimitClaimId = await ctx.repo.claimDonationIntentRateLimit(
-    await rateLimitKey(clientIp),
-    clientIp,
-    claimNow,
-    intentThrottleSinceIso(),
-    intentThrottleExpiresIso(),
-    INTENT_THROTTLE_LIMIT
-  );
-  if (!rateLimitClaimId) {
-    return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
+  const clientKeys = await providerCreationClientKeys(clientIp);
+  const providerClaim = await ctx.repo.claimProviderCreationBudget({
+    provider: "WOMPI",
+    ...clientKeys,
+    stripeRequestId: null,
+    now: claimNow,
+    cutoff: intentThrottleSinceIso(),
+    expiresAt: intentThrottleExpiresIso(),
+    clientLimit: PROVIDER_CREATION_CLIENT_LIMIT,
+    providerLimit: PROVIDER_CREATION_PROVIDER_LIMIT,
+    globalLimit: PROVIDER_CREATION_GLOBAL_LIMIT
+  });
+  if (providerClaim.kind === "LIMITED") {
+    return providerCreationLimitedResponse(ctx, "WOMPI", providerClaim, claimNow);
+  }
+  if (providerClaim.kind === "DUPLICATE") {
+    throw new Error("Wompi provider creation returned an impossible duplicate claim");
   }
   try {
     const created = draft
-      ? await createDraftDonationIntent(ctx.env, ctx.repo, input as ReturnType<typeof validateDraftIntentInput>, clientIp, rateLimitClaimId)
-      : await createDonationIntent(ctx.env, ctx.repo, input as ReturnType<typeof validateIntentInput>, clientIp, rateLimitClaimId);
+      ? await createDraftDonationIntent(ctx.env, ctx.repo, input as ReturnType<typeof validateDraftIntentInput>, clientIp, providerClaim.id)
+      : await createDonationIntent(ctx.env, ctx.repo, input as ReturnType<typeof validateIntentInput>, clientIp, providerClaim.id);
     return jsonResponse(created, { status: 201 });
   } catch (error) {
+    // The repository deletes only an unattached claim. Once the PENDING parent
+    // exists, readiness/provider failures retain their durable admission proof.
+    await ctx.repo.releaseUnusedProviderCreationClaim(providerClaim.id);
     if (error instanceof IntentLinkError) {
       // Intent stays PENDING and expires harmlessly on the cron sweep.
+      logWorkerError(ctx.env, "wompi_link_create_failed", error.cause ?? error);
       return jsonResponse({ error: "wompi_link_failed", message: "No se pudo generar el enlace de pago. Intente de nuevo en unos minutos." }, { status: 502 });
     }
     throw error;
@@ -1381,54 +1541,72 @@ async function handleCreateStripeCheckout(ctx: ApiRouteContext): Promise<Respons
   } else {
     const clientIp = clientIpFrom(ctx.request);
     const claimNow = nowIso();
-    const rateLimitClaimId = await ctx.repo.claimDonationIntentRateLimit(
-      await rateLimitKey(clientIp),
-      clientIp,
-      claimNow,
-      intentThrottleSinceIso(),
-      intentThrottleExpiresIso(),
-      INTENT_THROTTLE_LIMIT
-    );
-    if (!rateLimitClaimId) {
-      return jsonResponse(
-        { error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." },
-        { status: 429 }
-      );
-    }
-
-    const checkoutId = newId("stripe_checkout");
-    const request = await buildStripeCheckoutCreationRequest(
-      ctx,
-      checkoutId,
-      input,
-      stripeConfiguration
-    );
-    const reservation = await ctx.repo.reserveStripeCheckout({
-      id: checkoutId,
-      requestId: input.requestId,
-      requestFingerprint: request.fingerprint,
-      frequency: input.frequency,
-      giftType: input.giftType,
-      amountCents: input.amountCents,
-      livemode: stripeConfiguration.livemode,
-      rateLimitClaimId,
-      now: claimNow
+    const clientKeys = await providerCreationClientKeys(clientIp);
+    const providerClaim = await ctx.repo.claimProviderCreationBudget({
+      provider: "STRIPE",
+      ...clientKeys,
+      stripeRequestId: input.requestId,
+      now: claimNow,
+      cutoff: intentThrottleSinceIso(),
+      expiresAt: intentThrottleExpiresIso(),
+      clientLimit: PROVIDER_CREATION_CLIENT_LIMIT,
+      providerLimit: PROVIDER_CREATION_PROVIDER_LIMIT,
+      globalLimit: PROVIDER_CREATION_GLOBAL_LIMIT
     });
-    if (reservation.kind !== "CREATED") {
-      if (reservation.record.rate_limit_claim_id !== rateLimitClaimId) {
-        await ctx.repo.releaseUnusedDonationIntentRateLimitClaim(rateLimitClaimId);
-      }
+    if (providerClaim.kind === "LIMITED") {
+      return providerCreationLimitedResponse(ctx, "STRIPE", providerClaim, claimNow);
+    }
+    if (providerClaim.kind === "DUPLICATE") {
+      const concurrent = await ctx.repo.getStripeCheckoutByRequestId(input.requestId);
+      if (!concurrent) return stripeCheckoutCreationInProgressResponse();
       const plan = await prepareExistingStripeCheckoutCreation(
         ctx,
-        reservation.record,
+        concurrent,
         input,
         stripeConfiguration
       );
       if (plan instanceof Response) return plan;
       ({ checkout, params } = plan);
     } else {
-      checkout = reservation.record;
-      params = request.params;
+      const checkoutId = newId("stripe_checkout");
+      let request: Awaited<ReturnType<typeof buildStripeCheckoutCreationRequest>>;
+      let reservation: Awaited<ReturnType<Repository["reserveStripeCheckout"]>>;
+      try {
+        request = await buildStripeCheckoutCreationRequest(
+          ctx,
+          checkoutId,
+          input,
+          stripeConfiguration
+        );
+        reservation = await ctx.repo.reserveStripeCheckout({
+          id: checkoutId,
+          requestId: input.requestId,
+          requestFingerprint: request.fingerprint,
+          frequency: input.frequency,
+          giftType: input.giftType,
+          amountCents: input.amountCents,
+          livemode: stripeConfiguration.livemode,
+          providerCreationClaimId: providerClaim.id,
+          now: claimNow
+        });
+      } catch (error) {
+        await ctx.repo.releaseUnusedProviderCreationClaim(providerClaim.id);
+        throw error;
+      }
+      if (reservation.kind !== "CREATED") {
+        await ctx.repo.releaseUnusedProviderCreationClaim(providerClaim.id);
+        const plan = await prepareExistingStripeCheckoutCreation(
+          ctx,
+          reservation.record,
+          input,
+          stripeConfiguration
+        );
+        if (plan instanceof Response) return plan;
+        ({ checkout, params } = plan);
+      } else {
+        checkout = reservation.record;
+        params = request.params;
+      }
     }
   }
 
@@ -1502,6 +1680,9 @@ async function prepareExistingStripeCheckoutCreation(
     return existingStripeCheckoutResponse(ctx, existing, configuration);
   }
 
+  const definiteFailureRetry = existing.status === "FAILED"
+    && existing.creation_outcome_class === "DEFINITE_FAILURE";
+
   const request = await buildStripeCheckoutCreationRequest(ctx, existing.id, {
     requestId: existing.request_id,
     amountCents: existing.amount_cents,
@@ -1515,18 +1696,77 @@ async function prepareExistingStripeCheckoutCreation(
     return stripeCheckoutIndeterminateResponse();
   }
 
+  let definiteFailureAdmission: {
+    claim: Awaited<ReturnType<Repository["claimProviderCreationBudget"]>>;
+    id: string;
+  } | null = null;
+  if (definiteFailureRetry) {
+    const clientIp = clientIpFrom(ctx.request);
+    const claimNow = nowIso();
+    const clientKeys = await providerCreationClientKeys(clientIp);
+    const claim = await ctx.repo.claimProviderCreationBudget({
+      provider: "STRIPE",
+      ...clientKeys,
+      stripeRequestId: existing.request_id,
+      now: claimNow,
+      cutoff: intentThrottleSinceIso(),
+      expiresAt: intentThrottleExpiresIso(),
+      clientLimit: PROVIDER_CREATION_CLIENT_LIMIT,
+      providerLimit: PROVIDER_CREATION_PROVIDER_LIMIT,
+      globalLimit: PROVIDER_CREATION_GLOBAL_LIMIT
+    });
+    if (claim.kind === "LIMITED") {
+      return providerCreationLimitedResponse(ctx, "STRIPE", claim, claimNow);
+    }
+    if (
+      claim.kind === "DUPLICATE"
+      && claim.id !== existing.provider_creation_claim_id
+    ) {
+      return stripeCheckoutCreationInProgressResponse();
+    }
+    definiteFailureAdmission = { claim, id: claim.id };
+  }
+
   const reclaimed = await ctx.repo.reclaimStripeCheckoutCreation({
     id: existing.id,
     requestFingerprint: request.fingerprint,
-    now: nowIso()
+    now: nowIso(),
+    definiteFailureAdmission: definiteFailureAdmission ? {
+      admittedProviderCreationClaimId: definiteFailureAdmission.id,
+      expectedProviderCreationClaimId: existing.provider_creation_claim_id,
+      expectedIdempotencyGeneration: existing.idempotency_generation
+    } : undefined
   });
   if (!reclaimed) {
+    if (definiteFailureAdmission?.claim.kind === "CLAIMED") {
+      await releaseLostStripeRetryClaim(ctx, definiteFailureAdmission.id);
+    }
     const current = await ctx.repo.getStripeCheckoutById(existing.id);
     return current
       ? existingStripeCheckoutResponse(ctx, current, configuration)
       : stripeCheckoutIndeterminateResponse();
   }
   return { checkout: reclaimed, params: request.params };
+}
+
+async function releaseLostStripeRetryClaim(
+  ctx: ApiRouteContext,
+  claimId: string
+): Promise<void> {
+  try {
+    await ctx.repo.releaseUnusedProviderCreationClaim(claimId);
+    return;
+  } catch (error) {
+    logWorkerError(ctx.env, "stripe_checkout_claim_cleanup_retry", error);
+  }
+
+  try {
+    await ctx.repo.releaseUnusedProviderCreationClaim(claimId);
+  } catch (error) {
+    // The claim is unattached and expires after the fixed admission window. A
+    // later cleanup sweep removes it; never retry in a loop or reach Stripe.
+    logWorkerError(ctx.env, "stripe_checkout_claim_cleanup_deferred", error);
+  }
 }
 
 async function buildStripeCheckoutCreationRequest(
@@ -1641,6 +1881,16 @@ async function existingStripeCheckoutResponse(
       { status: 502, headers: { "Cache-Control": "no-store" } }
     );
   }
+}
+
+function stripeCheckoutCreationInProgressResponse(): Response {
+  return jsonResponse(
+    {
+      error: "stripe_checkout_in_progress",
+      message: "Su entrega se está preparando. Inténtelo de nuevo en un momento."
+    },
+    { status: 409, headers: { "Cache-Control": "no-store" } }
+  );
 }
 
 async function claimStripeProviderRecoveryRead(
@@ -2116,15 +2366,101 @@ async function handleLogin(ctx: ApiRouteContext): Promise<Response> {
     // (email, caller IP) so only the abusing IP is throttled, not the victim.
     return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
   }
+  const accountFailures = await ctx.repo.countRecentAccountLoginFailures(
+    normalizedEmail,
+    authThrottleSinceIso()
+  );
   let result;
   try {
-    result = await ctx.auth.login(body.email, body.password);
+    const credentials = await ctx.auth.verifyLoginCredentials(body.email, body.password);
+    if (accountFailures >= LOGIN_FAILED_LIMIT) {
+      const issuanceAccepted = await ctx.repo.claimLoginAttempt(
+        await rateLimitKey(
+          `login-step-up-issuance-v1:${credentials.userId}:${credentials.expectedAuthGeneration}`
+        ),
+        claimNow,
+        authThrottleSinceIso(),
+        authThrottleExpiresIso(),
+        LOGIN_MFA_ISSUANCE_LIMIT
+      );
+      if (!issuanceAccepted) {
+        return loginMfaUnavailableResponse();
+      }
+      const issued = await ctx.auth.issueLoginStepUpChallenge(credentials);
+      try {
+        const branding = await loadEmailBranding(ctx.repo, ctx.env);
+        await new EmailService(ctx.env, DEFAULT_EMAIL_TEMPLATES, branding).sendLoginStepUpCode(
+          issued.user.email,
+          issued.user.name,
+          issued.code,
+          LOGIN_STEP_UP_TTL_MINUTES
+        );
+      } catch {
+        await ctx.auth.invalidateLoginStepUpChallenge(
+          issued.response.challengeId,
+          issued.response.continuationToken
+        );
+        await ctx.repo.createAudit({
+          action: "LOGIN_MFA_EMAIL_FAILED",
+          entityType: "user",
+          entityId: issued.user.id,
+          summary: "No se pudo enviar el código de verificación"
+        });
+        return loginMfaUnavailableResponse();
+      }
+      await ctx.repo.createAudit({
+        actorType: "USER",
+        actorId: issued.user.id,
+        action: "LOGIN_MFA_CHALLENGE_ISSUED",
+        entityType: "user",
+        entityId: issued.user.id,
+        summary: issued.user.email
+      });
+      return jsonResponse(issued.response, { status: 202 });
+    }
+    result = await ctx.auth.createSession(credentials);
   } catch (error) {
     await ctx.repo.createAudit({ action: "LOGIN_FAILED", entityType: "user", entityId: normalizedEmail, summary: error instanceof Error ? error.message : String(error) });
     throw error;
   }
   await ctx.repo.createAudit({ actorType: "USER", actorId: result.user.id, action: "LOGIN", entityType: "user", entityId: result.user.id, summary: result.user.email });
   return jsonResponse(result);
+}
+
+async function handleLoginMfa(ctx: ApiRouteContext): Promise<Response> {
+  const rejected = rejectUnsafePublicJsonMutation(ctx.request, ctx.url);
+  if (rejected) return rejected;
+  const body = (await readJsonObject(ctx.request, {
+    limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES,
+    malformed: "throw"
+  })) as { challengeId?: unknown; continuationToken?: unknown; code?: unknown };
+  try {
+    const result = await ctx.auth.completeLoginStepUpChallenge({
+      challengeId: String(body.challengeId ?? ""),
+      continuationToken: String(body.continuationToken ?? ""),
+      code: String(body.code ?? "")
+    });
+    await ctx.repo.createAudit({
+      actorType: "USER",
+      actorId: result.user.id,
+      action: "LOGIN",
+      entityType: "user",
+      entityId: result.user.id,
+      summary: result.user.email
+    });
+    return jsonResponse(result);
+  } catch (error) {
+    if (error instanceof InvalidLoginStepUpChallengeError) {
+      return jsonResponse(
+        {
+          error: "invalid_login_mfa_challenge",
+          message: error.message
+        },
+        { status: 400 }
+      );
+    }
+    throw error;
+  }
 }
 
 async function handleLogout(ctx: ApiRouteContext): Promise<Response> {
@@ -2939,6 +3275,9 @@ async function handleAudit(ctx: ApiRouteContext): Promise<Response> {
   const actor = ctx.actor!;
   const entityType = ctx.url.searchParams.get("entityType");
   const entityId = ctx.url.searchParams.get("entityId");
+  if (entityType === "user" && !hasAccountAuditAudience(actor.role)) {
+    return jsonResponse({ error: "account_audit_forbidden" }, { status: 403 });
+  }
   if (entityType && entityId) {
     // Entity-scoped history keeps its original (uncapped-page) shape.
     return jsonResponse({ audit: await listAuditForUser(ctx.repo, actor, entityType, entityId), nextCursor: null });
@@ -3225,6 +3564,7 @@ const publicRoutes: Array<Route<ApiRouteContext>> = [
 const authRoutes: Array<Route<ApiRouteContext>> = [
   { method: "POST", pattern: "/api/auth/bootstrap-owner", handler: handleBootstrapOwner },
   { method: "POST", pattern: "/api/auth/login", handler: handleLogin },
+  { method: "POST", pattern: "/api/auth/login/mfa", handler: handleLoginMfa },
   { method: "POST", pattern: "/api/auth/logout", handler: handleLogout },
   { method: "POST", pattern: "/api/auth/password-reset/request", handler: handlePasswordResetRequest },
   { method: "POST", pattern: "/api/auth/password-reset/confirm", handler: handlePasswordResetConfirm }
@@ -3882,7 +4222,7 @@ async function contingencyState(repo: Repository, user: AuthUser): Promise<Recor
     : (await repo.listDteDocuments({ status: "CONTINGENCY_PENDING", limit: 100 })).documents;
   const batches = activeRaw ? await repo.listContingencyBatches(String(activeRaw.id)) : await repo.listContingencyBatches();
   const batchLines = activeRaw ? await repo.listContingencyBatchLines({ periodId: String(activeRaw.id) }) : await repo.listContingencyBatchLines();
-  const events = await repo.listDteEventsByType("CONTINGENCIA");
+  const events = projectContingencyEvents(await repo.listDteEventsByType("CONTINGENCIA"), user.role);
   const periods = periodsRaw.map(contingencyPeriodView);
   const active = activeRaw ? contingencyPeriodView(activeRaw) : null;
   const countPeriodStatus = (status: string) => periods.filter((period) => period.status === status).length;

@@ -1101,7 +1101,7 @@ async function seedGift(repo: Repository): Promise<void> {
     giftType: "TITHE",
     amountCents: 5000,
     livemode: false,
-    rateLimitClaimId: null,
+    providerCreationClaimId: "provider_claim_seed",
     now: "2026-08-10T12:00:00.000Z"
   });
   await repo.recordStripeGiftAndAcknowledgment({

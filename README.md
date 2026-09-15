@@ -202,7 +202,7 @@ DiezmosSV/
 │   ├── client/                 # React + Vite admin panel, /donar, fonts, assets
 │   └── shared/                 # Catalogs · DUI · NIT · legal windows · password policy
 │                               # fiscal corrections · checkout · money · email
-├── migrations/                 # D1 schema (incremental, append-only 0001…0044)
+├── migrations/                 # D1 schema (incremental, append-only 0001…0047)
 ├── DTE/svfe-json-schemas/      # MH-bundled JSON schemas for validation
 ├── docs/                       # Deploy/UAT · operator runbook · retention-restore
 │                               # fiscal-claim cutover/reconciliation · pre-CDE recovery
@@ -588,7 +588,7 @@ selected private config and are duplicated per Wrangler environment:
 | `ARCHIVE` (binding) | R2 bucket binding for the monthly legal-retention export and the white-label logo objects. The committed example config names `diezmossv-local-archive-example`, `diezmossv-staging-archive-example`, and `diezmossv-production-archive-example`; real bucket names belong only in the selected private config. |
 | `EMAIL_ARBITRARY_RECIPIENTS` | Optional `"true"` marker set after Cloudflare Email Sending is confirmed able to reach external donor addresses. The committed example already sets it for `staging`; local and production leave it unset. |
 | `DONATION_INTAKE_DISABLED` | Emergency kill switch for new public intake. When exactly `"true"`, Wompi intent mutations and `POST /api/donations/stripe/checkout` return `503 donation_intake_disabled`; `/`, `/donar`, and `/donar/gracias` serve an empty locked-down document. Stripe's result page, status reads, webhook, acknowledgments, and Billing Portal remain available so an existing or monthly donor is not stranded. The Wompi webhook, issuance pipeline, and admin panel also keep working. The committed example sets it to `"true"` for `production`; unset or any other value leaves intake open. |
-| `MH_AUTH_URL_*` · `MH_RECEPCION_URL_*` · `MH_ANULACION_URL_*` | MH endpoints available only for the deployment's credential lane. `MH_AUTH_URL_TEST_FALLBACK` is the narrow central-auth fallback for TEST accounts after MH code 106; it is not a PROD transmission capability. |
+| `MH_AUTH_URL_*` · `MH_RECEPCION_URL_*` · `MH_ANULACION_URL_*` | MH endpoints available only for the deployment's credential lane. `MH_AUTH_URL_TEST_FALLBACK` may be absent/empty, the exact official TEST auth URL (a no-op), or the exact central auth URL `https://api.dtes.mh.gob.sv/seguridad/auth` for TEST accounts after MH code 106. Every other value is rejected before Wompi collection and before fallback credentials are sent; it is not a PROD transmission capability. |
 | `MH_USER_AGENT` | User-Agent header sent to MH. |
 | `EMISOR_CONFIG_JSON` | Demo/local issuer config lives in the selected private env file; set the real remote value as a Cloudflare secret. |
 | `STRIPE_RESTRICTED_KEY` | Server-only `rk_test_…` (staging) or `rk_live_…` (production) key with least privilege for Checkout Sessions and Billing Portal. Broad `sk_…` keys are rejected. |
@@ -1037,7 +1037,7 @@ The safety model is the fiscal-claim model applied to a repair path:
 ## 🗄 Data model
 
 <details>
-<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0044)</strong></summary>
+<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0047)</strong></summary>
 
 <br/>
 
@@ -1065,8 +1065,9 @@ The safety model is the fiscal-claim model applied to a repair path:
 | `stripe_invoice_settlement_retention_generations` | Internal monotonic membership ledger for monthly-invoice convergence snapshots. It is not an archive payload and is rebuilt automatically on restore. |
 | `contingency_batches` · `contingency_batch_lines` | Historical MH contingency batch submissions and per-CDE results (read-only). |
 | `app_settings` | Runtime settings (emission environment, email templates, branding, alert email). |
-| `users` · `sessions` · `password_reset_tokens` | Authentication, RBAC, and self-service password reset. |
-| `login_rate_limits` · `security_rate_limit_claims` | D1-backed rate limiting for login, password reset, and public donation intents, with claim provenance recorded on the rows they admit. |
+| `users` · `sessions` · `password_reset_tokens` · `login_step_up_challenges` | Authentication, RBAC, self-service password reset, and short-lived hashed account step-up verification challenges. |
+| `login_rate_limits` · `security_rate_limit_claims` | D1-backed rate limiting for login, password reset, and donor-data capabilities. |
+| `provider_creation_claims` | Atomic 15-minute client, provider, and global budgets for new Wompi links and Stripe Checkout state. IPv6 clients share a normalized `/64`; parent rows retain claim provenance after the expiring ledger is swept. |
 
 Foreign keys are enabled (`PRAGMA foreign_keys = ON`). Access is raw SQL via
 `src/worker/storage/repository.ts` — no ORM.

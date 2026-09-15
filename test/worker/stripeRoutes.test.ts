@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
+import { EmailService } from "../../src/worker/services/email";
 import type { Env } from "../../src/worker/types";
 import { env, InMemoryD1 } from "./support/inMemoryD1";
 import { migratedDatabase } from "./support/migratedDatabase";
@@ -30,6 +31,7 @@ describe("Stripe public donation routes", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     database.close();
   });
@@ -60,8 +62,17 @@ describe("Stripe public donation routes", () => {
       "SELECT COUNT(*) AS count FROM stripe_checkout_sessions"
     ).get()).toEqual({ count: 1 });
     expect(database.prepare(
-      "SELECT COUNT(*) AS count FROM security_rate_limit_claims WHERE scope = 'donation_intent'"
+      "SELECT COUNT(*) AS count FROM provider_creation_claims WHERE provider = 'STRIPE'"
     ).get()).toEqual({ count: 1 });
+    const reservationEvidence = database.prepare(
+      `SELECT rate_limit_claim_id, provider_creation_claim_id
+         FROM stripe_checkout_sessions WHERE request_id = ?`
+    ).get(requestId) as {
+      rate_limit_claim_id: string | null;
+      provider_creation_claim_id: string | null;
+    };
+    expect(reservationEvidence.rate_limit_claim_id).toBeNull();
+    expect(reservationEvidence.provider_creation_claim_id).toMatch(/^provider_create_/);
     expect(database.prepare("SELECT COUNT(*) AS count FROM donation_intents").get())
       .toEqual({ count: 0 });
 
@@ -80,6 +91,24 @@ describe("Stripe public donation routes", () => {
       giftType: "offering"
     });
     expect(giftTypeConflict.response.status).toBe(409);
+  });
+
+  it("releases a Stripe provider claim when reservation persistence fails", async () => {
+    workerEnv = { ...workerEnv, DB: withFailingStripeReservation(database) };
+
+    const result = await createCheckout(workerEnv, {
+      requestId,
+      amount: 50,
+      frequency: "once"
+    });
+
+    expect(result.response.status).toBe(500);
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM stripe_checkout_sessions"
+    ).get()).toEqual({ count: 0 });
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM provider_creation_claims WHERE provider = 'STRIPE'"
+    ).get()).toEqual({ count: 0 });
   });
 
   it("reclaims a failed Session reservation with the same request identity", async () => {
@@ -112,7 +141,7 @@ describe("Stripe public donation routes", () => {
       error_code: null
     });
     expect(database.prepare(
-      "SELECT COUNT(*) AS count FROM security_rate_limit_claims WHERE scope = 'donation_intent'"
+      "SELECT COUNT(*) AS count FROM provider_creation_claims WHERE provider = 'STRIPE'"
     ).get()).toEqual({ count: 1 });
   });
 
@@ -146,7 +175,7 @@ describe("Stripe public donation routes", () => {
       error_code: null
     });
     expect(database.prepare(
-      "SELECT COUNT(*) AS count FROM security_rate_limit_claims WHERE scope = 'donation_intent'"
+      "SELECT COUNT(*) AS count FROM provider_creation_claims WHERE provider = 'STRIPE'"
     ).get()).toEqual({ count: 1 });
   });
 
@@ -223,6 +252,14 @@ describe("Stripe public donation routes", () => {
 
     const first = await createCheckout(proxyEnv, { requestId, amount: 50, frequency: "once" });
     expect(first.response.status).toBe(502);
+    const retainedClaim = database.prepare(
+      `SELECT claims.id
+         FROM provider_creation_claims AS claims
+         JOIN stripe_checkout_sessions AS checkout
+           ON checkout.provider_creation_claim_id = claims.id
+        WHERE checkout.request_id = ?`
+    ).get(requestId) as { id: string } | undefined;
+    expect(retainedClaim?.id).toMatch(/^provider_create_/);
     const second = await createCheckout(proxyEnv, { requestId, amount: 50, frequency: "once" });
     expect(second.response.status).toBe(502);
     const third = await createCheckout(proxyEnv, { requestId, amount: 50, frequency: "once" });
@@ -451,6 +488,377 @@ describe("Stripe public donation routes", () => {
       creation_outcome_class: null,
       idempotency_generation: 2
     });
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM provider_creation_claims WHERE stripe_request_id = ?"
+    ).get(requestId)).toEqual({ count: 1 });
+  });
+
+  it("reuses an active attached claim for a definite retry without charging twice", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:00:00.000Z") });
+    seedDefiniteFailureCheckout(database, {
+      claimId: "active_retry_claim",
+      claimedAt: "2026-07-04T11:55:00.000Z",
+      expiresAt: "2026-07-04T12:10:00.000Z"
+    });
+    const providerFetch = stubSuccessfulStripeCreation();
+
+    const retry = await createCheckout(stripeProxyEnv(workerEnv), {
+      requestId,
+      amount: 50,
+      frequency: "once"
+    });
+
+    expect(retry.response.status).toBe(201);
+    expect(providerFetch).toHaveBeenCalledTimes(1);
+    expect(database.prepare(
+      `SELECT id, claimed_at, expires_at FROM provider_creation_claims
+        WHERE stripe_request_id = ?`
+    ).get(requestId)).toEqual({
+      id: "active_retry_claim",
+      claimed_at: "2026-07-04T11:55:00.000Z",
+      expires_at: "2026-07-04T12:10:00.000Z"
+    });
+    expect(database.prepare(
+      `SELECT status, idempotency_generation, provider_creation_claim_id
+         FROM stripe_checkout_sessions WHERE request_id = ?`
+    ).get(requestId)).toEqual({
+      status: "OPEN",
+      idempotency_generation: 2,
+      provider_creation_claim_id: "active_retry_claim"
+    });
+  });
+
+  it("admits a definite retry with a new claim after the expired claim was swept", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:16:00.000Z") });
+    seedDefiniteFailureCheckout(database, { claimId: "swept_retry_claim" });
+    const providerFetch = stubSuccessfulStripeCreation();
+
+    const retry = await createCheckout(stripeProxyEnv(workerEnv), {
+      requestId,
+      amount: 50,
+      frequency: "once"
+    });
+
+    expect(retry.response.status).toBe(201);
+    expect(providerFetch).toHaveBeenCalledTimes(1);
+    const claim = database.prepare(
+      `SELECT id, claimed_at, expires_at FROM provider_creation_claims
+        WHERE stripe_request_id = ?`
+    ).get(requestId) as { id: string; claimed_at: string; expires_at: string } | undefined;
+    expect(claim).toEqual({
+      id: expect.stringMatching(/^provider_create_/),
+      claimed_at: "2026-07-04T12:16:00.000Z",
+      expires_at: "2026-07-04T12:31:00.000Z"
+    });
+    expect(claim?.id).not.toBe("swept_retry_claim");
+    expect(database.prepare(
+      "SELECT provider_creation_claim_id FROM stripe_checkout_sessions WHERE request_id = ?"
+    ).get(requestId)).toEqual({ provider_creation_claim_id: claim?.id });
+  });
+
+  it("atomically refreshes an unswept expired claim before a definite retry", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:16:00.000Z") });
+    seedDefiniteFailureCheckout(database, {
+      claimId: "expired_retry_claim",
+      claimedAt: "2026-07-04T12:00:00.000Z",
+      expiresAt: "2026-07-04T12:15:00.000Z"
+    });
+    const providerFetch = stubSuccessfulStripeCreation();
+
+    const retry = await createCheckout(stripeProxyEnv(workerEnv), {
+      requestId,
+      amount: 50,
+      frequency: "once"
+    });
+
+    expect(retry.response.status).toBe(201);
+    expect(providerFetch).toHaveBeenCalledTimes(1);
+    expect(database.prepare(
+      `SELECT id, claimed_at, expires_at FROM provider_creation_claims
+        WHERE stripe_request_id = ?`
+    ).get(requestId)).toEqual({
+      id: "expired_retry_claim",
+      claimed_at: "2026-07-04T12:16:00.000Z",
+      expires_at: "2026-07-04T12:31:00.000Z"
+    });
+    expect(database.prepare(
+      `SELECT status, idempotency_generation, provider_creation_claim_id
+         FROM stripe_checkout_sessions WHERE request_id = ?`
+    ).get(requestId)).toEqual({
+      status: "OPEN",
+      idempotency_generation: 2,
+      provider_creation_claim_id: "expired_retry_claim"
+    });
+  });
+
+  it.each([
+    ["provider", 600],
+    ["global", 1000]
+  ] as const)("blocks a definite retry at the exhausted %s ceiling before Stripe", async (dimension, count) => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:16:00.000Z") });
+    seedDefiniteFailureCheckout(database, { claimId: `${dimension}_old_retry_claim` });
+    seedProviderCreationCapacity(database, dimension, count, "2026-07-04T12:16:00.000Z");
+    const providerFetch = stubSuccessfulStripeCreation();
+
+    const retry = await createCheckout(stripeProxyEnv(workerEnv), {
+      requestId,
+      amount: 50,
+      frequency: "once"
+    }, "198.51.100.250");
+
+    expect(retry.response.status).toBe(503);
+    expect(retry.body).toEqual({
+      error: "donation_service_busy",
+      message: "No pudimos preparar su entrega en este momento. Intente de nuevo en unos minutos."
+    });
+    expect(retry.response.headers.get("Cache-Control")).toBe("no-store");
+    expect(providerFetch).not.toHaveBeenCalled();
+    expect(database.prepare(
+      `SELECT status, idempotency_generation, provider_creation_claim_id
+         FROM stripe_checkout_sessions WHERE request_id = ?`
+    ).get(requestId)).toEqual({
+      status: "FAILED",
+      idempotency_generation: 1,
+      provider_creation_claim_id: `${dimension}_old_retry_claim`
+    });
+  });
+
+  it("admits and attaches only one claim across concurrent definite retries", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:16:00.000Z") });
+    seedDefiniteFailureCheckout(database, { claimId: "concurrent_old_retry_claim" });
+    const providerFetch = stubSuccessfulStripeCreation();
+    const synchronized = withSynchronizedStripeReservationReads(database);
+    synchronized.synchronizeNextPair();
+    const concurrentEnv = { ...stripeProxyEnv(workerEnv), DB: synchronized.db };
+
+    const results = await Promise.all([
+      createCheckout(concurrentEnv, { requestId, amount: 50, frequency: "once" }),
+      createCheckout(concurrentEnv, { requestId, amount: 50, frequency: "once" })
+    ]);
+
+    expect(results.map((result) => result.response.status).sort()).toEqual([201, 409]);
+    expect(providerFetch).toHaveBeenCalledTimes(1);
+    const claims = database.prepare(
+      "SELECT id FROM provider_creation_claims WHERE stripe_request_id = ?"
+    ).all(requestId) as Array<{ id: string }>;
+    expect(claims).toHaveLength(1);
+    expect(database.prepare(
+      `SELECT status, idempotency_generation, provider_creation_claim_id
+         FROM stripe_checkout_sessions WHERE request_id = ?`
+    ).get(requestId)).toEqual({
+      status: "OPEN",
+      idempotency_generation: 2,
+      provider_creation_claim_id: claims[0]?.id
+    });
+  });
+
+  it("releases an unattached fresh claim when the definite retry CAS loses", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:16:00.000Z") });
+    seedDefiniteFailureCheckout(database, { claimId: "lost_cas_old_retry_claim" });
+    const providerFetch = stubSuccessfulStripeCreation();
+    const losing = withLosingDefiniteRetryCas(database);
+
+    const retry = await createCheckout({
+      ...stripeProxyEnv(workerEnv),
+      DB: losing.db
+    }, {
+      requestId,
+      amount: 50,
+      frequency: "once"
+    });
+
+    expect(retry.response.status).toBe(409);
+    expect(retry.body).toMatchObject({ error: "stripe_checkout_unavailable" });
+    expect(providerFetch).not.toHaveBeenCalled();
+    expect(losing.releaseAttempts()).toBe(1);
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM provider_creation_claims WHERE stripe_request_id = ?"
+    ).get(requestId)).toEqual({ count: 0 });
+    expect(database.prepare(
+      `SELECT status, creation_outcome_class, idempotency_generation,
+              provider_creation_claim_id
+         FROM stripe_checkout_sessions WHERE request_id = ?`
+    ).get(requestId)).toEqual({
+      status: "FAILED",
+      creation_outcome_class: "DEFINITE_FAILURE",
+      idempotency_generation: 1,
+      provider_creation_claim_id: "lost_cas_old_retry_claim"
+    });
+  });
+
+  it("retries lost-CAS claim cleanup once after the first release throws", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:16:00.000Z") });
+    seedDefiniteFailureCheckout(database, { claimId: "lost_cas_retry_cleanup_old_claim" });
+    const providerFetch = stubSuccessfulStripeCreation();
+    const losing = withLosingDefiniteRetryCas(database, 1);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const retry = await createCheckout({
+      ...stripeProxyEnv(workerEnv),
+      DB: losing.db
+    }, {
+      requestId,
+      amount: 50,
+      frequency: "once"
+    });
+    const cleanupEvents = errorLog.mock.calls
+      .map(([entry]) => entry)
+      .filter((entry) => (entry as { event?: string }).event?.startsWith("stripe_checkout_claim_cleanup_"));
+    errorLog.mockRestore();
+
+    expect(retry.response.status).toBe(409);
+    expect(retry.body).toMatchObject({ error: "stripe_checkout_unavailable" });
+    expect(losing.releaseAttempts()).toBe(2);
+    expect(providerFetch).not.toHaveBeenCalled();
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM provider_creation_claims WHERE stripe_request_id = ?"
+    ).get(requestId)).toEqual({ count: 0 });
+    expect(cleanupEvents).toEqual([{
+      event: "stripe_checkout_claim_cleanup_retry",
+      app_env: "local",
+      error_name: "error",
+      error_code: "unknown"
+    }]);
+  });
+
+  it("bounds lost-CAS claim cleanup at two attempts and relies on expiry when both throw", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:16:00.000Z") });
+    seedDefiniteFailureCheckout(database, { claimId: "lost_cas_deferred_cleanup_old_claim" });
+    const providerFetch = stubSuccessfulStripeCreation();
+    const losing = withLosingDefiniteRetryCas(database, 2);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const retry = await createCheckout({
+      ...stripeProxyEnv(workerEnv),
+      DB: losing.db
+    }, {
+      requestId,
+      amount: 50,
+      frequency: "once"
+    });
+    const cleanupEvents = errorLog.mock.calls
+      .map(([entry]) => entry)
+      .filter((entry) => (entry as { event?: string }).event?.startsWith("stripe_checkout_claim_cleanup_"));
+    errorLog.mockRestore();
+
+    expect(retry.response.status).toBe(409);
+    expect(retry.body).toMatchObject({ error: "stripe_checkout_unavailable" });
+    expect(losing.releaseAttempts()).toBe(2);
+    expect(providerFetch).not.toHaveBeenCalled();
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM provider_creation_claims WHERE stripe_request_id = ?"
+    ).get(requestId)).toEqual({ count: 1 });
+    expect(cleanupEvents).toEqual([
+      {
+        event: "stripe_checkout_claim_cleanup_retry",
+        app_env: "local",
+        error_name: "error",
+        error_code: "unknown"
+      },
+      {
+        event: "stripe_checkout_claim_cleanup_deferred",
+        app_env: "local",
+        error_name: "error",
+        error_code: "unknown"
+      }
+    ]);
+  });
+
+  it("retains an attached refreshed claim when the definite retry provider call fails", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:16:00.000Z") });
+    seedDefiniteFailureCheckout(database, {
+      claimId: "failed_refreshed_retry_claim",
+      claimedAt: "2026-07-04T12:00:00.000Z",
+      expiresAt: "2026-07-04T12:15:00.000Z"
+    });
+    const providerFetch = vi.fn<typeof fetch>(async () => stripeJson({
+      error: {
+        type: "invalid_request_error",
+        code: "parameter_invalid_integer",
+        message: "definite retry fixture",
+        param: "line_items[0][price_data][unit_amount]"
+      }
+    }, 400, { "stripe-should-retry": "false" }));
+    vi.stubGlobal("fetch", providerFetch);
+
+    const retry = await createCheckout(stripeProxyEnv(workerEnv), {
+      requestId,
+      amount: 50,
+      frequency: "once"
+    });
+
+    expect(retry.response.status).toBe(502);
+    expect(providerFetch).toHaveBeenCalledTimes(1);
+    expect(database.prepare(
+      `SELECT id, claimed_at, expires_at FROM provider_creation_claims
+        WHERE stripe_request_id = ?`
+    ).get(requestId)).toEqual({
+      id: "failed_refreshed_retry_claim",
+      claimed_at: "2026-07-04T12:16:00.000Z",
+      expires_at: "2026-07-04T12:31:00.000Z"
+    });
+    expect(database.prepare(
+      `SELECT status, creation_outcome_class, idempotency_generation,
+              provider_creation_claim_id
+         FROM stripe_checkout_sessions WHERE request_id = ?`
+    ).get(requestId)).toEqual({
+      status: "FAILED",
+      creation_outcome_class: "DEFINITE_FAILURE",
+      idempotency_generation: 2,
+      provider_creation_claim_id: "failed_refreshed_retry_claim"
+    });
+  });
+
+  it("keeps an active unattached Stripe claim in progress before expiry", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:00:00.000Z") });
+    seedStripeProviderClaim(database, {
+      id: "active_unattached_claim",
+      claimedAt: "2026-07-04T11:55:00.000Z",
+      expiresAt: "2026-07-04T12:10:00.000Z"
+    });
+    const providerFetch = stubSuccessfulStripeCreation();
+
+    const retry = await createCheckout(stripeProxyEnv(workerEnv), {
+      requestId,
+      amount: 50,
+      frequency: "once"
+    });
+
+    expect(retry.response.status).toBe(409);
+    expect(retry.body).toMatchObject({ error: "stripe_checkout_in_progress" });
+    expect(providerFetch).not.toHaveBeenCalled();
+    expect(database.prepare("SELECT COUNT(*) AS count FROM stripe_checkout_sessions").get())
+      .toEqual({ count: 0 });
+  });
+
+  it("refreshes an expired unattached Stripe claim instead of waiting for cron", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:16:00.000Z") });
+    seedStripeProviderClaim(database, {
+      id: "expired_unattached_claim",
+      claimedAt: "2026-07-04T12:00:00.000Z",
+      expiresAt: "2026-07-04T12:15:00.000Z"
+    });
+    const providerFetch = stubSuccessfulStripeCreation();
+
+    const retry = await createCheckout(stripeProxyEnv(workerEnv), {
+      requestId,
+      amount: 50,
+      frequency: "once"
+    });
+
+    expect(retry.response.status).toBe(201);
+    expect(providerFetch).toHaveBeenCalledTimes(1);
+    expect(database.prepare(
+      `SELECT id, claimed_at, expires_at FROM provider_creation_claims
+        WHERE stripe_request_id = ?`
+    ).get(requestId)).toEqual({
+      id: "expired_unattached_claim",
+      claimed_at: "2026-07-04T12:16:00.000Z",
+      expires_at: "2026-07-04T12:31:00.000Z"
+    });
+    expect(database.prepare(
+      "SELECT provider_creation_claim_id FROM stripe_checkout_sessions WHERE request_id = ?"
+    ).get(requestId)).toEqual({ provider_creation_claim_id: "expired_unattached_claim" });
   });
 
   it("recovers a returned Session after deferred D1 attachment", async () => {
@@ -840,21 +1248,187 @@ describe("Stripe public donation routes", () => {
     }, "203.0.113.10");
     expect(limited.response.status).toBe(429);
     expect(limited.body).toMatchObject({ error: "too_many_attempts" });
+    expect(limited.response.headers.get("Cache-Control")).toBe("no-store");
   });
 
-  it("releases the duplicate admission claim when concurrent requests converge on one checkout", async () => {
+  it("blocks distinct clients at the Stripe provider ceiling before reservation or provider work", async () => {
+    const now = "2026-07-04T12:00:00.000Z";
+    for (let index = 0; index < 600; index += 1) {
+      database.prepare(
+        `INSERT INTO provider_creation_claims (
+           id, provider, client_key_hash, stripe_request_id, claimed_at, expires_at
+         ) VALUES (?, 'STRIPE', ?, ?, ?, ?)`
+      ).run(
+        `stripe_provider_seed_${index}`,
+        `stripe-client-${index}`,
+        `stripe-request-${index}`,
+        now,
+        "2026-07-04T12:15:00.000Z"
+      );
+    }
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date(now) });
+    database.prepare(
+      "INSERT INTO app_settings (key, value) VALUES ('alert_email', 'owner@example.org')"
+    ).run();
+    const alertSend = vi.spyOn(EmailService.prototype, "sendOperationalAlert")
+      .mockImplementation(async (_input, beforeProviderDispatch) => {
+        await beforeProviderDispatch?.();
+        return { messageId: "capacity-alert" };
+      });
+    const providerFetch = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", providerFetch);
+    try {
+      const limited = await createCheckout(stripeProxyEnv(workerEnv), {
+        requestId,
+        amount: 50,
+        frequency: "once"
+      }, "198.51.100.200");
+
+      expect(limited.response.status).toBe(503);
+      expect(limited.body).toEqual({
+        error: "donation_service_busy",
+        message: "No pudimos preparar su entrega en este momento. Intente de nuevo en unos minutos."
+      });
+      expect(limited.response.headers.get("Cache-Control")).toBe("no-store");
+      expect(database.prepare("SELECT COUNT(*) AS count FROM stripe_checkout_sessions").get())
+        .toEqual({ count: 0 });
+      expect(providerFetch).not.toHaveBeenCalled();
+      expect(alertSend).toHaveBeenCalledTimes(1);
+      expect(database.prepare(
+        `SELECT COUNT(*) AS count FROM audit_logs
+          WHERE action = 'PROVIDER_CREATION_CAPACITY_EXHAUSTED'
+            AND entity_type = 'provider_creation_capacity'`
+      ).get()).toEqual({ count: 1 });
+      expect(database.prepare(
+        `SELECT COUNT(*) AS count FROM audit_logs
+          WHERE action = 'ALERT_SENT:PROVIDER_CREATION_CAPACITY_EXHAUSTED'
+            AND entity_type = 'provider_creation_capacity'`
+      ).get()).toEqual({ count: 1 });
+    } finally {
+      alertSend.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("admits the 101st site-wide creation attempt when provider capacity remains", async () => {
+    const now = "2026-07-04T12:00:00.000Z";
+    for (let index = 0; index < 100; index += 1) {
+      const stripe = index % 2 === 1;
+      database.prepare(
+        `INSERT INTO provider_creation_claims (
+           id, provider, client_key_hash, stripe_request_id, claimed_at, expires_at
+         ) VALUES (?, ?, ?, ?, ?, ?)`
+      ).run(
+        `global_seed_${index}`,
+        stripe ? "STRIPE" : "WOMPI",
+        `global-client-${index}`,
+        stripe ? `global-request-${index}` : null,
+        now,
+        "2026-07-04T12:15:00.000Z"
+      );
+    }
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date(now) });
+    const providerFetch = stubSuccessfulStripeCreation();
+    try {
+      const created = await createCheckout(stripeProxyEnv(workerEnv), {
+        requestId,
+        amount: 50,
+        frequency: "once"
+      }, "198.51.100.201");
+
+      expect(created.response.status).toBe(201);
+      expect(database.prepare("SELECT COUNT(*) AS count FROM stripe_checkout_sessions").get())
+        .toEqual({ count: 1 });
+      expect(providerFetch).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports, audits, and alerts at the shared emergency capacity ceiling", async () => {
+    const now = "2026-07-04T12:00:00.000Z";
+    const insert = database.prepare(
+      `INSERT INTO provider_creation_claims (
+         id, provider, client_key_hash, stripe_request_id, claimed_at, expires_at
+       ) VALUES (?, ?, ?, ?, ?, ?)`
+    );
+    for (let index = 0; index < 1000; index += 1) {
+      const stripe = index % 2 === 1;
+      insert.run(
+        `emergency_global_seed_${index}`,
+        stripe ? "STRIPE" : "WOMPI",
+        `emergency-global-client-${index}`,
+        stripe ? `emergency-global-request-${index}` : null,
+        now,
+        "2026-07-04T12:15:00.000Z"
+      );
+    }
+    database.prepare(
+      "INSERT INTO app_settings (key, value) VALUES ('alert_email', 'owner@example.org')"
+    ).run();
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date(now) });
+    const alertSend = vi.spyOn(EmailService.prototype, "sendOperationalAlert")
+      .mockImplementation(async (_input, beforeProviderDispatch) => {
+        await beforeProviderDispatch?.();
+        return { messageId: "capacity-alert" };
+      });
+    const providerFetch = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", providerFetch);
+    try {
+      const limited = await createCheckout(stripeProxyEnv(workerEnv), {
+        requestId,
+        amount: 50,
+        frequency: "once"
+      }, "198.51.100.202");
+
+      expect(limited.response.status).toBe(503);
+      expect(limited.body).toEqual({
+        error: "donation_service_busy",
+        message: "No pudimos preparar su entrega en este momento. Intente de nuevo en unos minutos."
+      });
+      expect(limited.response.headers.get("Cache-Control")).toBe("no-store");
+      expect(providerFetch).not.toHaveBeenCalled();
+      expect(alertSend).toHaveBeenCalledTimes(1);
+      expect(database.prepare(
+        `SELECT metadata_json FROM audit_logs
+          WHERE action = 'PROVIDER_CREATION_CAPACITY_EXHAUSTED'`
+      ).get()).toEqual({
+        metadata_json: JSON.stringify({
+          scope: "GLOBAL",
+          provider: "STRIPE",
+          windowMinutes: 15,
+          limit: 1000
+        })
+      });
+    } finally {
+      alertSend.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses one claim and one provider call when fresh concurrent requests share a request id", async () => {
+    let providerCalls = 0;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      providerCalls += 1;
+      const request = input instanceof Request ? input : new Request(input, init);
+      return stripeCheckoutJson(new URLSearchParams(await request.text()));
+    }));
     const concurrent = withSynchronizedStripeReservationReads(database);
     concurrent.synchronizeNextPair();
-    const concurrentEnv = { ...workerEnv, DB: concurrent.db };
+    const concurrentEnv = { ...stripeProxyEnv(workerEnv), DB: concurrent.db };
     const [first, second] = await Promise.all([
       createCheckout(concurrentEnv, { requestId, amount: 50, frequency: "once" }, "203.0.113.55"),
       createCheckout(concurrentEnv, { requestId, amount: 50, frequency: "once" }, "203.0.113.55")
     ]);
 
-    expect([first.response.status, second.response.status].sort()).toEqual([200, 201]);
+    expect([first.response.status, second.response.status].sort()).toEqual([201, 409]);
+    expect([first.body.error, second.body.error]).toContain("stripe_checkout_in_progress");
+    expect(providerCalls).toBe(1);
     expect(database.prepare(
-      "SELECT COUNT(*) AS count FROM security_rate_limit_claims WHERE scope = 'donation_intent'"
+      "SELECT COUNT(*) AS count FROM provider_creation_claims WHERE provider = 'STRIPE'"
     ).get()).toEqual({ count: 1 });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM stripe_checkout_sessions").get())
+      .toEqual({ count: 1 });
   });
 });
 
@@ -958,6 +1532,145 @@ function stripeCheckoutObject(params: URLSearchParams): Record<string, unknown> 
     },
     expires_at: 1_786_370_400
   };
+}
+
+function seedStripeProviderClaim(
+  database: ReturnType<typeof migratedDatabase>,
+  input: { id: string; claimedAt: string; expiresAt: string; stripeRequestId?: string }
+): void {
+  database.prepare(
+    `INSERT INTO provider_creation_claims (
+       id, provider, client_key_hash, stripe_request_id, claimed_at, expires_at
+     ) VALUES (?, 'STRIPE', 'seed-client', ?, ?, ?)`
+  ).run(input.id, input.stripeRequestId ?? requestId, input.claimedAt, input.expiresAt);
+}
+
+function seedDefiniteFailureCheckout(
+  database: ReturnType<typeof migratedDatabase>,
+  input: { claimId: string; claimedAt?: string; expiresAt?: string }
+): void {
+  if (input.claimedAt && input.expiresAt) {
+    seedStripeProviderClaim(database, {
+      id: input.claimId,
+      claimedAt: input.claimedAt,
+      expiresAt: input.expiresAt
+    });
+  }
+  database.prepare(
+    `INSERT INTO stripe_checkout_sessions (
+       id, request_id, request_fingerprint, frequency, gift_type, amount_cents,
+       currency, livemode, status, creation_attempt_count, creation_outcome_class,
+       idempotency_generation, payment_status, provider_creation_claim_id, error_code,
+       created_at, updated_at
+     ) VALUES ('stripe_checkout_retry_fixture', ?, 'v2:stale', 'ONCE', 'TITHE', 5000,
+               'usd', 0, 'FAILED', 1, 'DEFINITE_FAILURE', 1, 'UNPAID', ?,
+               'stripe_checkout_create_failed', '2026-07-04T12:00:00.000Z',
+               '2026-07-04T12:00:00.000Z')`
+  ).run(requestId, input.claimId);
+}
+
+function seedProviderCreationCapacity(
+  database: ReturnType<typeof migratedDatabase>,
+  dimension: "provider" | "global",
+  count: number,
+  claimedAt: string
+): void {
+  const insert = database.prepare(
+    `INSERT INTO provider_creation_claims (
+       id, provider, client_key_hash, stripe_request_id, claimed_at, expires_at
+     ) VALUES (?, ?, ?, ?, ?, '2026-07-04T12:31:00.000Z')`
+  );
+  for (let index = 0; index < count; index += 1) {
+    const provider = dimension === "provider" || index % 2 === 0 ? "STRIPE" : "WOMPI";
+    insert.run(
+      `${dimension}_capacity_${index}`,
+      provider,
+      `${dimension}-client-${index}`,
+      provider === "STRIPE" ? `${dimension}-request-${index}` : null,
+      claimedAt
+    );
+  }
+}
+
+function stubSuccessfulStripeCreation(): ReturnType<typeof vi.fn<typeof fetch>> {
+  const providerFetch = vi.fn<typeof fetch>(async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const url = new URL(request.url);
+    if (request.method !== "POST" || url.pathname !== "/v1/checkout/sessions") {
+      throw new Error(`Unexpected Stripe request: ${request.method} ${url.pathname}`);
+    }
+    return stripeCheckoutJson(new URLSearchParams(await request.text()));
+  });
+  vi.stubGlobal("fetch", providerFetch);
+  return providerFetch;
+}
+
+function withLosingDefiniteRetryCas(
+  database: ReturnType<typeof migratedDatabase>,
+  releaseFailures = 0
+): { db: D1Database; releaseAttempts(): number } {
+  const base = sqliteD1(database);
+  let releaseAttempts = 0;
+  return {
+    db: {
+      prepare(sql: string) {
+        const statement = base.prepare(sql);
+        if (
+          sql.includes("UPDATE stripe_checkout_sessions")
+          && sql.includes("provider_creation_claim_id = ?")
+          && sql.includes("creation_outcome_class = 'DEFINITE_FAILURE'")
+        ) {
+          const mutable = statement as unknown as {
+            first: <T>() => Promise<T | null>;
+          };
+          mutable.first = async <T>() => null as T | null;
+        }
+        if (sql.includes("DELETE FROM provider_creation_claims")) {
+          const mutable = statement as unknown as {
+            run: (...args: unknown[]) => Promise<D1Result>;
+          };
+          const run = mutable.run.bind(mutable);
+          mutable.run = async (...args: unknown[]) => {
+            releaseAttempts += 1;
+            if (releaseAttempts <= releaseFailures) {
+              throw new Error("injected provider claim release failure");
+            }
+            return run(...args);
+          };
+        }
+        return statement;
+      },
+      batch(statements: D1PreparedStatement[]) {
+        return base.batch(statements);
+      }
+    } as D1Database,
+    releaseAttempts() {
+      return releaseAttempts;
+    }
+  };
+}
+
+function withFailingStripeReservation(
+  database: ReturnType<typeof migratedDatabase>
+): D1Database {
+  const base = sqliteD1(database);
+  return {
+    prepare(sql: string) {
+      const statement = base.prepare(sql);
+      if (sql.includes("INSERT OR IGNORE INTO stripe_checkout_sessions")) {
+        const mutable = statement as unknown as {
+          run: (...args: unknown[]) => Promise<D1Result>;
+        };
+        mutable.run = async () => {
+          throw new Error("injected Stripe reservation persistence failure");
+        };
+      }
+      return statement;
+    },
+    batch(statements: D1PreparedStatement[]) {
+      return base.batch(statements);
+    }
+  } as D1Database;
 }
 
 function withDeferredStripeAttachment(database: ReturnType<typeof migratedDatabase>): {

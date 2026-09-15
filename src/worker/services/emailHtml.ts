@@ -112,6 +112,25 @@ export function passwordResetEmailHtml(
   ]);
 }
 
+export function loginStepUpEmailHtml(
+  name: string,
+  code: string,
+  expiresMinutes: number,
+  options: BrandingEmailOptions = { organizationName: DEFAULT_ORGANIZATION_NAME }
+): string {
+  const organizationName = options.organizationName || DEFAULT_ORGANIZATION_NAME;
+  const brandColor = options.brandColor ?? DEFAULT_BRAND_COLOR;
+  const codeBlock = `
+    <div style="margin:24px auto;padding:14px 18px;max-width:240px;border:1px solid ${BORDER_COLOR};border-radius:8px;background:${CARD_BACKGROUND};font-family:Arial,Helvetica,sans-serif;font-size:30px;font-weight:bold;letter-spacing:8px;text-align:center;color:${TEXT_COLOR};">${escapeHtml(code)}</div>`;
+  return emailDocument(organizationName, "Verificación de inicio de sesión", brandColor, options.supportEmail, options.logoUrl, [
+    paragraphs(
+      `Hola ${name}:\n\nPara proteger su cuenta después de varios intentos fallidos, confirme este inicio de sesión con el código de un solo uso. Vence en ${expiresMinutes} minutos.`
+    ),
+    codeBlock,
+    footNote("Si usted no intentó iniciar sesión, no comparta este código y puede ignorar este mensaje.")
+  ]);
+}
+
 export interface OperationalAlertInput {
   kind: string;
   title: string;
