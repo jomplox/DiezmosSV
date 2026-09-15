@@ -1009,10 +1009,11 @@ export function DonarPage() {
     </div>
   );
   const stripeIntroduction = stripeIntroSegments(branding.organizationName);
+  const providerStep = (step === 2 && usDonation) || (step === 3 && !usDonation);
 
   return (
-    <div className={`donar-screen${step === 2 && usDonation ? " donar-screen-provider-step" : ""}`}>
-      <div className={`donar-card card${step === 2 && usDonation ? " donar-card-provider-step" : ""}`}>
+    <div className={`donar-screen${providerStep ? " donar-screen-provider-step" : ""}`}>
+      <div className={`donar-card card${providerStep ? " donar-card-provider-step" : ""}`}>
         {/* Wizard chrome: back affordance left ("← Cambiar opción" only on Paso 1,
             "← Atrás" afterwards), minimal "Paso n de m" indicator right. */}
         <div className="donar-card-top">
@@ -1482,7 +1483,7 @@ export function DonarPage() {
         {/* Paso 3 — Entrega (SV door). Summary line above the existing Wompi
             handoff: embedded checkout iframe, manual backup, polling, neutral close. */}
         {step === 3 && !usDonation && (
-          <div className="donar-step">
+          <div className="donar-step donar-wompi">
             {summary}
 
             {stage === "widget" && intent && (

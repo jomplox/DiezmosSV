@@ -512,6 +512,42 @@ test("keeps the desktop chooser doors equal-height with the annotated U.S. paddi
   await expect(page.locator(".donar-door").nth(1)).toHaveCSS("padding-bottom", "14px");
 });
 
+test("SV embedded form uses the compact mobile provider shell", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.route("https://mock.wompi.sv/**", (route) => route.fulfill({
+    contentType: "text/html",
+    body: '<html><body style="margin:0;background:#f5f5f5"><p>Formulario de prueba Wompi</p><div style="height:1500px"></div></body></html>'
+  }));
+  await page.setViewportSize({ width: 393, height: 700 });
+  await enterWompiHandoff(page);
+  const embed = page.locator("iframe.donar-embed");
+  await expect(embed).toBeVisible();
+  await expect(page.locator(".donar-card-provider-step")).toBeVisible();
+  for (const width of [393, 320]) {
+    await page.setViewportSize({ width, height: 700 });
+    const box = await embed.boundingBox();
+    expect(box!.y).toBeLessThan(260);
+    expect(box!.height).toBeGreaterThan(350);
+    expect(box!.y + box!.height).toBeLessThan(700);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
+    expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBeLessThanOrEqual(701);
+    await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "¿Problemas con el formulario? Continúe aquí" })).toBeInViewport();
+  }
+  await page.screenshot({ path: testInfo.outputPath("sv-compact-mobile.png") });
+  const frame = page.frames().find((frame) => frame.url().startsWith("https://mock.wompi.sv/"))!;
+  const frameBox = (await embed.boundingBox())!;
+  await page.mouse.move(frameBox.width / 2, frameBox.y + 100);
+  await page.mouse.wheel(0, 300);
+  await expect.poll(() => frame.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
+  expect(errors).toEqual([]);
+  await page.getByRole("button", { name: "Editar", exact: true }).click();
+  await expect(page.getByLabel("Monto")).toBeVisible();
+  await expect(page.locator(".donar-card-provider-step")).toHaveCount(0);
+});
+
 test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) => {
   // Keep the whole flow at a phone-height viewport. Clicking the actions near the
   // bottom naturally scrolls the document, so each newly rendered view must
@@ -591,9 +627,10 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   const embed = page.locator("iframe.donar-embed");
   await expect(embed).toBeVisible({ timeout: 15_000 });
   await expect(embed).toHaveAttribute("src", /mock\.wompi\.sv.*esWidget=1/);
-  for (const { reportedHeight, renderedHeight, inlineHeight } of [
-    { reportedHeight: 430, renderedHeight: 465, inlineHeight: 465 },
-    { reportedHeight: 710, renderedHeight: 546, inlineHeight: 745 }
+  const boundedHeight = (await embed.boundingBox())!.height;
+  for (const { reportedHeight, inlineHeight } of [
+    { reportedHeight: 430, inlineHeight: 465 },
+    { reportedHeight: 710, inlineHeight: 745 }
   ]) {
     await page.evaluate((height) => {
       window.dispatchEvent(
@@ -603,7 +640,7 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
         })
       );
     }, reportedHeight);
-    await expect(embed).toHaveCSS("height", `${renderedHeight}px`);
+    expect((await embed.boundingBox())!.height).toBeCloseTo(boundedHeight, 1);
     await expect(embed).toHaveAttribute("style", `height: ${inlineHeight}px;`);
   }
 
@@ -634,7 +671,9 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   expect(mobileCardBox!.x + mobileCardBox!.width).toBeCloseTo(mobileViewport.width, 1);
   expect(mobileEmbedBox!.x).toBeCloseTo(0, 1);
   expect(mobileEmbedBox!.x + mobileEmbedBox!.width).toBeCloseTo(mobileViewport.width, 1);
-  expect(mobileEmbedBox!.height).toBeCloseTo(mobileViewport.height * 0.78, 1);
+  expect(mobileEmbedBox!.height).toBeGreaterThan(500);
+  expect(mobileEmbedBox!.y).toBeLessThan(260);
+  expect(mobileEmbedBox!.y + mobileEmbedBox!.height).toBeLessThan(mobileViewport.height);
   expect(await embed.getAttribute("scrolling")).toBeNull();
   expect(mobileShellStyles).toEqual({
     screenPadding: "0px",
