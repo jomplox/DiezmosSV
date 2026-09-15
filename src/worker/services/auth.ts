@@ -1,6 +1,6 @@
 import { Repository } from "../storage/repository";
-import type { Env } from "../types";
-import { addDays } from "../utils/dates";
+import type { Env, LoginSessionResponse, LoginStepUpChallengeResponse } from "../types";
+import { addDays, addMinutes } from "../utils/dates";
 import { base64UrlFromBytes, hexFromBytes, sha256Hex as sha256HexBytes, timingSafeEqual, utf8Bytes } from "../utils/encoding";
 import { passwordPolicyError } from "../../shared/passwordPolicy";
 
@@ -11,6 +11,21 @@ export interface AuthUser {
   email: string;
   name: string;
   role: Role;
+}
+
+export interface VerifiedLoginCredentials {
+  user: AuthUser;
+  userId: string;
+  expectedPasswordHash: string;
+  expectedPasswordSalt: string;
+  expectedEmail: string;
+  expectedAuthGeneration: number;
+}
+
+export interface IssuedLoginStepUpChallenge {
+  response: LoginStepUpChallengeResponse;
+  code: string;
+  user: AuthUser;
 }
 
 const ROLE_RANK: Record<Role, number> = {
@@ -35,11 +50,17 @@ const DUMMY_PASSWORD_SALT = "diezmossv-login-dummy-v1";
 const DUMMY_PASSWORD_RAW_HASH = "1368814a801077a2ccf4976bdedac3410ffb14c6c3193bbbdf203c6ae0c277db";
 const DUMMY_PASSWORD_HASH = `${PASSWORD_HASH_CHAIN_SCHEME}$${PASSWORD_PBKDF2_ITERATIONS}$${DUMMY_PASSWORD_RAW_HASH}`;
 export const PASSWORD_RESET_TTL_MINUTES = 45;
+export const LOGIN_STEP_UP_TTL_MINUTES = 10;
+const LOGIN_STEP_UP_MAX_WRONG_ATTEMPTS = 5;
+const LOGIN_STEP_UP_CODE_HASH_DOMAIN = "diezmossv-login-step-up-code-v1";
+const LOGIN_STEP_UP_CHALLENGE_ID_PATTERN = /^login_mfa_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const LOGIN_STEP_UP_CONTINUATION_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
 export class PasswordResetError extends Error {}
 export class PasswordPolicyError extends Error {}
 export class UserNotFoundError extends Error {}
 export class BootstrapUnavailableError extends Error {}
+export class InvalidLoginStepUpChallengeError extends Error {}
 
 export class AuthService {
   private readonly repo: Repository;
@@ -81,7 +102,11 @@ export class AuthService {
     }
   }
 
-  async login(email: string, password: string): Promise<{ user: AuthUser; token: string; expiresAt: string }> {
+  async login(email: string, password: string): Promise<LoginSessionResponse> {
+    return this.createSession(await this.verifyLoginCredentials(email, password));
+  }
+
+  async verifyLoginCredentials(email: string, password: string): Promise<VerifiedLoginCredentials> {
     const row = await this.repo.getUserForLogin(email);
     if (!row || row.disabled_at) {
       await verifyPassword(password, DUMMY_PASSWORD_SALT, DUMMY_PASSWORD_HASH);
@@ -113,21 +138,124 @@ export class AuthService {
       expectedPasswordHash = upgraded.hash;
       expectedPasswordSalt = upgraded.salt;
     }
-    const token = base64UrlFromBytes(crypto.getRandomValues(new Uint8Array(32)));
-    const expiresAt = addDays(new Date().toISOString(), 1);
-    const created = await this.repo.createSessionIfCredentialsCurrent({
+    return {
+      user: publicUser(row),
       userId: row.id,
       expectedPasswordHash,
       expectedPasswordSalt,
       expectedEmail: row.email,
-      expectedAuthGeneration: Number(row.auth_generation ?? 0),
+      expectedAuthGeneration: Number(row.auth_generation ?? 0)
+    };
+  }
+
+  async createSession(credentials: VerifiedLoginCredentials): Promise<LoginSessionResponse> {
+    const token = randomToken();
+    const expiresAt = addDays(new Date().toISOString(), 1);
+    const created = await this.repo.createSessionIfCredentialsCurrent({
+      userId: credentials.userId,
+      expectedPasswordHash: credentials.expectedPasswordHash,
+      expectedPasswordSalt: credentials.expectedPasswordSalt,
+      expectedEmail: credentials.expectedEmail,
+      expectedAuthGeneration: credentials.expectedAuthGeneration,
       tokenHash: await sha256HexBytes(utf8Bytes(token)),
       expiresAt
     });
     if (!created) {
       throw invalidCredentialsError();
     }
-    return { user: publicUser(row), token, expiresAt };
+    return { user: credentials.user, token, expiresAt };
+  }
+
+  async issueLoginStepUpChallenge(credentials: VerifiedLoginCredentials): Promise<IssuedLoginStepUpChallenge> {
+    const continuationToken = randomToken();
+    const code = randomSixDigitCode();
+    const expiresAt = addMinutes(new Date().toISOString(), LOGIN_STEP_UP_TTL_MINUTES);
+    const continuationTokenHash = await sha256HexBytes(utf8Bytes(continuationToken));
+    const challengeId = await this.repo.createLoginStepUpChallenge({
+      userId: credentials.userId,
+      expectedEmail: credentials.expectedEmail,
+      expectedAuthGeneration: credentials.expectedAuthGeneration,
+      expectedPasswordHash: credentials.expectedPasswordHash,
+      expectedPasswordSalt: credentials.expectedPasswordSalt,
+      continuationTokenHash,
+      codeHash: await loginStepUpCodeHash(continuationToken, code),
+      expiresAt
+    });
+    if (!challengeId) {
+      throw invalidCredentialsError();
+    }
+    return {
+      response: {
+        mfaRequired: true,
+        challengeId,
+        continuationToken,
+        expiresAt
+      },
+      code,
+      user: credentials.user
+    };
+  }
+
+  async invalidateLoginStepUpChallenge(challengeId: string, continuationToken: string): Promise<void> {
+    await this.repo.invalidateLoginStepUpChallenge(
+      challengeId,
+      await sha256HexBytes(utf8Bytes(continuationToken)),
+      new Date().toISOString()
+    );
+  }
+
+  async completeLoginStepUpChallenge(input: {
+    challengeId: string;
+    continuationToken: string;
+    code: string;
+  }): Promise<LoginSessionResponse> {
+    const challengeId = input.challengeId.trim();
+    const continuationToken = input.continuationToken.trim();
+    if (
+      !LOGIN_STEP_UP_CHALLENGE_ID_PATTERN.test(challengeId)
+      || !LOGIN_STEP_UP_CONTINUATION_PATTERN.test(continuationToken)
+    ) {
+      throw invalidLoginStepUpChallengeError();
+    }
+    const now = new Date().toISOString();
+    const continuationTokenHash = await sha256HexBytes(utf8Bytes(continuationToken));
+    const codeHash = await loginStepUpCodeHash(continuationToken, input.code.trim());
+    const consumed = await this.repo.consumeLoginStepUpChallenge({
+      challengeId,
+      continuationTokenHash,
+      codeHash,
+      now,
+      maxWrongAttempts: LOGIN_STEP_UP_MAX_WRONG_ATTEMPTS
+    });
+    if (!consumed) {
+      await this.repo.incrementLoginStepUpFailure({
+        challengeId,
+        continuationTokenHash,
+        submittedCodeHash: codeHash,
+        now,
+        maxWrongAttempts: LOGIN_STEP_UP_MAX_WRONG_ATTEMPTS
+      });
+      throw invalidLoginStepUpChallengeError();
+    }
+    const row = await this.repo.getUserForLogin(consumed.expectedEmail);
+    if (!row || row.id !== consumed.userId || row.disabled_at) {
+      throw invalidLoginStepUpChallengeError();
+    }
+    try {
+      return await this.createSession({
+        user: publicUser(row),
+        userId: consumed.userId,
+        expectedEmail: consumed.expectedEmail,
+        expectedAuthGeneration: consumed.expectedAuthGeneration,
+        expectedPasswordHash: consumed.expectedPasswordHash,
+        expectedPasswordSalt: consumed.expectedPasswordSalt
+      });
+    } catch (error) {
+      if (error instanceof AuthError) {
+        throw invalidLoginStepUpChallengeError();
+      }
+      throw error;
+    }
   }
 
   async createPasswordResetToken(email: string): Promise<{ user: AuthUser; token: string; tokenId: string; expiresAt: string } | null> {
@@ -205,6 +333,32 @@ export class AuthError extends Error {
 
 function invalidCredentialsError(): AuthError {
   return new AuthError("Credenciales inválidas", 401);
+}
+
+function invalidLoginStepUpChallengeError(): InvalidLoginStepUpChallengeError {
+  return new InvalidLoginStepUpChallengeError(
+    "El código no es válido o ya expiró. Inicie sesión nuevamente."
+  );
+}
+
+function randomToken(): string {
+  return base64UrlFromBytes(crypto.getRandomValues(new Uint8Array(32)));
+}
+
+function randomSixDigitCode(): string {
+  const range = 1_000_000;
+  const unbiasedCeiling = Math.floor(0x1_0000_0000 / range) * range;
+  const random = new Uint32Array(1);
+  do {
+    crypto.getRandomValues(random);
+  } while (random[0] >= unbiasedCeiling);
+  return String(random[0] % range).padStart(6, "0");
+}
+
+async function loginStepUpCodeHash(continuationToken: string, code: string): Promise<string> {
+  return sha256HexBytes(
+    utf8Bytes(`${LOGIN_STEP_UP_CODE_HASH_DOMAIN}\u0000${continuationToken}\u0000${code}`)
+  );
 }
 
 export async function hashPassword(

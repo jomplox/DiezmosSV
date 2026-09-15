@@ -208,7 +208,7 @@ DiezmosSV/
 │   ├── client/                 # Panel React + Vite, /donar, fuentes, recursos
 │   └── shared/                 # Catálogos · DUI · NIT · ventanas legales · política de contraseñas
 │                               # correcciones fiscales · entrega · montos · correo
-├── migrations/                 # Esquema D1 (incremental, solo se agrega, 0001…0044)
+├── migrations/                 # Esquema D1 (incremental, solo se agrega, 0001…0047)
 ├── DTE/svfe-json-schemas/      # Esquemas JSON de MH para validación
 ├── docs/                       # Despliegue/UAT · manual del operador · restauración de retención
 │                               # cutover/conciliación de claims fiscales · recuperación previa al CDE
@@ -607,7 +607,7 @@ configuración privada seleccionada y se duplican por ambiente de Wrangler:
 | `ARCHIVE` (binding) | Binding del bucket de R2 para la exportación mensual de retención legal y los objetos del logo de marca blanca. La configuración de ejemplo versionada nombra `diezmossv-local-archive-example`, `diezmossv-staging-archive-example` y `diezmossv-production-archive-example`; los nombres reales de bucket pertenecen únicamente a la configuración privada seleccionada. |
 | `EMAIL_ARBITRARY_RECIPIENTS` | Marcador opcional `"true"` que se define después de confirmar que Cloudflare Email Sending puede alcanzar direcciones externas de donantes. El ejemplo versionado ya lo define para `staging`; local y producción lo dejan sin definir. |
 | `DONATION_INTAKE_DISABLED` | Interruptor de emergencia para nueva recepción pública. Cuando vale exactamente `"true"`, las mutaciones de intentos Wompi y `POST /api/donations/stripe/checkout` responden `503 donation_intake_disabled`; `/`, `/donar` y `/donar/gracias` sirven un documento vacío y cerrado. La página de resultado de Stripe, lecturas de estado, webhook, recibos y Billing Portal siguen disponibles para no dejar varado a un donante existente o mensual. El webhook de Wompi, la tubería de emisión y el panel de administración también siguen funcionando. El ejemplo versionado lo fija en `"true"` para `production`; sin definir o con cualquier otro valor, la recepción queda abierta. |
-| `MH_AUTH_URL_*` · `MH_RECEPCION_URL_*` · `MH_ANULACION_URL_*` | Endpoints de MH disponibles solo para el carril de credenciales del despliegue. `MH_AUTH_URL_TEST_FALLBACK` es el respaldo acotado de autenticación central para cuentas TEST tras el código 106 de MH; no es una capacidad de transmisión en PROD. |
+| `MH_AUTH_URL_*` · `MH_RECEPCION_URL_*` · `MH_ANULACION_URL_*` | Endpoints de MH disponibles solo para el carril de credenciales del despliegue. `MH_AUTH_URL_TEST_FALLBACK` puede estar ausente/vacío, ser la URL oficial exacta de autenticación TEST (sin efecto), o la URL exacta de autenticación central `https://api.dtes.mh.gob.sv/seguridad/auth` para cuentas TEST tras el código 106 de MH. Cualquier otro valor se rechaza antes de la recepción por Wompi y antes de enviar credenciales al respaldo; no es una capacidad de transmisión en PROD. |
 | `MH_USER_AGENT` | Encabezado User-Agent enviado a MH. |
 | `EMISOR_CONFIG_JSON` | La configuración del emisor de demostración/local vive en el archivo de entorno privado seleccionado; el valor remoto real se define como secreto de Cloudflare. |
 | `STRIPE_RESTRICTED_KEY` | Clave de servidor `rk_test_…` (staging) o `rk_live_…` (producción), con privilegios mínimos para Checkout Sessions y Billing Portal. Se rechazan las claves amplias `sk_…`. |
@@ -1075,7 +1075,7 @@ El modelo de seguridad es el modelo del claim fiscal aplicado a una ruta de repa
 ## 📚 Modelo de datos
 
 <details>
-<summary><strong>Tablas de D1 (migrations/0001_init.sql, extendidas hasta la 0044)</strong></summary>
+<summary><strong>Tablas de D1 (migrations/0001_init.sql, extendidas hasta la 0047)</strong></summary>
 
 <br/>
 
@@ -1103,8 +1103,9 @@ El modelo de seguridad es el modelo del claim fiscal aplicado a una ruta de repa
 | `stripe_invoice_settlement_retention_generations` | Libro interno y monotónico de pertenencia para instantáneas de convergencia de facturas mensuales. No forma parte del payload archivado y se reconstruye automáticamente al restaurar. |
 | `contingency_batches` · `contingency_batch_lines` | Envíos históricos de lotes de contingencia a MH y sus resultados por CDE (solo lectura). |
 | `app_settings` | Configuración en tiempo de ejecución (ambiente de emisión, plantillas de correo, marca, correo de alertas). |
-| `users` · `sessions` · `password_reset_tokens` | Autenticación, RBAC y restablecimiento de contraseña autogestionado. |
-| `login_rate_limits` · `security_rate_limit_claims` | Limitación de tasa respaldada en D1 para el inicio de sesión, el restablecimiento de contraseña y los intentos públicos de donación, con la procedencia del claim registrada en las filas que admite. |
+| `users` · `sessions` · `password_reset_tokens` · `login_step_up_challenges` | Autenticación, RBAC, restablecimiento de contraseña autogestionado y desafíos breves de verificación escalonada de cuenta, almacenados solo como hashes. |
+| `login_rate_limits` · `security_rate_limit_claims` | Limitación de tasa respaldada en D1 para el inicio de sesión, el restablecimiento de contraseña y las capacidades de datos del donante. |
+| `provider_creation_claims` | Presupuestos atómicos de 15 minutos por cliente, proveedor y global para enlaces Wompi nuevos y estado Checkout de Stripe. Los clientes IPv6 comparten un `/64` normalizado; las filas padre conservan la procedencia del claim después de barrer el libro temporal. |
 
 Las claves foráneas están habilitadas (`PRAGMA foreign_keys = ON`). El acceso es SQL crudo a través de
 `src/worker/storage/repository.ts` — sin ORM.

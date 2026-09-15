@@ -47,6 +47,7 @@ export interface StripeCheckoutRecord {
   donor_phone: string | null;
   donor_address_json: string | null;
   rate_limit_claim_id: string | null;
+  provider_creation_claim_id: string | null;
   error_code: string | null;
   expires_at: string | null;
   completed_at: string | null;
@@ -175,7 +176,7 @@ export async function reserveStripeCheckout(
     giftType: Exclude<StripeGiftType, "UNSPECIFIED">;
     amountCents: number;
     livemode: boolean;
-    rateLimitClaimId: string | null;
+    providerCreationClaimId: string;
     now: string;
   }
 ): Promise<{
@@ -185,7 +186,7 @@ export async function reserveStripeCheckout(
   await db.prepare(
     `INSERT OR IGNORE INTO stripe_checkout_sessions (
        id, request_id, request_fingerprint, frequency, gift_type, amount_cents, currency,
-       livemode, status, payment_status, rate_limit_claim_id, created_at, updated_at
+       livemode, status, payment_status, provider_creation_claim_id, created_at, updated_at
      ) VALUES (?, ?, ?, ?, ?, ?, 'usd', ?, 'CREATING', 'UNPAID', ?, ?, ?)`
   ).bind(
     input.id,
@@ -195,7 +196,7 @@ export async function reserveStripeCheckout(
     input.giftType,
     input.amountCents,
     input.livemode ? 1 : 0,
-    input.rateLimitClaimId,
+    input.providerCreationClaimId,
     input.now,
     input.now
   ).run();
@@ -342,8 +343,40 @@ export async function failStripeCheckoutCreation(
 
 export async function reclaimStripeCheckoutCreation(
   db: D1Database,
-  input: { id: string; requestFingerprint: string; now: string }
+  input: {
+    id: string;
+    requestFingerprint: string;
+    now: string;
+    definiteFailureAdmission?: {
+      admittedProviderCreationClaimId: string;
+      expectedProviderCreationClaimId: string | null;
+      expectedIdempotencyGeneration: number;
+    };
+  }
 ): Promise<StripeCheckoutRecord | null> {
+  if (input.definiteFailureAdmission) {
+    const admission = input.definiteFailureAdmission;
+    return db.prepare(
+      `UPDATE stripe_checkout_sessions
+          SET request_fingerprint = ?, status = 'CREATING',
+              creation_attempt_count = creation_attempt_count + 1,
+              idempotency_generation = idempotency_generation + 1,
+              creation_outcome_class = NULL, error_code = NULL,
+              provider_creation_claim_id = ?, updated_at = ?
+        WHERE id = ? AND provider_creation_claim_id IS ?
+          AND idempotency_generation = ?
+          AND status = 'FAILED' AND creation_outcome_class = 'DEFINITE_FAILURE'
+          AND stripe_session_id IS NULL AND creation_attempt_count < 3
+        RETURNING *`
+    ).bind(
+      input.requestFingerprint,
+      admission.admittedProviderCreationClaimId,
+      input.now,
+      input.id,
+      admission.expectedProviderCreationClaimId,
+      admission.expectedIdempotencyGeneration
+    ).first<StripeCheckoutRecord>();
+  }
   return db.prepare(
     `UPDATE stripe_checkout_sessions
         SET request_fingerprint = CASE
@@ -358,7 +391,8 @@ export async function reclaimStripeCheckoutCreation(
             error_code = NULL, updated_at = ?
       WHERE id = ? AND stripe_session_id IS NULL
         AND creation_attempt_count < 3
-        AND (creation_outcome_class = 'DEFINITE_FAILURE' OR request_fingerprint = ?)
+        AND creation_outcome_class IS NOT 'DEFINITE_FAILURE'
+        AND request_fingerprint = ?
         AND (
           status = 'FAILED'
           OR (status = 'CREATING' AND updated_at < ?)

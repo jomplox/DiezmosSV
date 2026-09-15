@@ -205,7 +205,8 @@ export function assertPrivateWranglerTargetManifest(rawConfig, target, manifest)
     ownValue(producer, "queue") === manifest.resourceManifest.queueName &&
     ownValue(mainConsumer, "dead_letter_queue") === manifest.resourceManifest.queueDlqName &&
     Boolean(dlqConsumer) &&
-    workersDev === manifest.resourceManifest.workersDev;
+    workersDev === manifest.resourceManifest.workersDev &&
+    (target !== "production" || ownValue(vars, "MOCK_EXTERNAL_SERVICES") === "false");
   if (!matches) {
     throw new Error("The selected private Wrangler config does not match the target resource manifest");
   }

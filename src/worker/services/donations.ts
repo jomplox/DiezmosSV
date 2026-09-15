@@ -46,9 +46,21 @@ function isGiftType(value: unknown): value is DonationGiftType {
   return typeof value === "string" && (GIFT_TYPES as readonly string[]).includes(value);
 }
 
-// Per-IP throttle: at most 5 intent creations per rolling 15 minutes.
-export const INTENT_THROTTLE_WINDOW_MINUTES = 15;
-export const INTENT_THROTTLE_LIMIT = 5;
+// Public provider-object creation is bounded in one rolling D1 ledger. The
+// client ceiling spans both providers; provider and global ceilings bound
+// distributed callers before they can create durable or third-party state.
+export const PROVIDER_CREATION_WINDOW_MINUTES = 15;
+export const PROVIDER_CREATION_CLIENT_LIMIT = 5;
+// Capacity ceilings are emergency brakes, not ordinary donor throttles. Keep
+// enough headroom for concentrated giving while retaining a bounded distributed
+// abuse path before durable/provider work.
+export const PROVIDER_CREATION_PROVIDER_LIMIT = 600;
+export const PROVIDER_CREATION_GLOBAL_LIMIT = 1000;
+
+// The datos endpoint keeps its existing D1-only per-IP throttle. These aliases
+// also preserve the established 15-minute donor-facing retry guidance.
+export const INTENT_THROTTLE_WINDOW_MINUTES = PROVIDER_CREATION_WINDOW_MINUTES;
+export const INTENT_THROTTLE_LIMIT = PROVIDER_CREATION_CLIENT_LIMIT;
 
 // A validation failure carries a distinct machine code plus a Spanish usted-form
 // message; the route serializes it to a 400 body.
@@ -292,11 +304,72 @@ export function intentThrottleSinceIso(): string {
   return new Date(Date.now() - INTENT_THROTTLE_WINDOW_MINUTES * 60_000).toISOString();
 }
 
+// Provider budgets never hash raw header text directly. Canonical IPv4 remains
+// host-specific; valid IPv6 is collapsed to a lower-case, zero-padded /64.
+// Ambiguous forwarding syntax and malformed values share one unknown bucket.
+export function providerCreationRateIdentity(value: string | null): string {
+  if (!value) return "unknown";
+  const ipv4 = parseCanonicalIpv4(value);
+  if (ipv4) return ipv4.join(".");
+  const ipv6 = parseIpv6Groups(value);
+  if (!ipv6) return "unknown";
+  return `${ipv6.slice(0, 4).map((group) => group.toString(16).padStart(4, "0")).join(":")}::/64`;
+}
+
+function parseCanonicalIpv4(value: string): number[] | null {
+  const parts = value.split(".");
+  if (parts.length !== 4) return null;
+  const octets: number[] = [];
+  for (const part of parts) {
+    if (!/^(?:0|[1-9][0-9]{0,2})$/u.test(part)) return null;
+    const octet = Number(part);
+    if (octet > 255) return null;
+    octets.push(octet);
+  }
+  return octets;
+}
+
+function parseIpv6Groups(value: string): number[] | null {
+  if (/[\[\],%\s]/u.test(value)) return null;
+  let candidate = value.toLowerCase();
+  if (!candidate.includes(":")) return null;
+
+  if (candidate.includes(".")) {
+    const lastColon = candidate.lastIndexOf(":");
+    if (lastColon < 0) return null;
+    const ipv4 = parseCanonicalIpv4(candidate.slice(lastColon + 1));
+    if (!ipv4) return null;
+    candidate = `${candidate.slice(0, lastColon)}:${((ipv4[0] << 8) | ipv4[1]).toString(16)}:${((ipv4[2] << 8) | ipv4[3]).toString(16)}`;
+  }
+
+  const compression = candidate.indexOf("::");
+  if (compression !== candidate.lastIndexOf("::")) return null;
+  const parseSide = (side: string): string[] | null => {
+    if (!side) return [];
+    const groups = side.split(":");
+    return groups.every((group) => /^[0-9a-f]{1,4}$/u.test(group)) ? groups : null;
+  };
+
+  let groups: string[];
+  if (compression >= 0) {
+    const left = parseSide(candidate.slice(0, compression));
+    const right = parseSide(candidate.slice(compression + 2));
+    if (!left || !right || left.length + right.length >= 8) return null;
+    groups = [...left, ...Array<string>(8 - left.length - right.length).fill("0"), ...right];
+  } else {
+    const exact = parseSide(candidate);
+    if (!exact || exact.length !== 8) return null;
+    groups = exact;
+  }
+  return groups.map((group) => Number.parseInt(group, 16));
+}
+
 // Header may be absent behind some proxies / in direct tests; collapse that to a
 // single shared "unknown" bucket rather than skipping the throttle, so an omitted
 // header cannot be used to bypass the per-IP limit.
 export function clientIpFrom(request: Request): string {
-  return request.headers.get("cf-connecting-ip")?.trim() || "unknown";
+  const value = request.headers.get("cf-connecting-ip");
+  return value === null || value.trim() === "" ? "unknown" : value;
 }
 
 export interface CreatedIntent {
@@ -313,8 +386,8 @@ export interface CreatedDraftIntent {
 // Signals that the Wompi API rejected link creation; the route maps this to a 502
 // and leaves the intent PENDING (it expires harmlessly on the cron sweep).
 export class IntentLinkError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = "IntentLinkError";
   }
 }
@@ -338,7 +411,7 @@ async function mintLinkForIntent(env: Env, repo: Repository, intent: DonationInt
     link = await new WompiApiService(env).createPaymentLink(intent);
   } catch (error) {
     if (error instanceof WompiApiError) {
-      throw new IntentLinkError(error.message);
+      throw new IntentLinkError(error.message, { cause: error });
     }
     throw error;
   }
@@ -367,7 +440,7 @@ export async function createDonationIntent(
   repo: Repository,
   input: ValidatedIntentInput,
   clientIp: string,
-  rateLimitClaimId: string
+  providerCreationClaimId: string
 ): Promise<CreatedIntent> {
   const start = nowIso();
   const intent = await repo.createDonationIntent({
@@ -389,7 +462,7 @@ export async function createDonationIntent(
     clientIp,
     expiresAt: addHours(start, INTENT_VALIDITY_HOURS),
     datosTokenHash: null,
-    rateLimitClaimId
+    providerCreationClaimId
   });
 
   return mintLinkForIntent(env, repo, intent);
@@ -405,7 +478,7 @@ export async function createDraftDonationIntent(
   repo: Repository,
   input: ValidatedDraftIntentInput,
   clientIp: string,
-  rateLimitClaimId: string
+  providerCreationClaimId: string
 ): Promise<CreatedDraftIntent> {
   const start = nowIso();
   const datosToken = base64UrlFromBytes(crypto.getRandomValues(new Uint8Array(32)));
@@ -428,7 +501,7 @@ export async function createDraftDonationIntent(
     clientIp,
     expiresAt: addHours(start, INTENT_VALIDITY_HOURS),
     datosTokenHash,
-    rateLimitClaimId
+    providerCreationClaimId
   });
 
   const created = await mintLinkForIntent(env, repo, intent);

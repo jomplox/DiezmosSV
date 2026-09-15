@@ -38,7 +38,7 @@ export interface CreateDonationIntentInput {
   clientIp: string | null;
   expiresAt: string;
   datosTokenHash: string | null;
-  rateLimitClaimId: string;
+  providerCreationClaimId: string;
 }
 
 export interface IntentDatosInput {
@@ -65,7 +65,7 @@ export async function createDonationIntent(
       `INSERT INTO donation_intents (
           id, status, amount_cents, donor_name, donor_document_type, donor_document, donor_email, donor_phone,
           direccion_departamento, direccion_municipio, direccion_distrito, direccion_complemento, donor_pais, client_ip, expires_at, gift_type,
-          datos_token_hash, rate_limit_claim_id
+          datos_token_hash, provider_creation_claim_id
         ) VALUES (?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
@@ -85,7 +85,7 @@ export async function createDonationIntent(
       input.expiresAt,
       input.giftType,
       input.datosTokenHash,
-      input.rateLimitClaimId
+      input.providerCreationClaimId
     )
     .run();
   const record = await host.getDonationIntent(input.id);

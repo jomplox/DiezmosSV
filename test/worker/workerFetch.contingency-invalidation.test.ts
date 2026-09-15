@@ -5,7 +5,7 @@ import { utf8Bytes } from "../../src/worker/utils/encoding";
 import { makeDocument as testDocument } from "./fixtures";
 import { emisorConfig, generatedCertificateXml } from "./support/dteFixtures";
 import { TEST_RESEND_REQUEST_ID } from "./support/documentDeliveryFixtures";
-import { env, InMemoryD1 } from "./support/inMemoryD1";
+import { authedDb, env, InMemoryD1 } from "./support/inMemoryD1";
 import { installWorkerFetchGlobals } from "./support/workerFetchGlobals";
 import { jsonResponse, sha256Hex } from "./support/workerFetchHelpers";
 
@@ -202,6 +202,84 @@ describe("contingency history (read-only)", () => {
         }
       }
     });
+  });
+
+  it.each(["VIEWER", "OPERATOR"] as const)("omits a contingency event creator before a %s can reuse it for account audit", async (role) => {
+    const seededAccountId = "user_admin";
+    const db = authedDb(role, new InMemoryD1());
+    db.dteEvents.push({
+      id: "event_contingency_creator",
+      document_id: "doc_contingency_creator",
+      event_type: "CONTINGENCIA",
+      environment: "00",
+      codigo_generacion: "CONTINGENCY-CODE",
+      status: "ACCEPTED",
+      sello_recibido: "CONTINGENCY-SEAL",
+      mh_estado: "PROCESADO",
+      mh_observaciones_json: "[]",
+      legal_deadline_at: null,
+      created_by: seededAccountId,
+      created_at: "2026-06-26T01:00:00.000Z",
+      accepted_at: "2026-06-26T01:01:00.000Z"
+    });
+
+    const contingencyResponse = await worker.fetch(
+      new Request("https://example.org/api/contingency", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(contingencyResponse.status).toBe(200);
+    const contingency = (await contingencyResponse.json()) as {
+      contingency: { events: Array<Record<string, unknown>> };
+    };
+    const event = contingency.contingency.events[0]!;
+    const leakedAccountId = String(event.created_by ?? seededAccountId);
+
+    db.preparedSql.length = 0;
+    const auditResponse = await worker.fetch(
+      new Request(`https://example.org/api/audit?entityType=user&entityId=${encodeURIComponent(leakedAccountId)}`, {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(Object.hasOwn(event, "created_by")).toBe(false);
+    expect(event).not.toHaveProperty("created_by");
+    expect(auditResponse.status).toBe(403);
+    expect(db.preparedSql.some((sql) => sql.includes("FROM audit_logs"))).toBe(false);
+  });
+
+  it.each(["ADMIN", "OWNER"] as const)("retains a contingency event creator for %s", async (role) => {
+    const db = authedDb(role, new InMemoryD1());
+    db.dteEvents.push({
+      id: "event_contingency_creator",
+      document_id: "doc_contingency_creator",
+      event_type: "CONTINGENCIA",
+      environment: "00",
+      codigo_generacion: "CONTINGENCY-CODE",
+      status: "ACCEPTED",
+      sello_recibido: "CONTINGENCY-SEAL",
+      mh_estado: "PROCESADO",
+      mh_observaciones_json: "[]",
+      legal_deadline_at: null,
+      created_by: "user_admin",
+      created_at: "2026-06-26T01:00:00.000Z",
+      accepted_at: "2026-06-26T01:01:00.000Z"
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/contingency", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { contingency: { events: Array<Record<string, unknown>> } };
+    expect(Object.hasOwn(body.contingency.events[0]!, "created_by")).toBe(true);
+    expect(body.contingency.events[0]).toHaveProperty("created_by", "user_admin");
   });
 });
 

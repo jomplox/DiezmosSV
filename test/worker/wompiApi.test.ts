@@ -1,11 +1,18 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { WompiApiError, WompiApiService } from "../../src/worker/services/wompiApi";
 import { CHECKOUT_WINDOW_MINUTES, WOMPI_INTERFAZ_MAX_MINUTES, WOMPI_INTERFAZ_MIN_MINUTES } from "../../src/shared/checkout";
 import type { DonationIntentRecord, Env } from "../../src/worker/types";
+import { bytesToBase64, hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
 
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+let signingCertificateXml: string;
+
+beforeAll(async () => {
+  signingCertificateXml = await generatedCertificateXml("test-certificate-password");
 });
 
 // The cards-only forma de pago every create/deactivate body must carry. The
@@ -20,10 +27,27 @@ const CARDS_ONLY_FORMA_PAGO = {
   permitePagoNequi: false
 };
 
+const WOMPI_CONFIGURATION_ERROR = "No se pudo preparar la configuración de Wompi";
+const INTERNAL_CONFIGURATION_TEXT = [
+  "EMISOR_CONFIG_JSON",
+  "MH_CERT_XML",
+  "MH_CERT_PASSWORD",
+  "MH_USER_TEST",
+  "MH_PASSWORD_TEST",
+  "MH_AUTH_URL_TEST",
+  "MH_RECEPCION_URL_TEST",
+  "MH_ANULACION_URL_TEST",
+  "El certificado del Ministerio de Hacienda",
+  "La contraseña de la llave privada",
+  "not-a-pkcs8-key",
+  "99999999999999"
+];
+
 // Minimal in-memory D1 covering exactly the two app_settings statements
 // Repository.getSetting/setSetting issue, so the token cache has real storage.
 class FakeD1 {
   readonly settings = new Map<string, string>();
+  getSettingFault: Error | null = null;
   prepare(sql: string) {
     return new FakeStatement(this, sql);
   }
@@ -38,6 +62,9 @@ class FakeStatement {
   }
   async first<T>(): Promise<T | null> {
     if (this.sql.includes("SELECT value FROM app_settings WHERE key = ?")) {
+      if (this.db.getSettingFault) {
+        throw this.db.getSettingFault;
+      }
       const value = this.db.settings.get(String(this.args[0]));
       return value === undefined ? null : ({ value } as T);
     }
@@ -231,14 +258,137 @@ describe("Wompi API service", () => {
   it.each([
     ["missing", undefined],
     ["invalid", "not-json"]
-  ])("rejects %s issuer configuration before contacting Wompi", async (_label, config) => {
+  ])("returns a safe typed error for %s issuer configuration before contacting Wompi", async (_label, config) => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     const env = realEnv();
     env.EMISOR_CONFIG_JSON = config;
 
-    await expect(new WompiApiService(env).createPaymentLink(intent())).rejects.toThrow(/EMISOR_CONFIG_JSON/);
+    const error = await new WompiApiService(env).createPaymentLink(intent()).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(WompiApiError);
+    expectSafeConfigurationError(error);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["missing", (env: Env) => { delete env.MH_CERT_XML; }],
+    ["mismatched", (env: Env) => { env.MH_CERT_XML = signingCertificateXml.replace("10000000000001", "99999999999999"); }],
+    ["inactive", (env: Env) => { env.MH_CERT_XML = signingCertificateXml.replace("<activo>true</activo>", "<activo>false</activo>"); }],
+    ["unimportable", (env: Env) => { env.MH_CERT_XML = signingCertificateXml.replace(/<privateKey><encodied>[\s\S]*?<\/encodied>/, "<privateKey><encodied>not-a-pkcs8-key</encodied>"); }]
+  ])("returns a safe typed error before Wompi when MH signing material is %s", async (_label, makeInvalid) => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const env = realEnv();
+    makeInvalid(env);
+
+    const error = await new WompiApiService(env).createPaymentLink(intent()).catch((caught: unknown) => caught);
+    expectSafeConfigurationError(error);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["certificate password", (env: Env) => { delete env.MH_CERT_PASSWORD; }],
+    ["credential user", (env: Env) => { delete env.MH_USER_TEST; }],
+    ["credential password", (env: Env) => { delete env.MH_PASSWORD_TEST; }],
+    ["authentication endpoint", (env: Env) => { delete env.MH_AUTH_URL_TEST; }],
+    ["reception endpoint", (env: Env) => { delete env.MH_RECEPCION_URL_TEST; }],
+    ["invalidation endpoint", (env: Env) => { delete env.MH_ANULACION_URL_TEST; }]
+  ])("returns a safe typed error before Wompi when the MH TEST %s is missing", async (_label, makeInvalid) => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const env = realEnv();
+    makeInvalid(env);
+
+    const error = await new WompiApiService(env).createPaymentLink(intent()).catch((caught: unknown) => caught);
+    expectSafeConfigurationError(error);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["an insecure authentication endpoint", (env: Env) => { env.MH_AUTH_URL_TEST = "http://apitest.dtes.mh.gob.sv/seguridad/auth"; }],
+    ["a cross-lane reception endpoint", (env: Env) => { env.MH_RECEPCION_URL_TEST = "https://api.dtes.mh.gob.sv/fesv/recepciondte"; }],
+    ["an invalidation endpoint for another MH service", (env: Env) => { env.MH_ANULACION_URL_TEST = "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"; }]
+  ])("fails closed before Wompi when MH TEST has %s", async (_label, makeInvalid) => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const env = realEnv();
+    makeInvalid(env);
+
+    const error = await new WompiApiService(env).createPaymentLink(intent()).catch((caught: unknown) => caught);
+    expectSafeConfigurationError(error);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("fails fiscal readiness on a hostile optional MH TEST fallback before the first Wompi fetch", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({
+        access_token: "wompi-access-token",
+        expires_in: 3600,
+        token_type: "Bearer"
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        idEnlace: 1,
+        urlEnlace: "https://s.wompi.sv/1",
+        urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1"
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+    const env = realEnv();
+    env.MH_AUTH_URL_TEST_FALLBACK = "https://credentials.example/collect";
+
+    const error = await new WompiApiService(env).createPaymentLink(intent()).catch((caught: unknown) => caught);
+
+    expectSafeConfigurationError(error);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("uses the production MH credential lane before contacting Wompi in production", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const env = realEnv();
+    env.APP_ENV = "production";
+    env.MH_USER_PROD = "production-mh-user";
+    env.MH_PASSWORD_PROD = "production-mh-password";
+    env.MH_AUTH_URL_PROD = "https://api.dtes.mh.gob.sv/seguridad/auth";
+    env.MH_RECEPCION_URL_PROD = "https://api.dtes.mh.gob.sv/fesv/recepciondte";
+    delete env.MH_USER_PROD;
+
+    const error = await new WompiApiService(env).createPaymentLink(intent()).catch((caught: unknown) => caught);
+    expectSafeConfigurationError(error);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not reclassify a notification D1 fault as Wompi configuration", async () => {
+    const db = new FakeD1();
+    const fault = new Error("synthetic D1 notification read fault");
+    db.getSettingFault = fault;
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await new WompiApiService(realEnv(db)).createPaymentLink(intent()).catch((caught: unknown) => caught);
+    expect(error).toBe(fault);
+    expect(error).not.toBeInstanceOf(WompiApiError);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a non-object response", []],
+    ["a non-positive link id", { idEnlace: 0, urlEnlace: "https://s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
+    ["an unexpected short-link host", { idEnlace: 1, urlEnlace: "https://evil.example/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
+    ["a short link with a mismatched id", { idEnlace: 1, urlEnlace: "https://s.wompi.sv/2", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
+    ["a short link with a query", { idEnlace: 1, urlEnlace: "https://s.wompi.sv/1?next=evil", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
+    ["a short link with userinfo", { idEnlace: 1, urlEnlace: "https://user@s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
+    ["a short link with an alternate port", { idEnlace: 1, urlEnlace: "https://s.wompi.sv:444/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
+    ["a long link with an unexpected query parameter", { idEnlace: 1, urlEnlace: "https://s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1&next=evil" }],
+    ["a long link with a fragment", { idEnlace: 1, urlEnlace: "https://s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=1#fragment" }]
+  ])("rejects %s from Wompi without returning a provider URL", async (_label, responseBody) => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ access_token: "wompi-access-token", expires_in: 3600, token_type: "Bearer" }))
+      .mockResolvedValueOnce(jsonResponse(responseBody));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(new WompiApiService(realEnv()).createPaymentLink(intent())).rejects.toBeInstanceOf(WompiApiError);
   });
 
   it("throws a typed error with the response text on a non-2xx link response", async () => {
@@ -638,6 +788,7 @@ function intent(overrides: Partial<DonationIntentRecord> = {}): DonationIntentRe
     client_ip: null,
     datos_token_hash: null,
     rate_limit_claim_id: null,
+    provider_creation_claim_id: null,
     paid_at: null,
     created_at: "2026-07-05T12:00:00.000Z",
     updated_at: "2026-07-05T12:00:00.000Z",
@@ -652,11 +803,19 @@ function realEnv(db: FakeD1 = new FakeD1()): Env {
     ISSUANCE_QUEUE: {} as Queue,
     ASSETS: {} as Fetcher,
     ARCHIVE: {} as R2Bucket,
+    APP_ENV: "local",
     MOCK_EXTERNAL_SERVICES: "false",
     APP_ORIGIN: "https://app.example.org",
     WOMPI_CLIENT_ID: "test-client-id",
     WOMPI_CLIENT_SECRET: "test-client-secret",
-    EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig())
+    EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+    MH_CERT_XML: signingCertificateXml,
+    MH_CERT_PASSWORD: "test-certificate-password",
+    MH_USER_TEST: "test-mh-user",
+    MH_PASSWORD_TEST: "test-mh-password",
+    MH_AUTH_URL_TEST: "https://apitest.dtes.mh.gob.sv/seguridad/auth",
+    MH_RECEPCION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/recepciondte",
+    MH_ANULACION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/anulardte"
   };
 }
 
@@ -692,4 +851,33 @@ function emisorConfig() {
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+}
+
+function expectSafeConfigurationError(error: unknown): void {
+  expect(error).toBeInstanceOf(WompiApiError);
+  const wompiError = error as WompiApiError;
+  expect(wompiError.code).toBe("wompi_configuration_error");
+  expect(wompiError.cause).toBeInstanceOf(Error);
+  const message = wompiError.message;
+  expect(message).toBe(WOMPI_CONFIGURATION_ERROR);
+  for (const forbidden of INTERNAL_CONFIGURATION_TEXT) {
+    expect(message).not.toContain(forbidden);
+  }
+}
+
+async function generatedCertificateXml(password: string): Promise<string> {
+  const pair = (await crypto.subtle.generateKey(
+    {
+      name: "RSASSA-PKCS1-v1_5",
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: "SHA-512"
+    },
+    true,
+    ["sign", "verify"]
+  )) as CryptoKeyPair;
+  const pkcs8 = new Uint8Array((await crypto.subtle.exportKey("pkcs8", pair.privateKey)) as ArrayBuffer);
+  const spki = new Uint8Array((await crypto.subtle.exportKey("spki", pair.publicKey)) as ArrayBuffer);
+  const passwordHash = hexFromBytes(new Uint8Array(await crypto.subtle.digest("SHA-512", utf8Bytes(password))));
+  return `<CertificadoMH><nit>10000000000001</nit><publicKey><encodied>${bytesToBase64(spki)}</encodied></publicKey><privateKey><encodied>${bytesToBase64(pkcs8)}</encodied><clave>${passwordHash}</clave></privateKey><activo>true</activo></CertificadoMH>`;
 }
