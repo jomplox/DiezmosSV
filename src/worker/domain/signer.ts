@@ -9,27 +9,19 @@ export interface ParsedMhCertificate {
 }
 
 export async function signMhDocument(document: unknown, certXml: string, password: string): Promise<string> {
-  const certificate = await parseMhCertificate(certXml);
-  if (!certificate.active) {
-    throw new Error("El certificado del Ministerio de Hacienda no está activo");
-  }
-  const passwordHash = await sha512Hex(password);
-  if (passwordHash !== certificate.privateKeyPasswordHash.toLowerCase()) {
-    throw new Error("La contraseña de la llave privada del Ministerio de Hacienda no coincide");
-  }
+  const key = await loadMhSigningKey(certXml, password);
 
   const header = base64UrlFromString(JSON.stringify({ alg: "RS512" }));
   const payload = base64UrlFromString(JSON.stringify(document, null, 2));
   const signingInput = `${header}.${payload}`;
-  const key = await crypto.subtle.importKey(
-    "pkcs8",
-    base64ToBytes(certificate.privateKeyBase64),
-    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-512" },
-    false,
-    ["sign"]
-  );
   const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, utf8Bytes(signingInput));
   return `${signingInput}.${base64UrlFromBytes(new Uint8Array(signature))}`;
+}
+
+export async function assertMhSigningMaterialReady(certXml: string, password: string): Promise<ParsedMhCertificate> {
+  const certificate = await parseMhCertificate(certXml);
+  await loadMhSigningKey(certXml, password, certificate);
+  return certificate;
 }
 
 export async function verifyMhJws(jws: string, certXml: string): Promise<boolean> {
@@ -111,6 +103,28 @@ export async function parseMhCertificate(certXml: string): Promise<ParsedMhCerti
 async function sha512Hex(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-512", utf8Bytes(value));
   return hexFromBytes(new Uint8Array(digest));
+}
+
+async function loadMhSigningKey(
+  certXml: string,
+  password: string,
+  certificate?: ParsedMhCertificate
+): Promise<CryptoKey> {
+  const parsedCertificate = certificate ?? await parseMhCertificate(certXml);
+  if (!parsedCertificate.active) {
+    throw new Error("El certificado del Ministerio de Hacienda no está activo");
+  }
+  const passwordHash = await sha512Hex(password);
+  if (passwordHash !== parsedCertificate.privateKeyPasswordHash.toLowerCase()) {
+    throw new Error("La contraseña de la llave privada del Ministerio de Hacienda no coincide");
+  }
+  return crypto.subtle.importKey(
+    "pkcs8",
+    base64ToBytes(parsedCertificate.privateKeyBase64),
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-512" },
+    false,
+    ["sign"]
+  );
 }
 
 function extractTag(xml: string, tag: string): string {

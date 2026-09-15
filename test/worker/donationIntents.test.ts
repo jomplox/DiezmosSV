@@ -121,7 +121,7 @@ describe("donation intents repository", () => {
       clientIp: "203.0.113.9",
       expiresAt: "2026-07-05T13:00:00.000Z",
       datosTokenHash: null,
-      rateLimitClaimId: "rate_seed"
+      providerCreationClaimId: "provider_seed"
     });
 
     expect(created.id).toBe("di_seed");
@@ -144,7 +144,7 @@ describe("donation intents repository", () => {
     // The capability hash and admission provenance follow gift_type.
     expect(insert!.args[14]).toBeNull();
     expect(insert!.args[15]).toBeNull();
-    expect(insert!.args[16]).toBe("rate_seed");
+    expect(insert!.args[16]).toBe("provider_seed");
   });
 
   it("binds the razón social and país when the intent carries them (NIT / foreign path)", async () => {
@@ -168,7 +168,7 @@ describe("donation intents repository", () => {
       clientIp: "203.0.113.9",
       expiresAt: "2026-07-05T13:00:00.000Z",
       datosTokenHash: "a".repeat(64),
-      rateLimitClaimId: "rate_foreign"
+      providerCreationClaimId: "provider_foreign"
     });
 
     const insert = db.calls.find((call) => call.sql.includes("INSERT INTO donation_intents"));
@@ -180,7 +180,7 @@ describe("donation intents repository", () => {
     expect(insert!.args).toContain("DIEZMO");
     expect(insert!.args[14]).toBe("DIEZMO");
     expect(insert!.args[15]).toBe("a".repeat(64));
-    expect(insert!.args[16]).toBe("rate_foreign");
+    expect(insert!.args[16]).toBe("provider_foreign");
   });
 
   it("consumes a datos capability with one guarded UPDATE RETURNING", async () => {

@@ -7,7 +7,9 @@ const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/Ap
 describe("authenticated account state boundary", () => {
   it("uses one complete account-state reset on login, logout, and session expiry", () => {
     expect(appSource).toContain("function resetAccountState()");
-    expect(appSource).toMatch(/async function login[\s\S]*?resetAccountState\(\);[\s\S]*?setToken\(result\.token\)/);
+    expect(appSource).toMatch(/function establishSession[\s\S]*?resetAccountState\(\);[\s\S]*?setToken\(result\.token\)/);
+    expect(appSource).toMatch(/async function login[\s\S]*?establishSession\(result\)/);
+    expect(appSource).toMatch(/async function completeLoginMfa[\s\S]*?establishSession\(result\)/);
     expect(appSource).toMatch(/async function logout[\s\S]*?resetAccountState\(\);[\s\S]*?setToken\(""\)/);
     expect(appSource).toMatch(/function expireSession[\s\S]*?resetAccountState\(\);[\s\S]*?setToken\(""\)/);
 

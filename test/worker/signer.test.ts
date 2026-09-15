@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { certificateExpiry, parseMhCertificate, signMhDocument, verifyMhJws } from "../../src/worker/domain/signer";
+import { assertMhSigningMaterialReady, certificateExpiry, parseMhCertificate, signMhDocument, verifyMhJws } from "../../src/worker/domain/signer";
 import { base64ToBytes, bytesToBase64, hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
 
 // El certificado demo del firmador de MH vive en DTE/dte-firmador/, que está
@@ -42,6 +42,18 @@ describe("native MH signer", () => {
     await expect(signMhDocument(payload, await generatedCertificateXml(password), "wrong-password")).rejects.toThrow(
       "La contraseña de la llave privada del Ministerio de Hacienda no coincide"
     );
+  });
+
+  it("validates active, password-matching, importable signing material without signing a document", async () => {
+    const password = "correct horse battery staple";
+
+    await expect(assertMhSigningMaterialReady(await generatedCertificateXml(password), password)).resolves.toMatchObject({
+      nit: "12345678901234",
+      active: true
+    });
+    await expect(assertMhSigningMaterialReady(await generatedCertificateXml(password, false), password)).rejects.toThrow(/no está activo/);
+    await expect(assertMhSigningMaterialReady(await generatedCertificateXml(password), "wrong-password")).rejects.toThrow(/no coincide/);
+    await expect(assertMhSigningMaterialReady(await unimportableCertificateXml(password), password)).rejects.toThrow();
   });
 });
 
@@ -101,4 +113,9 @@ async function generatedCertificateXml(
   const passwordHash = hexFromBytes(new Uint8Array(await crypto.subtle.digest("SHA-512", utf8Bytes(password))));
   const certificado = options.validity ? `<certificado><basicEstructure>${options.validity}</basicEstructure></certificado>` : "";
   return `<CertificadoMH><nit>12345678901234</nit><publicKey><encodied>${bytesToBase64(spki)}</encodied></publicKey><privateKey><encodied>${bytesToBase64(pkcs8)}</encodied><clave>${passwordHash}</clave></privateKey><activo>${active ? "true" : "false"}</activo>${certificado}</CertificadoMH>`;
+}
+
+async function unimportableCertificateXml(password: string): Promise<string> {
+  const certificate = await generatedCertificateXml(password);
+  return certificate.replace(/<privateKey><encodied>[\s\S]*?<\/encodied>/, "<privateKey><encodied>not-a-pkcs8-key</encodied>");
 }

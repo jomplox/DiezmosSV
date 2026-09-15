@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
-import { elSalvadorMonth } from "../../src/worker/services/retention";
+import {
+  RETENTION_CANONICAL_TABLES,
+  elSalvadorMonth,
+  type RetentionManifest
+} from "../../src/worker/services/retention";
 import { utf8Bytes } from "../../src/worker/utils/encoding";
 import type { Env } from "../../src/worker/types";
 import { env, FakeArchiveBucket, InMemoryD1 } from "./support/inMemoryD1";
@@ -112,18 +116,58 @@ describe("manual retention export endpoint", () => {
 });
 
 describe("admin backups panel", () => {
-  function seedManifest(archive: FakeArchiveBucket, month: string, tables: Record<string, { rowCount: number; body: string }>): Promise<void> {
+  function seedManifest(
+    archive: FakeArchiveBucket,
+    month: string,
+    tables: Record<string, { rowCount: number; body: string }> = {}
+  ): Promise<RetentionManifest> {
     return (async () => {
       const prefix = `retention/${month.slice(0, 4)}/${month}`;
-      const manifestTables: Record<string, { rowCount: number; sha256: string }> = {};
-      for (const [table, { rowCount, body }] of Object.entries(tables)) {
+      const runId = "11111111-1111-4111-8111-111111111111";
+      const manifestTables: RetentionManifest["tables"] = {};
+      for (const table of RETENTION_CANONICAL_TABLES) {
+        const { rowCount, body } = tables[table] ?? { rowCount: 0, body: "" };
         const bytes = utf8Bytes(body);
-        await archive.put(`${prefix}/${table}.ndjson`, bytes);
-        manifestTables[table] = { rowCount, sha256: await sha256Hex(bytes) };
+        const key = `${prefix}/runs/${runId}/${table}.ndjson`;
+        await archive.put(key, bytes);
+        manifestTables[table] = { key, rowCount, sha256: await sha256Hex(bytes) };
       }
-      const manifest = { month, generatedAt: `${month}-28T09:00:00.000Z`, tables: manifestTables };
+      const manifest: RetentionManifest = {
+        version: 2,
+        runId,
+        month,
+        generatedAt: `${month}-28T09:00:00.000Z`,
+        tables: manifestTables
+      };
       await archive.put(`${prefix}/manifest.json`, utf8Bytes(JSON.stringify(manifest)));
+      return manifest;
     })();
+  }
+
+  async function seedCompletionAnchor(
+    db: InMemoryD1,
+    manifest: RetentionManifest,
+    kind: "new" | "legacy" = "new"
+  ): Promise<void> {
+    const totalRows = Object.values(manifest.tables).reduce((sum, entry) => sum + entry.rowCount, 0);
+    const metadata = kind === "new"
+      ? {
+          month: manifest.month,
+          runId: manifest.runId,
+          generatedAt: manifest.generatedAt,
+          totalRows,
+          tables: manifest.tables,
+          manifestSha256: await sha256Hex(utf8Bytes(JSON.stringify(manifest)))
+        }
+      : { month: manifest.month, totalRows, tables: manifest.tables };
+    db.audits.push({
+      id: `audit_anchor_${kind}`,
+      action: "RETENTION_EXPORT_COMPLETED",
+      entity_type: "retention_export",
+      entity_id: manifest.month,
+      metadata_json: JSON.stringify(metadata),
+      created_at: "2026-07-01T09:00:04.000Z"
+    });
   }
 
   it("lists archived, missing, and in-progress months newest-first with parsed manifest data", async () => {
@@ -168,6 +212,43 @@ describe("admin backups panel", () => {
     await expect(response.json()).resolves.toEqual({ months: [] });
   });
 
+  it("does not list, resolve a table from, or ZIP a present-invalid manifest", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    db.documents.push(testDocument({ id: "doc_invalid_manifest", created_at: "2026-04-10T12:00:00.000Z" }));
+    const archive = new FakeArchiveBucket();
+    await seedManifest(archive, "2026-04", { dte_documents: { rowCount: 1, body: "must not escape\n" } });
+    await archive.put("retention/2026/2026-04/manifest.json", utf8Bytes(JSON.stringify({
+      version: 2,
+      runId: "11111111-1111-4111-8111-111111111111",
+      month: "2026-04",
+      generatedAt: "2026-05-01T09:00:00.000Z",
+      tables: {}
+    })));
+    const workerEnv = env(db, { ARCHIVE: archive as unknown as R2Bucket });
+    const headers = { Authorization: "Bearer test-token" };
+
+    const listResponse = await worker.fetch(
+      new Request("https://example.org/api/admin/backups", { headers }),
+      workerEnv
+    );
+    const listPayload = (await listResponse.json()) as { months: Array<{ month: string; status: string }> };
+    expect(listPayload.months.find((entry) => entry.month === "2026-04")).toMatchObject({ status: "faltante" });
+
+    const tableResponse = await worker.fetch(
+      new Request("https://example.org/api/admin/backups/2026-04/download?table=dte_documents", { headers }),
+      workerEnv
+    );
+    expect(tableResponse.status).toBe(404);
+
+    const zipResponse = await worker.fetch(
+      new Request("https://example.org/api/admin/backups/2026-04/download-all", { headers }),
+      workerEnv
+    );
+    expect(zipResponse.status).toBe(404);
+    expect(db.audits.filter((row) => row.action === "RETENTION_DOWNLOADED")).toHaveLength(0);
+  });
+
   it("rejects a VIEWER with 403 and an unauthenticated caller with 401", async () => {
     const dbViewer = new InMemoryD1();
     dbViewer.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
@@ -185,10 +266,11 @@ describe("admin backups panel", () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
     const archive = new FakeArchiveBucket();
-    await seedManifest(archive, "2026-04", {
+    const manifest = await seedManifest(archive, "2026-04", {
       dte_documents: { rowCount: 1, body: "row\n" },
       audit_logs: { rowCount: 0, body: "" }
     });
+    await seedCompletionAnchor(db, manifest);
 
     const response = await worker.fetch(
       new Request("https://example.org/api/admin/backups/2026-04/verify", {
@@ -202,9 +284,147 @@ describe("admin backups panel", () => {
     const payload = (await response.json()) as { ok: boolean; files: Array<{ table: string; ok: boolean }> };
     expect(payload.ok).toBe(true);
     expect(payload.files.every((file) => file.ok)).toBe(true);
+    expect(payload.files.map((file) => file.table)).toEqual(RETENTION_CANONICAL_TABLES);
+    expect(archive.getCalls).toEqual([
+      "retention/2026/2026-04/manifest.json",
+      ...RETENTION_CANONICAL_TABLES.map((table) => manifest.tables[table].key)
+    ]);
     expect(db.audits).toContainEqual(
       expect.objectContaining({ action: "RETENTION_VERIFIED", entity_type: "retention_export", entity_id: "2026-04" })
     );
+  });
+
+  it("verifies a strict manifest against an exact legacy completion anchor", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    const archive = new FakeArchiveBucket();
+    const manifest = await seedManifest(archive, "2026-04", {
+      dte_documents: { rowCount: 1, body: "legacy anchored row\n" }
+    });
+    await seedCompletionAnchor(db, manifest, "legacy");
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/admin/backups/2026-04/verify", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: true });
+    expect(db.audits.filter((row) => row.action === "RETENTION_VERIFIED")).toHaveLength(1);
+  });
+
+  it.each([
+    ["present invalid manifest", async (_db: InMemoryD1, archive: FakeArchiveBucket) => {
+      await seedManifest(archive, "2026-04");
+      await archive.put("retention/2026/2026-04/manifest.json", utf8Bytes(JSON.stringify({
+        version: 2,
+        runId: "11111111-1111-4111-8111-111111111111",
+        month: "2026-04",
+        generatedAt: "2026-05-01T09:00:00.000Z",
+        tables: {}
+      })));
+    }, "manifest_invalid"],
+    ["missing D1 anchor", async (_db: InMemoryD1, archive: FakeArchiveBucket) => {
+      await seedManifest(archive, "2026-04");
+    }, "anchor_missing"],
+    ["malformed latest D1 anchor", async (db: InMemoryD1, archive: FakeArchiveBucket) => {
+      const manifest = await seedManifest(archive, "2026-04");
+      await seedCompletionAnchor(db, manifest);
+      db.audits.push({
+        id: "audit_anchor_malformed_latest",
+        action: "RETENTION_EXPORT_COMPLETED",
+        entity_type: "retention_export",
+        entity_id: "2026-04",
+        metadata_json: "{",
+        created_at: "2026-07-01T09:00:05.000Z"
+      });
+    }, "anchor_invalid"],
+    ["malformed new D1 anchor", async (db: InMemoryD1, archive: FakeArchiveBucket) => {
+      const manifest = await seedManifest(archive, "2026-04");
+      await seedCompletionAnchor(db, manifest);
+      const anchor = db.audits.at(-1)!;
+      const metadata = JSON.parse(String(anchor.metadata_json)) as Record<string, unknown>;
+      delete metadata.generatedAt;
+      anchor.metadata_json = JSON.stringify(metadata);
+    }, "anchor_invalid"],
+    ["malformed legacy D1 anchor", async (db: InMemoryD1, archive: FakeArchiveBucket) => {
+      const manifest = await seedManifest(archive, "2026-04");
+      await seedCompletionAnchor(db, manifest, "legacy");
+      const anchor = db.audits.at(-1)!;
+      const metadata = JSON.parse(String(anchor.metadata_json)) as { tables: RetentionManifest["tables"] };
+      delete metadata.tables.audit_logs;
+      anchor.metadata_json = JSON.stringify(metadata);
+    }, "anchor_invalid"],
+    ["anchor run mismatch", async (db: InMemoryD1, archive: FakeArchiveBucket) => {
+      const manifest = await seedManifest(archive, "2026-04");
+      await seedCompletionAnchor(db, manifest);
+      const anchor = db.audits.at(-1)!;
+      const metadata = JSON.parse(String(anchor.metadata_json)) as { runId: string };
+      metadata.runId = "22222222-2222-4222-8222-222222222222";
+      anchor.metadata_json = JSON.stringify(metadata);
+    }, "anchor_mismatch"],
+    ["anchor table mismatch", async (db: InMemoryD1, archive: FakeArchiveBucket) => {
+      const manifest = await seedManifest(archive, "2026-04");
+      await seedCompletionAnchor(db, manifest);
+      const anchor = db.audits.at(-1)!;
+      const metadata = JSON.parse(String(anchor.metadata_json)) as { tables: RetentionManifest["tables"] };
+      metadata.tables.audit_logs.rowCount = 1;
+      anchor.metadata_json = JSON.stringify(metadata);
+    }, "anchor_mismatch"],
+    ["anchor digest mismatch", async (db: InMemoryD1, archive: FakeArchiveBucket) => {
+      const manifest = await seedManifest(archive, "2026-04");
+      await seedCompletionAnchor(db, manifest);
+      const anchor = db.audits.at(-1)!;
+      const metadata = JSON.parse(String(anchor.metadata_json)) as { manifestSha256: string };
+      metadata.manifestSha256 = "b".repeat(64);
+      anchor.metadata_json = JSON.stringify(metadata);
+    }, "anchor_mismatch"],
+    ["forged manifest and matching forged body", async (db: InMemoryD1, archive: FakeArchiveBucket) => {
+      const manifest = await seedManifest(archive, "2026-04");
+      await seedCompletionAnchor(db, manifest);
+      const forgedBody = utf8Bytes("forged but internally consistent\n");
+      manifest.tables.audit_logs.rowCount = 1;
+      manifest.tables.audit_logs.sha256 = await sha256Hex(forgedBody);
+      await archive.put(manifest.tables.audit_logs.key, forgedBody);
+      await archive.put("retention/2026/2026-04/manifest.json", utf8Bytes(JSON.stringify(manifest)));
+    }, "anchor_mismatch"]
+  ])("fails closed before table-body reads for %s", async (_name, arrange, reason) => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    const archive = new FakeArchiveBucket();
+    await arrange(db, archive);
+    const sent: unknown[] = [];
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/admin/backups/2026-04/verify", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, {
+        ARCHIVE: archive as unknown as R2Bucket,
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "alerts@example.org",
+        EMAIL: {
+          send: async (message: unknown) => {
+            sent.push(message);
+            return { messageId: "alert-anchor" };
+          }
+        } as unknown as Env["EMAIL"]
+      })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: false, reason, files: [] });
+    expect(archive.getCalls).toEqual(["retention/2026/2026-04/manifest.json"]);
+    expect(db.audits.filter((row) => row.action === "RETENTION_VERIFY_FAILED")).toHaveLength(1);
+    expect(db.audits.filter((row) => row.action === "RETENTION_VERIFIED")).toHaveLength(0);
+    expect(sent).toHaveLength(1);
+    const failed = db.audits.find((row) => row.action === "RETENTION_VERIFY_FAILED")!;
+    expect(JSON.parse(String(failed.metadata_json))).toMatchObject({ month: "2026-04", reason });
   });
 
   it("reports a mismatch, audits RETENTION_VERIFY_FAILED, and sends an operational alert when an object is corrupted", async () => {
@@ -213,9 +433,10 @@ describe("admin backups panel", () => {
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
     const sent: unknown[] = [];
     const archive = new FakeArchiveBucket();
-    await seedManifest(archive, "2026-04", { dte_documents: { rowCount: 1, body: "row\n" } });
+    const manifest = await seedManifest(archive, "2026-04", { dte_documents: { rowCount: 1, body: "row\n" } });
+    await seedCompletionAnchor(db, manifest);
     // Corrupt the stored object's bytes so its SHA-256 no longer matches the manifest.
-    await archive.put("retention/2026/2026-04/dte_documents.ndjson", utf8Bytes("tampered\n"));
+    await archive.put(manifest.tables.dte_documents.key, utf8Bytes("tampered\n"));
 
     const response = await worker.fetch(
       new Request("https://example.org/api/admin/backups/2026-04/verify", {
@@ -333,11 +554,11 @@ describe("admin backups panel", () => {
     const archive = new FakeArchiveBucket();
     // One object claims a size beyond the 32 MiB budget; its body is tiny so the test
     // itself stays cheap — the guard must trust the R2-reported size, not read first.
-    await seedManifest(archive, "2026-04", {
+    const manifest = await seedManifest(archive, "2026-04", {
       dte_documents: { rowCount: 2, body: "line1\nline2\n" },
       audit_logs: { rowCount: 1, body: "audit\n" }
     });
-    archive.sizeOverrides.set("retention/2026/2026-04/dte_documents.ndjson", 32 * 1024 * 1024 + 1);
+    archive.sizeOverrides.set(manifest.tables.dte_documents.key, 32 * 1024 * 1024 + 1);
 
     const response = await worker.fetch(
       new Request("https://example.org/api/admin/backups/2026-04/download-all", {

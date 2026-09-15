@@ -3701,6 +3701,11 @@ describe("guarded fiscal correction API", () => {
     });
     const runtime = correctionRuntime(db);
     runtime.APP_ENV = "production";
+    runtime.MOCK_EXTERNAL_SERVICES = "false";
+    runtime.EMAIL_FROM = "comprobantes@example.org";
+    runtime.EMAIL = {
+      send: async () => ({ messageId: "production-correction-email" })
+    } as SendEmail;
     runtime.MH_CERT_XML = await generatedCertificateXml("cert-password");
     runtime.MH_CERT_PASSWORD = "cert-password";
     const sequenceBefore = db.nextSequence;

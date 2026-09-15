@@ -6,6 +6,30 @@ import {
 import { newId } from "../../utils/ids";
 import { redactSensitiveAuditRows } from "../shared";
 
+export interface RetentionExportCompletionAudit {
+  id: string;
+  metadataJson: string;
+  createdAt: string;
+}
+
+export async function getLatestRetentionExportCompletionAudit(
+  db: D1Database,
+  month: string
+): Promise<RetentionExportCompletionAudit | null> {
+  return db
+    .prepare(
+      `SELECT id, metadata_json AS metadataJson, created_at AS createdAt
+         FROM audit_logs
+        WHERE action = 'RETENTION_EXPORT_COMPLETED'
+          AND entity_type = 'retention_export'
+          AND entity_id = ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1`
+    )
+    .bind(month)
+    .first<RetentionExportCompletionAudit>();
+}
+
 export async function createAudit(
   db: D1Database,
   auditContext: AuditRequestContext | undefined,

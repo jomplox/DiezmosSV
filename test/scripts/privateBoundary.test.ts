@@ -39,7 +39,8 @@ describe("private artifact boundary checker", () => {
     "examples/archive/DTE-private.json",
     "examples/archive/deeper/DTE-private.pdf",
     "node_modules/.cache/wrangler/wrangler-account.json",
-    "node_modules/.mf/cf.json"
+    "node_modules/.mf/cf.json",
+    "tmp/pdfs/donor-render.pdf"
   ])("rejects %s without printing its contents", (path) => {
     const cwd = fixture({ [path]: sentinel });
     const result = run(cwd);
@@ -267,6 +268,7 @@ describe("private artifact boundary checker", () => {
     "examples/DTE-private.json",
     "examples/archive/DTE-private.json",
     "examples/archive/deeper/DTE-private.pdf",
+    "tmp/pdfs/donor-render.pdf",
     ".private-boundary-hosts"
   ])("keeps Git ignore coverage aligned at every depth: %s", (path) => {
     const cwd = fixture({ [path]: sentinel });
