@@ -800,7 +800,7 @@ describe("IssuancePipeline.processFiscalCorrection happy path", () => {
     // The persisted CDE carries the CORRECTED receptor identity.
     expect(JSON.parse(String(document.plain_json)).receptor).toMatchObject({
       tipoDocumento: "13",
-      numDocumento: "10000002-7",
+      numDocumento: "100000027",
       nombre: "Ana Donante"
     });
     // The MH dispatch boundary was marked with the exact document claim evidence.

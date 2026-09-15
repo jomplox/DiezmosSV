@@ -236,7 +236,7 @@ describe("donation intent correlation", () => {
     // Wompi's sheet — the intent no longer carries them), telefono from the intent phone.
     expect(cde.receptor).toMatchObject({
       tipoDocumento: "13",
-      numDocumento: "10000002-7",
+      numDocumento: "100000027",
       nombre: "Fallback Cliente",
       correo: "fallback@example.org",
       telefono: "70001111",
@@ -642,7 +642,7 @@ describe("donation intent correlation", () => {
 
     const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
     // telefono = intent.donor_phone ?? webhook Celular; identity/address stay from the intent.
-    expect(cde.receptor).toMatchObject({ numDocumento: "10000002-7", telefono: "70000003", direccion: INTENT_ADDRESS });
+    expect(cde.receptor).toMatchObject({ numDocumento: "100000027", telefono: "70000003", direccion: INTENT_ADDRESS });
   });
 
   it("correlates an EXPIRED intent (donor paid in the link's last minute)", async () => {
@@ -654,7 +654,7 @@ describe("donation intent correlation", () => {
 
     const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
     // numDocumento/direccion still come from the intent; nombre/correo from the webhook.
-    expect(cde.receptor).toMatchObject({ numDocumento: "10000002-7", nombre: "Fallback Cliente", direccion: INTENT_ADDRESS });
+    expect(cde.receptor).toMatchObject({ numDocumento: "100000027", nombre: "Fallback Cliente", direccion: INTENT_ADDRESS });
     expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.status).toBe("COMPLETED");
   });
 
@@ -680,7 +680,7 @@ describe("donation intent correlation", () => {
     const cde = JSON.parse(record!.plain_json) as { resumen: { valorTotal: number }; receptor: Record<string, unknown> };
     expect(cde.resumen.valorTotal).toBe(30);
     // Still correlated to the intent despite the mismatch: numDocumento/direccion prove it.
-    expect(cde.receptor).toMatchObject({ numDocumento: "10000002-7", direccion: INTENT_ADDRESS });
+    expect(cde.receptor).toMatchObject({ numDocumento: "100000027", direccion: INTENT_ADDRESS });
     const mismatch = db.audits.find((row) => row.action === "DONATION_INTENT_AMOUNT_MISMATCH");
     expect(mismatch).toBeTruthy();
     expect(mismatch).toMatchObject({ entity_type: "donation_intent", entity_id: "di_corr_1" });
@@ -871,7 +871,7 @@ describe("donation intent correlation", () => {
     const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
 
     const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
-    expect(cde.receptor).toMatchObject({ numDocumento: "10000002-7", direccion: INTENT_ADDRESS });
+    expect(cde.receptor).toMatchObject({ numDocumento: "100000027", direccion: INTENT_ADDRESS });
     expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.status).toBe("COMPLETED");
     expect(db.audits.find((row) => row.action === "DONATION_INTENT_BINDING_REJECTED")).toBeUndefined();
   });
@@ -1476,7 +1476,7 @@ describe("deferred transmission when MH is unavailable", () => {
     };
     expect(cde.identificacion.tipoModelo).toBe(1);
     // The intent override and gift type survive the deferral unchanged.
-    expect(cde.receptor).toMatchObject({ numDocumento: "10000002-7", direccion: INTENT_ADDRESS });
+    expect(cde.receptor).toMatchObject({ numDocumento: "100000027", direccion: INTENT_ADDRESS });
     expect(cde.apendice).toContainEqual({ campo: "TipoAportacion", etiqueta: "Tipo", valor: "Diezmo" });
     expect(cde.cuerpoDocumento[0].descripcion).toBe("DONACIÓN");
     expect(db.audits).toContainEqual(

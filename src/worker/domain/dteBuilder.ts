@@ -526,6 +526,8 @@ function validateCdeDui(document: Record<string, unknown>): void {
   const receptor = isRecord(document.receptor) ? document.receptor : {};
   if (isDuiDocumentType(receptor.tipoDocumento)) {
     assertValidDui(valueAsString(receptor.numDocumento));
+    // MH Normativa v2, field 39 rule 10: transmit nine digits without punctuation.
+    receptor.numDocumento = cleanDui(valueAsString(receptor.numDocumento));
   }
 }
 

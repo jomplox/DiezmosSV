@@ -631,7 +631,7 @@ describe("document invalidation", () => {
       email_type: "dteInvalidation",
       document_status_at_send: "INVALIDATED",
       template_version: expect.stringMatching(/^dteInvalidation:sha256:[a-f0-9]{64}$/),
-      pdf_renderer_version: "cde-pdf:v4",
+      pdf_renderer_version: "cde-pdf:v5",
       pdf_sha256: invalidationPdfSha256,
       dte_json_sha256: await sha256Hex(invalidationJsonBytes),
       provider_delivery_id: providerDeliveryId,
