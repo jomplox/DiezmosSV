@@ -517,6 +517,11 @@ function intentReceptorDireccion(
 }
 
 function validateBuiltCde(document: Record<string, unknown>): void {
+  const receptor = isRecord(document.receptor) ? document.receptor : {};
+  if (receptor.codDomiciliado === 1 && receptor.codActividad == null && receptor.descActividad == null) {
+    receptor.codActividad = "10001";
+    receptor.descActividad = "Empleados";
+  }
   validateCdeDui(document);
   validateCdeCatalogs(document);
   validateCde(document);

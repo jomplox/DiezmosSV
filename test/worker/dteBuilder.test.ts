@@ -34,6 +34,23 @@ describe("DTE builders", () => {
     expect(document.cuerpoDocumento[0].descripcion).toBe("DONACIÓN");
   });
 
+  it("uses the approved employee activity for domestic donations and preserves explicit activity", () => {
+    const document = buildCdeDocument(wompiSample as WompiWebhook, emisorConfig, { sequence: 1 }) as Record<string, any>;
+    expect(document.receptor).toMatchObject({ codDomiciliado: 1, codActividad: "10001", descActividad: "Empleados" });
+    document.receptor.codActividad = "62010";
+    document.receptor.descActividad = "Programación informática";
+    const advanced = buildAdvancedCdeDocument(document, emisorConfig, { sequence: 2 }) as Record<string, any>;
+    expect(advanced.receptor).toMatchObject({ codActividad: "62010", descActividad: "Programación informática" });
+  });
+
+  it("keeps activity null for non-domiciled donors", () => {
+    const document = buildCdeDocument({
+      ...wompiSample,
+      Cliente: { ...wompiSample.Cliente, CodigoPais: "US" }
+    } as WompiWebhook, emisorConfig, { sequence: 1 }) as Record<string, any>;
+    expect(document.receptor).toMatchObject({ codDomiciliado: 2, codActividad: null, descActividad: null });
+  });
+
   it("uses a reserved generation code for a Wompi CDE", () => {
     const document = buildCdeDocument(wompiSample as WompiWebhook, emisorConfig, {
       sequence: 31,
