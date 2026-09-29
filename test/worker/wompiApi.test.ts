@@ -85,7 +85,7 @@ describe("Wompi API service", () => {
       .mockResolvedValueOnce(
         jsonResponse({
           idEnlace: 987654,
-          urlEnlace: "https://s.wompi.sv/987654",
+          urlEnlace: "https://s.wompi.sv/1234567AbC",
           urlEnlaceLargo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=773b3c29-abc"
         })
       );
@@ -96,7 +96,7 @@ describe("Wompi API service", () => {
 
     expect(link).toEqual({
       idEnlace: 987654,
-      urlEnlace: "https://s.wompi.sv/987654",
+      urlEnlace: "https://s.wompi.sv/1234567AbC",
       urlEnlaceLargo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=773b3c29-abc"
     });
 
@@ -156,8 +156,8 @@ describe("Wompi API service", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({ access_token: "wompi-access-token", expires_in: 3600, token_type: "Bearer" }))
-      .mockResolvedValueOnce(jsonResponse({ idEnlace: 1, urlEnlace: "https://s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }))
-      .mockResolvedValueOnce(jsonResponse({ idEnlace: 2, urlEnlace: "https://s.wompi.sv/2", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=2" }));
+      .mockResolvedValueOnce(jsonResponse({ idEnlace: 1, urlEnlace: "https://s.wompi.sv/AbC123xY-", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }))
+      .mockResolvedValueOnce(jsonResponse({ idEnlace: 2, urlEnlace: "https://s.wompi.sv/DeF456zW_", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=2" }));
     vi.stubGlobal("fetch", fetchMock);
 
     const service = new WompiApiService(realEnv(db));
@@ -204,7 +204,7 @@ describe("Wompi API service", () => {
       const fetchMock = vi
         .fn()
         .mockResolvedValueOnce(jsonResponse({ access_token: "wompi-access-token", expires_in: 3600, token_type: "Bearer" }))
-        .mockResolvedValueOnce(jsonResponse({ idEnlace: 1, urlEnlace: "https://s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }));
+        .mockResolvedValueOnce(jsonResponse({ idEnlace: 1, urlEnlace: "https://s.wompi.sv/AbC123xY-", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }));
       vi.stubGlobal("fetch", fetchMock);
 
       await new WompiApiService(realEnv()).createPaymentLink(intent({ gift_type: giftType as "DIEZMO" | "OFRENDA" | null }));
@@ -223,7 +223,7 @@ describe("Wompi API service", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({ access_token: "wompi-access-token", expires_in: 3600, token_type: "Bearer" }))
-      .mockResolvedValueOnce(jsonResponse({ idEnlace: 1, urlEnlace: "https://s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }));
+      .mockResolvedValueOnce(jsonResponse({ idEnlace: 1, urlEnlace: "https://s.wompi.sv/AbC123xY-", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }));
     vi.stubGlobal("fetch", fetchMock);
 
     await new WompiApiService(realEnv()).createPaymentLink(intent());
@@ -329,7 +329,7 @@ describe("Wompi API service", () => {
       }))
       .mockResolvedValueOnce(jsonResponse({
         idEnlace: 1,
-        urlEnlace: "https://s.wompi.sv/1",
+        urlEnlace: "https://s.wompi.sv/AbC123xY-",
         urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1"
       }));
     vi.stubGlobal("fetch", fetchMock);
@@ -371,7 +371,7 @@ describe("Wompi API service", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it.each(["1234567AbC", "1234568xY-", "1234569xY_"])("accepts Wompi's opaque short-link code %s independently of the numeric id", async (shortCode) => {
+  it.each(["555", "1234567", "AbCdEf", "1234567AbC", "1234568xY-", "1234569xY_"])("accepts Wompi's short-link code %s without deriving it from the numeric id", async (shortCode) => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({ access_token: "wompi-access-token", expires_in: 3600, token_type: "Bearer" }))
@@ -389,26 +389,65 @@ describe("Wompi API service", () => {
     });
   });
 
+  const validLinkResponse = {
+    idEnlace: 555,
+    urlEnlace: "https://s.wompi.sv/1234568xY-",
+    urlEnlaceLargo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=synthetic-link"
+  };
+
   it.each([
+    ["a null response", null],
     ["a non-object response", []],
-    ["a non-positive link id", { idEnlace: 0, urlEnlace: "https://s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
-    ["an unexpected short-link host", { idEnlace: 1, urlEnlace: "https://evil.example/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
-    ["a short link without a code", { idEnlace: 1, urlEnlace: "https://s.wompi.sv/", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
-    ["a short link with a nested path", { idEnlace: 1, urlEnlace: "https://s.wompi.sv/abc/def", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
-    ["a short link with an encoded path separator", { idEnlace: 1, urlEnlace: "https://s.wompi.sv/abc%2Fdef", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
-    ["a short link with a query", { idEnlace: 1, urlEnlace: "https://s.wompi.sv/1?next=evil", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
-    ["a short link with userinfo", { idEnlace: 1, urlEnlace: "https://user@s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
-    ["a short link with an alternate port", { idEnlace: 1, urlEnlace: "https://s.wompi.sv:444/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
-    ["a long link with an unexpected query parameter", { idEnlace: 1, urlEnlace: "https://s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1&next=evil" }],
-    ["a long link with a fragment", { idEnlace: 1, urlEnlace: "https://s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=1#fragment" }]
-  ])("rejects %s from Wompi without returning a provider URL", async (_label, responseBody) => {
+    ["a missing link id", { ...validLinkResponse, idEnlace: undefined }],
+    ["a string link id", { ...validLinkResponse, idEnlace: "555" }],
+    ["a non-positive link id", { ...validLinkResponse, idEnlace: 0 }],
+    ["a fractional link id", { ...validLinkResponse, idEnlace: 555.5 }],
+    ["an unsafe integer link id", { ...validLinkResponse, idEnlace: Number.MAX_SAFE_INTEGER + 1 }],
+    ["a missing short link", { ...validLinkResponse, urlEnlace: undefined }],
+    ["a null long link", { ...validLinkResponse, urlEnlaceLargo: null }]
+  ])("rejects %s in an otherwise successful Wompi response", async (_label, responseBody) => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({ access_token: "wompi-access-token", expires_in: 3600, token_type: "Bearer" }))
       .mockResolvedValueOnce(jsonResponse(responseBody));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(new WompiApiService(realEnv()).createPaymentLink(intent())).rejects.toBeInstanceOf(WompiApiError);
+    await expect(new WompiApiService(realEnv()).createPaymentLink(intent())).rejects.toMatchObject({
+      name: "WompiApiError",
+      message: "Wompi devolvió un enlace de pago inválido"
+    });
+  });
+
+  it.each([
+    ["a malformed short link", { urlEnlace: "not-a-url" }],
+    ["an insecure short link", { urlEnlace: "http://s.wompi.sv/AbC123xY-" }],
+    ["an unexpected short-link host", { urlEnlace: "https://evil.example/AbC123xY-" }],
+    ["a short-link host suffix", { urlEnlace: "https://s.wompi.sv.evil.example/AbC123xY-" }],
+    ["a short link without a code", { urlEnlace: "https://s.wompi.sv/" }],
+    ["a short link with a nested path", { urlEnlace: "https://s.wompi.sv/abc/def" }],
+    ["a short link with an encoded path separator", { urlEnlace: "https://s.wompi.sv/abc%2Fdef" }],
+    ["a short link with a query", { urlEnlace: "https://s.wompi.sv/AbC123xY-?next=evil" }],
+    ["a short link with a fragment", { urlEnlace: "https://s.wompi.sv/AbC123xY-#fragment" }],
+    ["a short link with userinfo", { urlEnlace: "https://user@s.wompi.sv/AbC123xY-" }],
+    ["a short link with an alternate port", { urlEnlace: "https://s.wompi.sv:444/AbC123xY-" }],
+    ["an unexpected long-link host", { urlEnlaceLargo: "https://evil.example/L?id=synthetic-link" }],
+    ["an unexpected long-link path", { urlEnlaceLargo: "https://pagos.wompi.sv/other?id=synthetic-link" }],
+    ["a long link without an id", { urlEnlaceLargo: "https://pagos.wompi.sv/L" }],
+    ["a long link with an empty id", { urlEnlaceLargo: "https://pagos.wompi.sv/L?id=" }],
+    ["a long link with a duplicate id", { urlEnlaceLargo: "https://pagos.wompi.sv/L?id=synthetic-link&id=other" }],
+    ["a long link with an unexpected query parameter", { urlEnlaceLargo: "https://pagos.wompi.sv/L?id=synthetic-link&next=evil" }],
+    ["a long link with a fragment", { urlEnlaceLargo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=synthetic-link#fragment" }]
+  ])("rejects %s from Wompi without returning a provider URL", async (_label, invalidUrl) => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ access_token: "wompi-access-token", expires_in: 3600, token_type: "Bearer" }))
+      .mockResolvedValueOnce(jsonResponse({ ...validLinkResponse, ...invalidUrl }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(new WompiApiService(realEnv()).createPaymentLink(intent())).rejects.toMatchObject({
+      name: "WompiApiError",
+      message: "Wompi devolvió URLs de enlace no permitidas"
+    });
   });
 
   it("throws a typed error with the response text on a non-2xx link response", async () => {
@@ -615,7 +654,7 @@ describe("Wompi API service", () => {
         idGrupoTarjetas: null,
         idEnlace: 555,
         urlQrCodeEnlace: "https://api.wompi.sv/EnlacePago/555/qr",
-        urlEnlace: "https://s.wompi.sv/555",
+        urlEnlace: "https://s.wompi.sv/1234568xY-",
         estaProductivo: true,
         urlEnlaceLargo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=555"
       }));
@@ -672,7 +711,7 @@ describe("Wompi API OAuth token cache", () => {
       JSON.stringify({ token: "cached-token", expiresAt: new Date(Date.now() + 3600_000).toISOString() })
     );
     const fetchMock = vi.fn().mockResolvedValueOnce(
-      jsonResponse({ idEnlace: 1, urlEnlace: "https://s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" })
+      jsonResponse({ idEnlace: 1, urlEnlace: "https://s.wompi.sv/AbC123xY-", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" })
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -691,7 +730,7 @@ describe("Wompi API OAuth token cache", () => {
       .fn()
       .mockResolvedValueOnce(jsonResponse({ access_token: "fresh-token", expires_in: 3600, token_type: "Bearer" }))
       .mockResolvedValueOnce(
-        jsonResponse({ idEnlace: 1, urlEnlace: "https://s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" })
+        jsonResponse({ idEnlace: 1, urlEnlace: "https://s.wompi.sv/AbC123xY-", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" })
       );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -722,7 +761,7 @@ describe("Wompi API OAuth token cache", () => {
       .fn()
       .mockResolvedValueOnce(jsonResponse({ access_token: "renewed-token", expires_in: 3600, token_type: "Bearer" }))
       .mockResolvedValueOnce(
-        jsonResponse({ idEnlace: 1, urlEnlace: "https://s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" })
+        jsonResponse({ idEnlace: 1, urlEnlace: "https://s.wompi.sv/AbC123xY-", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" })
       );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -748,7 +787,7 @@ describe("Wompi API OAuth token cache", () => {
       // Retry: fresh token fetch, then a successful create.
       .mockResolvedValueOnce(jsonResponse({ access_token: "retry-token", expires_in: 3600, token_type: "Bearer" }))
       .mockResolvedValueOnce(
-        jsonResponse({ idEnlace: 7, urlEnlace: "https://s.wompi.sv/7", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=7" })
+        jsonResponse({ idEnlace: 7, urlEnlace: "https://s.wompi.sv/GhI789kL-", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=7" })
       );
     vi.stubGlobal("fetch", fetchMock);
 

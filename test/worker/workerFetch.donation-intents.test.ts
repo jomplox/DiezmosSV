@@ -665,6 +665,82 @@ describe("donation intents", () => {
     }
   });
 
+  // Exercise the real parser and migrated storage: mock-mode links cannot prove
+  // that a successful provider response survives the HTTP/persistence handoff.
+  it.each(["full", "draft"] as const)("persists an opaque Wompi link and hands it to the donor through the %s flow", async (flow) => {
+    const database = migratedDatabase();
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "wompi-token", expires_in: 3600, token_type: "Bearer" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        idEnlace: 555,
+        urlEnlace: "https://s.wompi.sv/1234568xY-",
+        urlEnlaceLargo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=synthetic-link"
+      }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    try {
+      const testEnv = env(new InMemoryD1(), {
+        DB: sqliteD1(database),
+        MOCK_EXTERNAL_SERVICES: "false",
+        APP_ORIGIN: "https://example.org",
+        EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+        WOMPI_CLIENT_ID: "id",
+        WOMPI_CLIENT_SECRET: "secret",
+        MH_CERT_XML: await generatedCertificateXml("cert-password"),
+        MH_CERT_PASSWORD: "cert-password",
+        MH_USER_TEST: "test-mh-user",
+        MH_PASSWORD_TEST: "test-mh-password",
+        MH_AUTH_URL_TEST: "https://apitest.dtes.mh.gob.sv/seguridad/auth",
+        MH_RECEPCION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/recepciondte",
+        MH_ANULACION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/anulardte"
+      });
+      const response = await worker.fetch(
+        intentRequest(flow === "full" ? validIntentBody() : { amount: "25.50", giftType: "DIEZMO" }),
+        testEnv
+      );
+      expect(response.status).toBe(201);
+      const payload = (await response.json()) as { intentId: string; datosToken?: string };
+      expect(payload.intentId).toMatch(/^di_/);
+      const stored = database.prepare("SELECT * FROM donation_intents WHERE id = ?").get(payload.intentId);
+      expect(stored).toMatchObject({
+        status: "LINK_CREATED",
+        amount_cents: 2550,
+        wompi_id_enlace: 555,
+        wompi_url_enlace: "https://s.wompi.sv/1234568xY-",
+        wompi_url_enlace_largo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=synthetic-link"
+      });
+
+      let handoff = payload;
+      if (flow === "draft") {
+        expect(payload).not.toHaveProperty("urlEnlace");
+        expect(payload).not.toHaveProperty("urlEnlaceLargo");
+        expect(payload.datosToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
+        expect(stored).toMatchObject({ donor_document: null });
+        const datosResponse = await worker.fetch(new Request(`https://example.org/api/donations/intent/${payload.intentId}/datos`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Donation-Datos-Token": payload.datosToken! },
+          body: JSON.stringify(validIntentBody())
+        }), testEnv);
+        expect(datosResponse.status).toBe(200);
+        handoff = (await datosResponse.json()) as typeof payload;
+        expect(database.prepare("SELECT donor_document, datos_token_hash FROM donation_intents WHERE id = ?").get(payload.intentId))
+          .toEqual({ donor_document: VALID_DUI, datos_token_hash: null });
+      }
+      expect(handoff).toEqual({
+        intentId: payload.intentId,
+        urlEnlace: "https://s.wompi.sv/1234568xY-",
+        urlEnlaceLargo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=synthetic-link"
+      });
+      // Completing fiscal data must reuse the stored link, never mint a second one.
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      fetchSpy.mockRestore();
+      database.close();
+    }
+  });
+
   it("returns 502 and leaves the intent PENDING when a fiscally-ready Wompi link request fails", async () => {
     const db = new InMemoryD1();
     const fetchSpy = vi
