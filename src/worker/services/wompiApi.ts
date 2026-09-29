@@ -366,17 +366,18 @@ function parseWompiPaymentLink(value: unknown): WompiPaymentLink {
   if (typeof idEnlace !== "number" || !Number.isSafeInteger(idEnlace) || idEnlace <= 0 || typeof urlEnlace !== "string" || typeof urlEnlaceLargo !== "string") {
     throw new WompiApiError("Wompi devolvió un enlace de pago inválido");
   }
-  if (!isWompiShortLink(urlEnlace, idEnlace) || !isWompiLongLink(urlEnlaceLargo)) {
+  if (!isWompiShortLink(urlEnlace) || !isWompiLongLink(urlEnlaceLargo)) {
     throw new WompiApiError("Wompi devolvió URLs de enlace no permitidas");
   }
   return { idEnlace, urlEnlace, urlEnlaceLargo };
 }
 
-function isWompiShortLink(value: string, idEnlace: number): boolean {
+function isWompiShortLink(value: string): boolean {
   try {
     const url = new URL(value);
     return isApprovedWompiUrl(url, "s.wompi.sv")
-      && url.pathname === `/${idEnlace}`
+      // Wompi's short code is opaque and differs from the numeric idEnlace.
+      && /^\/[A-Za-z0-9_-]+$/.test(url.pathname)
       && url.search === "";
   } catch {
     return false;
