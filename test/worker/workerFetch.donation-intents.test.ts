@@ -694,7 +694,10 @@ describe("donation intents", () => {
       );
 
       expect(response.status).toBe(502);
-      await expect(response.json()).resolves.toMatchObject({ error: "wompi_link_failed" });
+      await expect(response.json()).resolves.toMatchObject({
+        error: "wompi_link_failed",
+        message: "No se pudo preparar su entrega con Wompi. Intente de nuevo en unos minutos."
+      });
       expect(db.donationIntents).toHaveLength(1);
       expect(db.donationIntents[0].status).toBe("PENDING");
       expect(providerCreationClaims(db)).toHaveLength(1);

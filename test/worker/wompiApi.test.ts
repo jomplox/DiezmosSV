@@ -371,11 +371,31 @@ describe("Wompi API service", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it.each(["1234567AbC", "1234568xY-", "1234569xY_"])("accepts Wompi's opaque short-link code %s independently of the numeric id", async (shortCode) => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ access_token: "wompi-access-token", expires_in: 3600, token_type: "Bearer" }))
+      .mockResolvedValueOnce(jsonResponse({
+        idEnlace: 555,
+        urlEnlace: `https://s.wompi.sv/${shortCode}`,
+        urlEnlaceLargo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=synthetic-link"
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(new WompiApiService(realEnv()).createPaymentLink(intent())).resolves.toEqual({
+      idEnlace: 555,
+      urlEnlace: `https://s.wompi.sv/${shortCode}`,
+      urlEnlaceLargo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=synthetic-link"
+    });
+  });
+
   it.each([
     ["a non-object response", []],
     ["a non-positive link id", { idEnlace: 0, urlEnlace: "https://s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
     ["an unexpected short-link host", { idEnlace: 1, urlEnlace: "https://evil.example/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
-    ["a short link with a mismatched id", { idEnlace: 1, urlEnlace: "https://s.wompi.sv/2", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
+    ["a short link without a code", { idEnlace: 1, urlEnlace: "https://s.wompi.sv/", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
+    ["a short link with a nested path", { idEnlace: 1, urlEnlace: "https://s.wompi.sv/abc/def", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
+    ["a short link with an encoded path separator", { idEnlace: 1, urlEnlace: "https://s.wompi.sv/abc%2Fdef", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
     ["a short link with a query", { idEnlace: 1, urlEnlace: "https://s.wompi.sv/1?next=evil", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
     ["a short link with userinfo", { idEnlace: 1, urlEnlace: "https://user@s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
     ["a short link with an alternate port", { idEnlace: 1, urlEnlace: "https://s.wompi.sv:444/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }],
