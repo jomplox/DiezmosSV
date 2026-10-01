@@ -63,6 +63,7 @@ import {
 } from "./services/stripeDonations";
 import { processStripeWebhookEvent, StripeWebhookEventError } from "./services/stripeWebhook";
 import { deliverNextStripeAcknowledgment } from "./services/stripeAcknowledgment";
+import { handleRayMonitoring, RAY_MONITOR_PATH } from "./services/rayMonitoring";
 import { logWorkerError } from "./services/observability";
 import { stagingSmokeRunId } from "./services/stagingSmoke";
 import {
@@ -542,6 +543,9 @@ async function handleFetch(request: Request, env: Env, ctx?: ExecutionContext): 
     const shutdownResponse = emergencyDonationShutdownResponse(request, env, url);
     if (shutdownResponse) {
       return shutdownResponse;
+    }
+    if (url.pathname === RAY_MONITOR_PATH) {
+      return await handleRayMonitoring(request, env);
     }
     if (url.pathname.startsWith("/api/")) {
       return await handleApi(request, env, url, ctx);

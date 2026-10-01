@@ -1,0 +1,658 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Ray read-only monitoring",
+    "version": "1.0.0",
+    "description": "Operational aggregates for Ray, a dot assistant. No donor data, provider recovery, admin mutations, or live provider probes. Disabled until separately approved Access and runtime configuration exist."
+  },
+  "paths": {
+    "/api/monitoring/ray": {
+      "get": {
+        "operationId": "getRayMonitoring",
+        "summary": "Read a monitoring snapshot and bounded state changes",
+        "security": [
+          {
+            "AccessClientId": [],
+            "AccessClientSecret": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Canonical UTC timestamp with milliseconds; within the last 24 hours. Mutually exclusive with cursor. Defaults to 24 hours ago.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque page cursor from nextCursor; valid for 15 minutes and a maximum 24-hour change window. Mutually exclusive with since.",
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 20
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Read-only current-state snapshot. Attention is an operational observation, not proof of a provider outage.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Snapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid bounded query or expired cursor.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid, expired, or unauthorized machine JWT.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Only GET is supported.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Allow": {
+                "schema": {
+                  "type": "string",
+                  "const": "GET"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Authenticated identity exceeded its configured rate limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Wait at least 60 seconds.",
+                "schema": {
+                  "type": "string",
+                  "const": "60"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Monitoring is disabled or authentication, limiter, or database is unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "AccessClientId": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "CF-Access-Client-Id"
+      },
+      "AccessClientSecret": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "CF-Access-Client-Secret"
+      }
+    },
+    "schemas": {
+      "Snapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "version",
+          "generatedAt",
+          "environment",
+          "authorization",
+          "health",
+          "freshness",
+          "summary",
+          "changes"
+        ],
+        "properties": {
+          "version": {
+            "const": 1
+          },
+          "generatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "environment": {
+            "enum": [
+              "staging",
+              "production"
+            ]
+          },
+          "authorization": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "expiresAt"
+            ],
+            "properties": {
+              "expiresAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          },
+          "health": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "app",
+              "database",
+              "providers",
+              "intakeEnabled",
+              "severity"
+            ],
+            "properties": {
+              "app": {
+                "const": "ok"
+              },
+              "database": {
+                "const": "ok"
+              },
+              "providers": {
+                "const": "not_probed"
+              },
+              "intakeEnabled": {
+                "type": "boolean"
+              },
+              "severity": {
+                "enum": [
+                  "ok",
+                  "attention"
+                ]
+              }
+            }
+          },
+          "freshness": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "databaseReadAt",
+              "monetaryWindowFrom",
+              "monetaryWindowUntil"
+            ],
+            "properties": {
+              "databaseReadAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "monetaryWindowFrom": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "monetaryWindowUntil": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          },
+          "summary": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "wompi",
+              "intents",
+              "fiscal",
+              "email",
+              "stripe"
+            ],
+            "properties": {
+              "wompi": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "confirmed24h",
+                  "unapproved24h",
+                  "issuancePending",
+                  "issuanceFailed",
+                  "oldestPendingAt"
+                ],
+                "properties": {
+                  "confirmed24h": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "count",
+                      "grossCents",
+                      "lastConfirmedAt"
+                    ],
+                    "properties": {
+                      "count": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "grossCents": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "lastConfirmedAt": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "format": "date-time"
+                      }
+                    }
+                  },
+                  "unapproved24h": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "issuancePending": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "issuanceFailed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "oldestPendingAt": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "format": "date-time"
+                  }
+                }
+              },
+              "intents": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "paid",
+                  "completed",
+                  "pending",
+                  "scope"
+                ],
+                "properties": {
+                  "paid": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "completed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "pending": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "scope": {
+                    "const": "database_unscoped"
+                  }
+                }
+              },
+              "fiscal": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "accepted24h",
+                  "pending",
+                  "failed",
+                  "finalizationPending",
+                  "lastAcceptedAt"
+                ],
+                "properties": {
+                  "accepted24h": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "pending": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "failed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "finalizationPending": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "lastAcceptedAt": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "format": "date-time"
+                  }
+                }
+              },
+              "email": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "pending",
+                  "failed",
+                  "uncertain",
+                  "sent24h",
+                  "lastSentAt"
+                ],
+                "properties": {
+                  "pending": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "failed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "uncertain": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "sent24h": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "lastSentAt": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "format": "date-time"
+                  }
+                }
+              },
+              "stripe": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "unattributedGiftCount",
+                  "pendingCheckouts",
+                  "failedCheckouts",
+                  "pendingWebhooks",
+                  "failedWebhooks",
+                  "pendingInvoices",
+                  "reviewInvoices",
+                  "pendingAcknowledgments",
+                  "failedAcknowledgments",
+                  "pendingStatements",
+                  "failedStatements",
+                  "gifts24h"
+                ],
+                "properties": {
+                  "unattributedGiftCount": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "pendingCheckouts": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "failedCheckouts": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "pendingWebhooks": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "failedWebhooks": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "pendingInvoices": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "reviewInvoices": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "pendingAcknowledgments": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "failedAcknowledgments": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "pendingStatements": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "failedStatements": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "gifts24h": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "count",
+                      "grossCents",
+                      "refundedCents",
+                      "netCents",
+                      "monthlyCount",
+                      "lastSettledAt"
+                    ],
+                    "properties": {
+                      "count": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "grossCents": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "refundedCents": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "netCents": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "monthlyCount": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "lastSettledAt": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "format": "date-time"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "changes": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "from",
+              "until",
+              "items",
+              "nextCursor",
+              "resumeSince"
+            ],
+            "properties": {
+              "from": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "until": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "items": {
+                "type": "array",
+                "maxItems": 50,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "key",
+                    "source",
+                    "state",
+                    "observedAt",
+                    "actionableCode"
+                  ],
+                  "properties": {
+                    "key": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "source": {
+                      "enum": [
+                        "wompi_issuance",
+                        "intent",
+                        "fiscal",
+                        "email",
+                        "stripe_checkout",
+                        "stripe_webhook",
+                        "stripe_gift",
+                        "stripe_invoice",
+                        "stripe_acknowledgment",
+                        "stripe_statement"
+                      ]
+                    },
+                    "state": {
+                      "enum": [
+                        "RECEIVED",
+                        "PENDING",
+                        "LINK_CREATED",
+                        "COMPLETED",
+                        "EXPIRED",
+                        "PROCESSING",
+                        "FAILED",
+                        "DEAD_LETTERED",
+                        "RETRY_QUEUED",
+                        "DOCUMENT_CREATED",
+                        "IGNORED",
+                        "SIGNED",
+                        "TRANSMITTED",
+                        "TRANSMISSION_PENDING",
+                        "ACCEPTED",
+                        "REJECTED",
+                        "CONTINGENCY_PENDING",
+                        "INVALIDATED",
+                        "SENT",
+                        "CREATING",
+                        "OPEN",
+                        "COMPLETE",
+                        "PROCESSED",
+                        "PAID",
+                        "PARTIALLY_REFUNDED",
+                        "REFUNDED",
+                        "RECORDED",
+                        "REVIEW",
+                        "UNKNOWN"
+                      ]
+                    },
+                    "observedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "actionableCode": {
+                      "enum": [
+                        null,
+                        "wompi_issuance_needs_review",
+                        "intent_needs_review",
+                        "fiscal_needs_review",
+                        "email_needs_review",
+                        "stripe_checkout_needs_review",
+                        "stripe_webhook_needs_review",
+                        "stripe_gift_needs_review",
+                        "stripe_invoice_needs_review",
+                        "stripe_acknowledgment_needs_review",
+                        "stripe_statement_needs_review"
+                      ]
+                    }
+                  }
+                }
+              },
+              "nextCursor": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 2048
+              },
+              "resumeSince": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "enum": [
+              "monitor_disabled",
+              "monitor_unauthorized",
+              "monitor_auth_unavailable",
+              "monitor_method_not_allowed",
+              "monitor_rate_limited",
+              "monitor_rate_limiter_unavailable",
+              "monitor_invalid_query",
+              "monitor_database_unavailable"
+            ]
+          }
+        }
+      }
+    }
+  }
+}
