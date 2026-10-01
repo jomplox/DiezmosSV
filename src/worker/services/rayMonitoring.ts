@@ -49,8 +49,9 @@ function pageFor(request: Request, now: number): Page {
 // Only explicit aggregate/state columns cross this boundary. No payloads, donor
 // fields, provider URLs, error strings, or user/session queries are returned.
 const SCOPED = `WITH
-  w AS (SELECT id,result,amount_cents,received_at,processed_at,issuance_status,issuance_last_attempt_at,issuance_failed_at,issuance_dead_lettered_at FROM wompi_events WHERE environment = ?1),
-  d AS (SELECT id,status,accepted_at,post_accept_finalized_at,updated_at FROM dte_documents WHERE environment = ?1),
+  monitor_scope AS (SELECT ? AS ambiente, ? AS livemode, ? AS window_from, ? AS window_until),
+  w AS (SELECT id,result,amount_cents,received_at,processed_at,issuance_status,issuance_last_attempt_at,issuance_failed_at,issuance_dead_lettered_at FROM wompi_events WHERE environment = (SELECT ambiente FROM monitor_scope)),
+  d AS (SELECT id,status,accepted_at,post_accept_finalized_at,updated_at FROM dte_documents WHERE environment = (SELECT ambiente FROM monitor_scope)),
   e AS (SELECT e.id,e.status,e.outcome_class,e.sent_at,e.created_at,e.finalized_at,e.claim_attempted_at FROM email_deliveries e JOIN d ON d.id=e.document_id
     WHERE NOT EXISTS (SELECT 1 FROM email_deliveries newer WHERE newer.document_id=e.document_id
       AND newer.email_type IS e.email_type AND (newer.attempt_no>e.attempt_no
@@ -60,15 +61,15 @@ const SCOPED = `WITH
     ELSE COALESCE(c.livemode, i.invoice_livemode) END AS mode
     FROM stripe_gifts g LEFT JOIN stripe_checkout_sessions c ON c.id=g.checkout_id
     LEFT JOIN stripe_invoice_settlements i ON i.gift_id=g.id),
-  g AS (SELECT * FROM attributed_gifts WHERE mode = ?2),
-  c AS (SELECT id,status,updated_at FROM stripe_checkout_sessions WHERE livemode = ?2),
-  h AS (SELECT id,status,updated_at FROM stripe_webhook_events WHERE livemode = ?2),
+  g AS (SELECT * FROM attributed_gifts WHERE mode = (SELECT livemode FROM monitor_scope)),
+  c AS (SELECT id,status,updated_at FROM stripe_checkout_sessions WHERE livemode = (SELECT livemode FROM monitor_scope)),
+  h AS (SELECT id,status,updated_at FROM stripe_webhook_events WHERE livemode = (SELECT livemode FROM monitor_scope)),
   i AS (SELECT invoice_id,status,updated_at FROM stripe_invoice_settlements
-    WHERE COALESCE(invoice_livemode, payment_livemode) = ?2
+    WHERE COALESCE(invoice_livemode, payment_livemode) = (SELECT livemode FROM monitor_scope)
       AND (invoice_livemode IS NULL OR payment_livemode IS NULL OR invoice_livemode=payment_livemode)),
   a AS (SELECT a.id,a.status,a.updated_at FROM stripe_acknowledgment_deliveries a JOIN g ON g.id=a.gift_id
     WHERE NOT EXISTS (SELECT 1 FROM stripe_acknowledgment_deliveries newer WHERE newer.gift_id=a.gift_id AND newer.revision>a.revision)),
-  s AS (SELECT s.id,s.status,s.updated_at FROM stripe_annual_statement_deliveries s WHERE s.livemode = ?2
+  s AS (SELECT s.id,s.status,s.updated_at FROM stripe_annual_statement_deliveries s WHERE s.livemode = (SELECT livemode FROM monitor_scope)
     AND NOT EXISTS (SELECT 1 FROM stripe_annual_statement_deliveries newer WHERE newer.year=s.year
       AND newer.donor_key=s.donor_key AND newer.livemode=s.livemode AND newer.revision>s.revision))`;
 
@@ -82,9 +83,9 @@ async function summary(db: D1Database, ambiente: string, mode: number, now: stri
   };
   const [wompi, intents, fiscal, email, gifts, stripe] = await Promise.all([
     read(`SELECT
-      COUNT(CASE WHEN result<>'ExitosaAprobada' AND received_at>=?3 AND received_at<=?4 THEN 1 END) AS unapproved24h,
-      COUNT(CASE WHEN result='ExitosaAprobada' AND received_at>=?3 AND received_at<=?4 THEN 1 END) AS confirmedCount,
-      COALESCE(SUM(CASE WHEN result='ExitosaAprobada' AND received_at>=?3 AND received_at<=?4 THEN amount_cents ELSE 0 END),0) AS grossCents,
+      COUNT(CASE WHEN result<>'ExitosaAprobada' AND received_at>=(SELECT window_from FROM monitor_scope) AND received_at<=(SELECT window_until FROM monitor_scope) THEN 1 END) AS unapproved24h,
+      COUNT(CASE WHEN result='ExitosaAprobada' AND received_at>=(SELECT window_from FROM monitor_scope) AND received_at<=(SELECT window_until FROM monitor_scope) THEN 1 END) AS confirmedCount,
+      COALESCE(SUM(CASE WHEN result='ExitosaAprobada' AND received_at>=(SELECT window_from FROM monitor_scope) AND received_at<=(SELECT window_until FROM monitor_scope) THEN amount_cents ELSE 0 END),0) AS grossCents,
       MAX(CASE WHEN result='ExitosaAprobada' THEN received_at END) AS lastConfirmedAt,
       COUNT(CASE WHEN result='ExitosaAprobada' AND (issuance_status IN ('PROCESSING','RETRY_QUEUED') OR (issuance_status IS NULL AND processed_at IS NULL)) THEN 1 END) AS issuancePending,
       COUNT(CASE WHEN result='ExitosaAprobada' AND issuance_status IN ('FAILED','DEAD_LETTERED') THEN 1 END) AS issuanceFailed,
@@ -92,9 +93,9 @@ async function summary(db: D1Database, ambiente: string, mode: number, now: stri
       FROM w`),
     read(`SELECT COUNT(CASE WHEN paid_at IS NOT NULL THEN 1 END) AS paid,
       COUNT(CASE WHEN status='COMPLETED' THEN 1 END) AS completed,
-      COUNT(CASE WHEN paid_at IS NULL AND status IN ('PENDING','LINK_CREATED') AND expires_at>?4 THEN 1 END) AS pending
+      COUNT(CASE WHEN paid_at IS NULL AND status IN ('PENDING','LINK_CREATED') AND expires_at>(SELECT window_until FROM monitor_scope) THEN 1 END) AS pending
       FROM donation_intents`),
-    read(`SELECT COUNT(CASE WHEN accepted_at>=?3 AND accepted_at<=?4 THEN 1 END) AS accepted24h,
+    read(`SELECT COUNT(CASE WHEN accepted_at>=(SELECT window_from FROM monitor_scope) AND accepted_at<=(SELECT window_until FROM monitor_scope) THEN 1 END) AS accepted24h,
       COUNT(CASE WHEN status IN ('PENDING','SIGNED','TRANSMITTED','TRANSMISSION_PENDING','CONTINGENCY_PENDING') THEN 1 END) AS pending,
       COUNT(CASE WHEN status IN ('REJECTED','FAILED') THEN 1 END) AS failed,
       COUNT(CASE WHEN status='ACCEPTED' AND post_accept_finalized_at IS NULL THEN 1 END) AS finalizationPending,
@@ -102,12 +103,12 @@ async function summary(db: D1Database, ambiente: string, mode: number, now: stri
     read(`SELECT COUNT(CASE WHEN status='PENDING' THEN 1 END) AS pending,
       COUNT(CASE WHEN status='FAILED' THEN 1 END) AS failed,
       COUNT(CASE WHEN status<>'SENT' AND outcome_class='UNKNOWN' THEN 1 END) AS uncertain,
-      COUNT(CASE WHEN status='SENT' AND sent_at>=?3 AND sent_at<=?4 THEN 1 END) AS sent24h,
+      COUNT(CASE WHEN status='SENT' AND sent_at>=(SELECT window_from FROM monitor_scope) AND sent_at<=(SELECT window_until FROM monitor_scope) THEN 1 END) AS sent24h,
       MAX(CASE WHEN status='SENT' THEN sent_at END) AS lastSentAt FROM e`),
-    read(`SELECT COUNT(CASE WHEN settled_at>=?3 AND settled_at<=?4 THEN 1 END) AS count,
-      COALESCE(SUM(CASE WHEN settled_at>=?3 AND settled_at<=?4 THEN amount_cents ELSE 0 END),0) AS grossCents,
-      COALESCE(SUM(CASE WHEN settled_at>=?3 AND settled_at<=?4 THEN refunded_amount_cents ELSE 0 END),0) AS refundedCents,
-      COUNT(CASE WHEN settled_at>=?3 AND settled_at<=?4 AND frequency='MONTHLY' THEN 1 END) AS monthlyCount,
+    read(`SELECT COUNT(CASE WHEN settled_at>=(SELECT window_from FROM monitor_scope) AND settled_at<=(SELECT window_until FROM monitor_scope) THEN 1 END) AS count,
+      COALESCE(SUM(CASE WHEN settled_at>=(SELECT window_from FROM monitor_scope) AND settled_at<=(SELECT window_until FROM monitor_scope) THEN amount_cents ELSE 0 END),0) AS grossCents,
+      COALESCE(SUM(CASE WHEN settled_at>=(SELECT window_from FROM monitor_scope) AND settled_at<=(SELECT window_until FROM monitor_scope) THEN refunded_amount_cents ELSE 0 END),0) AS refundedCents,
+      COUNT(CASE WHEN settled_at>=(SELECT window_from FROM monitor_scope) AND settled_at<=(SELECT window_until FROM monitor_scope) AND frequency='MONTHLY' THEN 1 END) AS monthlyCount,
       MAX(settled_at) AS lastSettledAt FROM g`),
     read(`SELECT
       (SELECT COUNT(*) FROM attributed_gifts WHERE mode IS NULL) AS unattributedGiftCount,
@@ -120,7 +121,7 @@ async function summary(db: D1Database, ambiente: string, mode: number, now: stri
       (SELECT COUNT(*) FROM a WHERE status IN ('PENDING','PROCESSING')) AS pendingAcknowledgments,
       (SELECT COUNT(*) FROM a WHERE status IN ('FAILED','REVIEW')) AS failedAcknowledgments,
       (SELECT COUNT(*) FROM s WHERE status IN ('PENDING','PROCESSING')) AS pendingStatements,
-      (SELECT COUNT(*) FROM s WHERE status IN ('FAILED','REVIEW')) AS failedStatements WHERE ?3<=?4`)
+      (SELECT COUNT(*) FROM s WHERE status IN ('FAILED','REVIEW')) AS failedStatements`)
   ]);
   return {
     wompi: { unapproved24h: wompi.unapproved24h, confirmed24h: { count: wompi.confirmedCount, grossCents: wompi.grossCents, lastConfirmedAt: wompi.lastConfirmedAt }, issuancePending: wompi.issuancePending, issuanceFailed: wompi.issuanceFailed, oldestPendingAt: wompi.oldestPendingAt },
@@ -146,8 +147,8 @@ async function changes(db: D1Database, ambiente: string, mode: number, page: Pag
   const [afterAt, afterSource, afterId] = page.after ?? ["", "", ""];
   const result = await db.prepare(`${SCOPED}${CHANGES}
     SELECT source, id, observedAt, state FROM normalized
-    WHERE observedAt>=?3 AND observedAt<=?4 AND (observedAt,source,id)>(?5,?6,?7)
-    ORDER BY observedAt,source,id LIMIT ?8`)
+    WHERE observedAt>=(SELECT window_from FROM monitor_scope) AND observedAt<=(SELECT window_until FROM monitor_scope) AND (observedAt,source,id)>(?,?,?)
+    ORDER BY observedAt,source,id LIMIT ?`)
     .bind(ambiente, mode, page.from, page.until, afterAt, afterSource, afterId, page.limit + 1).all<ChangeRow>();
   const rows = result.results;
   if (!Array.isArray(rows)) throw new Error("Missing change rows");

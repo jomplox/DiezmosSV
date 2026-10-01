@@ -254,6 +254,21 @@ describe("Ray monitoring HTTP contract", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("caches failed certificates for five seconds after a slow failure completes", async () => {
+    fetchMock.mockImplementationOnce(async () => {
+      vi.setSystemTime(new Date(Date.parse(NOW) + 4000));
+      return new Response(null, { status: 500 });
+    });
+    expect((await get()).status).toBe(503);
+    vi.setSystemTime(new Date(Date.parse(NOW) + 6000));
+    expect((await get()).status).toBe(503);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(d1.statements).toHaveLength(0);
+    vi.setSystemTime(new Date(Date.parse(NOW) + 10_000));
+    expect((await get()).status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it.each(["oversized", "redirect", "wrong key type"])("fails closed on %s certificate responses", async (fault) => {
     if (fault === "oversized") fetchMock.mockResolvedValueOnce(new Response(" ".repeat(65537)));
     if (fault === "redirect") fetchMock.mockResolvedValueOnce(new Response(null, { status: 302, headers: { Location: "https://evil.example" } }));

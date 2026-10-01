@@ -49,7 +49,7 @@ function keysFor(issuer: string, now: number): Promise<AccessKey[]> {
   if (keyCache.size >= 4) keyCache.delete(keyCache.keys().next().value!);
   const entry = { expiresAt: now + 60_000, keys: fetchKeys(issuer) };
   // Cache failed lookups briefly too; attacker-controlled kids never trigger refresh.
-  entry.keys = entry.keys.catch((error: unknown) => { entry.expiresAt = now + 5000; throw error; });
+  entry.keys = entry.keys.catch((error: unknown) => { entry.expiresAt = Date.now() + 5000; throw error; });
   keyCache.set(issuer, entry);
   return entry.keys;
 }
