@@ -14,6 +14,7 @@ import {
   X
 } from "lucide-react";
 import { type FormEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { EmailTemplateBodyPreview } from "./EmailTemplateBodyPreview";
 import {
   STRIPE_US_LEGAL_NAME_MAX_LENGTH,
   STRIPE_US_MAILING_ADDRESS_LINE_MAX_LENGTH,
@@ -1481,6 +1482,7 @@ function EmailTemplateBodyEditor({
         placeholder={placeholder}
       />
       <small className="email-template-format-help">Formato: **negrita**, *cursiva*, ++subrayado++ y &gt; cita.</small>
+      <EmailTemplateBodyPreview bodyText={value} templateLabel={templateLabel} />
     </div>
   );
 }

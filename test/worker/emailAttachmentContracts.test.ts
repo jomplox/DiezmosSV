@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EmailService } from "../../src/worker/services/email";
+import { DEFAULT_EMAIL_TEMPLATES } from "../../src/worker/services/emailTemplates";
 import type { DteDocumentRecord, Env } from "../../src/worker/types";
 import { makeDocument } from "./fixtures";
 
@@ -13,6 +14,39 @@ interface AttachmentMetadata {
 describe("outbound email attachment allowlists", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it.each(["cloudflare", "http"])("keeps authored spacing in the actual %s receipt payload", async (provider) => {
+    const messages: Array<{ html: string; text: string; to: string; subject: string; attachments: unknown[] }> = [];
+    const capture = (message: unknown) => {
+      messages.push(message as typeof messages[number]);
+      return { messageId: "synthetic-email-id" };
+    };
+    // Neither branch can contact a real provider.
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      capture(JSON.parse(String(init?.body)));
+      return Response.json({ status: "accepted", id: "synthetic-email-id" }, { status: 202 });
+    }));
+    const body = "Apreciable {{donante}},\n\nConfirmamos su aporte.\n\u00a0\n\n\n> *Cita*\n>\n> Referencia\n\n\n\nGracias por su apoyo.";
+    const service = new EmailService({
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "receipts@example.org",
+      ...(provider === "cloudflare"
+        ? { EMAIL: { send: async (message: unknown) => capture(message) } }
+        : { EMAIL_PROVIDER_URL: "https://mail.example/send", EMAIL_API_KEY: "synthetic-key" })
+    } as unknown as Env, {
+      ...DEFAULT_EMAIL_TEMPLATES,
+      dteReceipt: { subject: "Su comprobante", body }
+    });
+    await service.sendReceipt(signedRecord(), "donor@example.org");
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].html.match(/padding:0 0 42px;/g)).toHaveLength(2);
+    expect(messages[0].html).toContain("<em>Cita</em><br /><br />Referencia");
+    expect(messages[0].text).toContain("Confirmamos su aporte.\n\u00a0\n\n\nCita");
+    expect(messages[0].to).toBe("donor@example.org");
+    expect(messages[0].subject).toBe("Su comprobante");
+    expect(messages[0].attachments).toHaveLength(2);
   });
 
   it("sends only each email type's intended attachments through Cloudflare Email", async () => {
