@@ -164,6 +164,27 @@ describe("fiscal receptor correction", () => {
 });
 
 describe("fiscal correction candidates", () => {
+  it.each([
+    ["10001", "Empleados"],
+    ["62010", "Programación informática"]
+  ])("keeps rejected donation retries fiscal-ready with activity %s", (codActividad, descActividad) => {
+    const correction = validCorrection({ numDocumento: "10000002-7", codActividad, descActividad });
+    const direct = buildCorrectedDirectCandidate({
+      sourceDocument: rejectedDirectDocument(), correction, config: emisorConfig, sequence: 42
+    });
+    const wompi = buildCorrectedWompiCandidate({
+      payload: wompiSample as WompiWebhook, intent: donationIntent(), correction,
+      config: emisorConfig, environment: "00", sequence: 43
+    });
+    for (const document of [direct, wompi]) {
+      expect(document.receptor).toMatchObject({
+        tipoDocumento: "13", numDocumento: "100000027",
+        codActividad, descActividad
+      });
+      expect(document.receptor).not.toHaveProperty("numeroDocumento");
+    }
+  });
+
   it("changes only receptor and system-generated identification in a direct correction", () => {
     const source = rejectedDirectDocument();
     const corrected = buildCorrectedDirectCandidate({

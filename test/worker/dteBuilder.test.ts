@@ -51,6 +51,32 @@ describe("DTE builders", () => {
     expect(document.receptor).toMatchObject({ codDomiciliado: 2, codActividad: null, descActividad: null });
   });
 
+  it.each(["10000002-7", "100000027"])("keeps DUI and employee activity fiscal-ready across issuance paths: %s", (dui) => {
+    const webhook = buildCdeDocument({
+      ...wompiSample,
+      Cliente: { ...wompiSample.Cliente, DocumentoIdentidad: dui }
+    } as WompiWebhook, emisorConfig, { sequence: 1 });
+    const direct = buildDirectCdeDocument({
+      donorName: "Donante Demo", donorDocumentType: "13", donorDocument: dui, amount: "10.00"
+    }, emisorConfig, { sequence: 2 });
+    const advancedInput = structuredClone(direct) as Record<string, any>;
+    advancedInput.receptor.numDocumento = dui;
+    advancedInput.receptor.codActividad = null;
+    advancedInput.receptor.descActividad = null;
+    const advanced = buildAdvancedCdeDocument(advancedInput, emisorConfig, { sequence: 3 });
+
+    for (const document of [webhook, direct, advanced]) {
+      expect(document.receptor).toMatchObject({
+        tipoDocumento: "13", numDocumento: "100000027",
+        codActividad: "10001", descActividad: "Empleados"
+      });
+      // The retention-document rename must never leak into a donation receptor.
+      expect(document.receptor).not.toHaveProperty("numeroDocumento");
+    }
+    expect(advancedInput.receptor.numDocumento).toBe(dui);
+    expect(advancedInput.receptor.codActividad).toBeNull();
+  });
+
   it("uses a reserved generation code for a Wompi CDE", () => {
     const document = buildCdeDocument(wompiSample as WompiWebhook, emisorConfig, {
       sequence: 31,
