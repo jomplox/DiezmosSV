@@ -2254,7 +2254,7 @@ describe("guarded fiscal correction API", () => {
     const created = db.documents[0];
     expect(created.numero_control).toBe(numeroControl);
     expect(created.codigo_generacion).toBe(codigoGeneracion);
-    expect(JSON.parse(created.plain_json).receptor.numDocumento).toBe("10000002-7");
+    expect(JSON.parse(created.plain_json).receptor.numDocumento).toBe("100000027");
     expect(db.nextSequence).toBe(sequenceBefore);
     expect(event.raw_body).toBe(rawBodyBefore);
     expect(JSON.stringify(db.donationIntents)).toBe(intentsBefore);

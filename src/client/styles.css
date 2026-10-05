@@ -3811,6 +3811,20 @@ pre {
   background: #ffffff;
 }
 
+/* macOS Safari's native select ignores the field padding and minimum height.
+   Keep the existing native appearance on touch devices, including iOS. */
+@media (hover: hover) and (pointer: fine) {
+  .donar-form select {
+    -webkit-appearance: none;
+    appearance: none;
+    padding-right: 32px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='m3 4.5 3 3 3-3' fill='none' stroke='%23333333' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    background-size: 12px 12px;
+  }
+}
+
 .donar-form input:focus,
 .donar-form select:focus,
 .donar-form textarea:focus {
@@ -4569,9 +4583,9 @@ pre {
     overflow: hidden;
   }
 
-  /* The U.S. provider step keeps the ceremonial brand as the H1, but recovers
+  /* Both provider steps keep the ceremonial brand as the H1, but recover
      the compact working-step rhythm that previously made more of the hosted
-     form visible. Only this step is compressed; the chooser and SV wizard keep
+     form visible. Only these steps are compressed; the chooser and data steps keep
      their established presentation. */
   .donar-screen-provider-step {
     height: 100vh;
@@ -4599,6 +4613,7 @@ pre {
   .donar-card-provider-step > .donar-card-top,
   .donar-card-provider-step > .donar-step-label,
   .donar-card-provider-step > .donar-stripe,
+  .donar-card-provider-step > .donar-wompi,
   .donar-card-provider-step > .donar-support {
     grid-column: 1 / -1;
   }
@@ -4637,7 +4652,8 @@ pre {
     gap: 8px;
   }
 
-  .donar-card-provider-step > .donar-stripe {
+  .donar-card-provider-step > .donar-stripe,
+  .donar-card-provider-step > .donar-wompi {
     width: 100vw;
     margin-inline: calc(50% - 50vw);
     height: 100%;
@@ -4681,6 +4697,33 @@ pre {
   .donar-card-provider-step .donar-provider-viewport {
     height: 100%;
     min-height: 0;
+  }
+
+  .donar-card-provider-step .donar-title-world-icon {
+    width: 40px;
+    height: 25px;
+    flex-basis: 40px;
+  }
+
+  .donar-card-provider-step > .donar-wompi {
+    display: grid;
+    gap: 8px;
+  }
+
+  .donar-card-provider-step .donar-wompi .donar-handoff {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .donar-card-provider-step .donar-wompi .donar-embed {
+    flex: 1;
+    min-height: 0;
+    max-height: none;
+  }
+
+  .donar-card-provider-step .donar-wompi-hint {
+    align-self: center;
+    margin-bottom: 4px;
   }
 
   .donar-stripe-has-provider-dock {

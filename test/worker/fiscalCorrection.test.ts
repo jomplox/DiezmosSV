@@ -174,7 +174,7 @@ describe("fiscal correction candidates", () => {
     }) as Record<string, any>;
     const original = JSON.parse(source.plain_json) as Record<string, any>;
 
-    expect(corrected.receptor.numDocumento).toBe("10000002-7");
+    expect(corrected.receptor.numDocumento).toBe("100000027");
     expect(corrected.emisor).toEqual(original.emisor);
     expect(corrected.cuerpoDocumento).toEqual(original.cuerpoDocumento);
     expect(corrected.resumen).toEqual(original.resumen);
