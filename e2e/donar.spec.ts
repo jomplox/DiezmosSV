@@ -524,14 +524,15 @@ test("SV embedded form uses the compact mobile provider shell", async ({ page },
   const embed = page.locator("iframe.donar-embed");
   await expect(embed).toBeVisible();
   await expect(page.locator(".donar-card-provider-step")).toBeVisible();
-  for (const width of [393, 320]) {
-    await page.setViewportSize({ width, height: 700 });
+  await expect(page.locator(".donar-screen-provider-step .donar-card-provider-step")).toBeVisible();
+  for (const [width, height] of [[393, 700], [320, 700], [393, 852]]) {
+    await page.setViewportSize({ width, height });
     const box = await embed.boundingBox();
     expect(box!.y).toBeLessThan(260);
     expect(box!.height).toBeGreaterThan(350);
-    expect(box!.y + box!.height).toBeLessThan(700);
+    expect(box!.y + box!.height).toBeLessThan(height);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
-    expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBeLessThanOrEqual(701);
+    expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBeLessThanOrEqual(height + 1);
     await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas" })).toBeVisible();
     await expect(page.getByRole("link", { name: "¿Problemas con el formulario? Continúe aquí" })).toBeInViewport();
   }
