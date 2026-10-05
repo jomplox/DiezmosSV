@@ -2800,6 +2800,40 @@ input.file-input-hidden {
   font-size: 11px;
 }
 
+.email-template-body-preview {
+  min-width: 0;
+  margin-top: 6px;
+}
+
+.email-template-body-preview > summary {
+  width: fit-content;
+  color: var(--ink-secondary);
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.email-template-body-preview > summary:focus-visible {
+  outline: 2px solid var(--ink-muted);
+  outline-offset: 4px;
+  border-radius: 2px;
+}
+
+.email-template-body-preview > p {
+  margin: 10px 0;
+}
+
+.email-template-body-preview-frame {
+  display: block;
+  width: 100%;
+  max-width: 560px;
+  height: 360px;
+  border: 0;
+  border-radius: 6px;
+  background: #ffffff;
+  box-shadow: 0 0 0 1px var(--line);
+}
+
 .email-template-actions {
   margin-top: 0;
   padding-top: 2px;

@@ -5,6 +5,33 @@ import type { DteDocumentRecord } from "../../src/worker/types";
 const LOGO_URL = "https://iglesia.example.org/api/branding/logo?v=v9";
 
 describe("HTML email rendering", () => {
+  it.each(["\n", "\r\n", "\r"])("preserves repeated and whitespace-only section breaks with %j line endings", (newline) => {
+    const bodyText = ["Saludo", "", "Confirmación", "\u00a0", " ", "", "> *Cita*", ">", "> — Referencia", "", "", "", "Gracias"].join(newline);
+    const emails = [
+      dteEmailHtml(record(), bodyText, { organizationName: "Iglesia" }),
+      editableDonorEmailHtml({ organizationName: "Iglesia", title: "Constancia", bodyText })
+    ];
+    for (const html of emails) {
+      // A fixed paragraph margin discarded the extra blank lines in the editor.
+      // Cell padding must retain the gap even when a client resets p/blockquote margins.
+      expect(html).toMatch(/<td[^>]+padding:0 0 14px;[^>]*><p[^>]*>Saludo<\/p>/);
+      expect(html).toMatch(/<td[^>]+padding:0 0 42px;[^>]*><p[^>]*>Confirmación<\/p>/);
+      expect(html.match(/padding:0 0 42px;/g)).toHaveLength(2);
+      expect(html).toContain("<em>Cita</em><br /><br />— Referencia");
+      expect(html).toContain("font-size:14px;line-height:22.4px;");
+    }
+  });
+
+  it("keeps single line breaks and ignores empty edges without producing blank paragraphs", () => {
+    const html = editableDonorEmailHtml({
+      organizationName: "Iglesia", title: "Constancia", bodyText: "\n\nPrimera\nSegunda\n> Cita\nTercera\n\n\n"
+    });
+    expect(html).toContain("Primera<br />Segunda");
+    expect(html.match(/padding:0 0 14px;/g)).toHaveLength(3);
+    expect(html).not.toMatch(/<p[^>]*><\/p>/);
+    expect(html).not.toContain("padding:0 0 42px;");
+  });
+
   it("signals a light-only color scheme on every generated HTML email", () => {
     const htmlEmails = [
       dteEmailHtml(record(), "Cuerpo", { organizationName: "Misión ExampleOrganization" }),
