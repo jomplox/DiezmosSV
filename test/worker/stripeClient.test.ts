@@ -266,6 +266,54 @@ describe("Stripe SDK boundary", () => {
     expect(String(fetchMock.mock.calls[0]?.[0])).toBe("http://127.0.0.1:8791/v1/checkout/sessions");
   });
 
+  it("treats an unrecognized Checkout Session status as not finished", async () => {
+    const session = (status: string) => new Response(JSON.stringify({
+      id: "cs_test_status_fixture",
+      object: "checkout.session",
+      client_reference_id: "stripe_checkout_status",
+      client_secret: null,
+      url: null,
+      livemode: false,
+      status,
+      payment_status: "unpaid",
+      mode: "payment",
+      amount_total: 5000,
+      currency: "usd",
+      customer: null,
+      subscription: null,
+      payment_intent: null,
+      customer_details: null,
+      customer_email: null,
+      metadata: {},
+      expires_at: 1786370400
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(session("complete"))
+      .mockResolvedValueOnce(session("some_future_status"));
+    vi.stubGlobal("fetch", fetchMock);
+    const gateway = createStripeGateway(resolveStripeConfiguration({
+      APP_ENV: "local",
+      STRIPE_RESTRICTED_KEY: "rk_test_fixture",
+      STRIPE_PUBLISHABLE_KEY: "pk_test_fixture",
+      STRIPE_WEBHOOK_SECRET: "whsec_fixture",
+      STRIPE_PAYMENT_METHOD_CONFIGURATION_ID: "pmc_fixture",
+      STRIPE_BILLING_PORTAL_CONFIGURATION_ID: "bpc_fixture",
+      STRIPE_US_LEGAL_NAME: "Example Nonprofit",
+      STRIPE_US_EIN: "12-3456789",
+      STRIPE_US_PHONE: "+1 (555) 010-0200",
+      STRIPE_US_WEBSITE: "https://example.org",
+      STRIPE_US_MAILING_ADDRESS: "100 Example Street\nExample City, NY 10001, USA",
+      STRIPE_US_SIGNER_NAME: "Example Treasurer",
+      STRIPE_US_SIGNER_TITLE: "Treasurer",
+      STRIPE_API_PROXY_URL: "http://127.0.0.1:8791"
+    }));
+
+    await expect(gateway.retrieveCheckoutSession("cs_test_status_fixture"))
+      .resolves.toMatchObject({ status: "complete" });
+    await expect(gateway.retrieveCheckoutSession("cs_test_status_fixture"))
+      .resolves.toMatchObject({ status: null });
+  });
+
   it("keeps every serialized one-time and monthly Checkout request free of receipt-email paths", async () => {
     const serializedBodies: string[] = [];
     const fetchMock = vi.fn<typeof fetch>(async (_input, init) => {

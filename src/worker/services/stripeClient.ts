@@ -247,7 +247,7 @@ function checkoutSnapshot(session: Stripe.Checkout.Session): StripeCheckoutSnaps
     url: session.url,
     clientSecret: session.client_secret,
     livemode: session.livemode,
-    status: session.status,
+    status: checkoutStatus(session.status),
     paymentStatus: checkoutPaymentStatus(session.payment_status),
     mode: checkoutMode(session.mode),
     amountTotal: session.amount_total,
@@ -273,7 +273,14 @@ function checkoutMode(value: string | null | undefined): StripeCheckoutSnapshot[
   return "payment";
 }
 
-function checkoutPaymentStatus(value: string): StripeCheckoutSnapshot["paymentStatus"] {
+function checkoutStatus(value: string | null): StripeCheckoutSnapshot["status"] {
+  if (value === "open" || value === "complete" || value === "expired") {
+    return value;
+  }
+  return null;
+}
+
+function checkoutPaymentStatus(value: string):StripeCheckoutSnapshot["paymentStatus"] {
   if (value === "paid" || value === "no_payment_required") {
     return value;
   }
