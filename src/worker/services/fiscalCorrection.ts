@@ -1,3 +1,4 @@
+import { cleanDui, isDuiDocumentType } from "../../shared/dui";
 import { CAT020_COUNTRIES } from "../../shared/catalogs";
 import {
   validateFiscalReceptorCorrection,
@@ -225,7 +226,9 @@ function applyCorrectedReceptor(
 ): void {
   document.receptor = {
     tipoDocumento: correction.tipoDocumento,
-    numDocumento: correction.numDocumento,
+    numDocumento: isDuiDocumentType(correction.tipoDocumento)
+      ? cleanDui(correction.numDocumento)
+      : correction.numDocumento,
     nrc: correction.nrc,
     nombre: correction.nombre,
     codActividad: correction.codActividad,

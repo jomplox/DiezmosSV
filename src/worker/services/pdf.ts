@@ -8,7 +8,7 @@ import { formatDocument } from "../../shared/documentFormat";
 import { onlyDigits } from "../utils/guards";
 import type { DteDocumentRecord } from "../types";
 
-export const DTE_PDF_RENDERER_VERSION = "cde-pdf:v4";
+export const DTE_PDF_RENDERER_VERSION = "cde-pdf:v5";
 
 type PdfColor = ReturnType<typeof rgb>;
 
@@ -190,7 +190,7 @@ export async function renderDtePdf(record: DteDocumentRecord, logo?: PdfBranding
     bold,
     nameLabel: "Cliente:",
     name: receptor.nombre,
-    activity: receptor.descActividad ?? "Empleados",
+    activity: receptor.descActividad,
     nrc: formatNrc(receptor.nrc),
     documentLabel: documentLabelFor(receptor.tipoDocumento),
     documentNumber: formatDocument(receptor.numDocumento),

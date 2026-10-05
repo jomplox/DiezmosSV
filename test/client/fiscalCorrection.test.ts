@@ -215,7 +215,8 @@ describe("fiscal correction dialog", () => {
     expect(domesticHtml).toContain('name="distrito"');
     expect(domesticHtml).not.toContain('name="codPais"');
     expect(domesticHtml).not.toContain('name="nrc"');
-    expect(domesticHtml).not.toContain('name="codActividad"');
+    expect(domesticHtml).toContain('name="codActividad"');
+    expect(domesticHtml).toContain('name="descActividad"');
 
     const foreignHtml = renderDialog(data({
       ...domesticReceptor,

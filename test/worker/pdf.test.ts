@@ -36,6 +36,14 @@ describe("DTE PDF rendering", () => {
     expect(text).toContain("Total de la Donación");
   });
 
+  it("does not invent an employee activity when the fiscal document has none", async () => {
+    const record = testDocument();
+    const plain = JSON.parse(record.plain_json);
+    plain.receptor.descActividad = null;
+    record.plain_json = JSON.stringify(plain);
+    expect(await renderToText(record)).not.toContain("EMPLEADOS");
+  });
+
   it("uppercases party values except emails and hides the internal establishment code", async () => {
     const record = testDocument();
     const plain = JSON.parse(record.plain_json) as Record<string, any>;
@@ -77,7 +85,7 @@ describe("DTE PDF rendering", () => {
   });
 
   it("versions the black currency renderer as PDF evidence v4", () => {
-    expect(DTE_PDF_RENDERER_VERSION).toBe("cde-pdf:v4");
+    expect(DTE_PDF_RENDERER_VERSION).toBe("cde-pdf:v5");
   });
 
   it("renders the currency code in black like the surrounding label", async () => {

@@ -1491,7 +1491,7 @@ async function handleCreateDonationIntent(ctx: ApiRouteContext): Promise<Respons
     if (error instanceof IntentLinkError) {
       // Intent stays PENDING and expires harmlessly on the cron sweep.
       logWorkerError(ctx.env, "wompi_link_create_failed", error.cause ?? error);
-      return jsonResponse({ error: "wompi_link_failed", message: "No se pudo generar el enlace de pago. Intente de nuevo en unos minutos." }, { status: 502 });
+      return jsonResponse({ error: "wompi_link_failed", message: "No se pudo preparar su entrega con Wompi. Intente de nuevo en unos minutos." }, { status: 502 });
     }
     throw error;
   }

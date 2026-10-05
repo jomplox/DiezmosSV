@@ -34,6 +34,23 @@ describe("DTE builders", () => {
     expect(document.cuerpoDocumento[0].descripcion).toBe("DONACIÓN");
   });
 
+  it("uses the approved employee activity for domestic donations and preserves explicit activity", () => {
+    const document = buildCdeDocument(wompiSample as WompiWebhook, emisorConfig, { sequence: 1 }) as Record<string, any>;
+    expect(document.receptor).toMatchObject({ codDomiciliado: 1, codActividad: "10001", descActividad: "Empleados" });
+    document.receptor.codActividad = "62010";
+    document.receptor.descActividad = "Programación informática";
+    const advanced = buildAdvancedCdeDocument(document, emisorConfig, { sequence: 2 }) as Record<string, any>;
+    expect(advanced.receptor).toMatchObject({ codActividad: "62010", descActividad: "Programación informática" });
+  });
+
+  it("keeps activity null for non-domiciled donors", () => {
+    const document = buildCdeDocument({
+      ...wompiSample,
+      Cliente: { ...wompiSample.Cliente, CodigoPais: "US" }
+    } as WompiWebhook, emisorConfig, { sequence: 1 }) as Record<string, any>;
+    expect(document.receptor).toMatchObject({ codDomiciliado: 2, codActividad: null, descActividad: null });
+  });
+
   it("uses a reserved generation code for a Wompi CDE", () => {
     const document = buildCdeDocument(wompiSample as WompiWebhook, emisorConfig, {
       sequence: 31,
@@ -122,7 +139,7 @@ describe("DTE builders", () => {
     });
   });
 
-  it("formats unhyphenated DUIs canonically in the CDE receptor", () => {
+  it("sends DUI as nine digits without punctuation under MH field 39 rule 10", () => {
     const document = buildCdeDocument(
       { ...wompiSample, Cliente: { ...wompiSample.Cliente, DocumentoIdentidad: "100000027" } } as WompiWebhook,
       emisorConfig,
@@ -133,7 +150,7 @@ describe("DTE builders", () => {
     ) as Record<string, any>;
 
     expect(document.receptor.tipoDocumento).toBe("13");
-    expect(document.receptor.numDocumento).toBe("10000002-7");
+    expect(document.receptor.numDocumento).toBe("100000027");
   });
 
   it("classifies non-DUI donor documents as Otro (CAT-022 37)", () => {
@@ -176,7 +193,7 @@ describe("DTE builders", () => {
     ) as Record<string, any>;
 
     expect(document.receptor.tipoDocumento).toBe("13");
-    expect(document.receptor.numDocumento).toBe("00000000-0");
+    expect(document.receptor.numDocumento).toBe("000000000");
   });
 
   it("rejects invalid DUI check digits before building a CDE for MH", () => {
@@ -419,7 +436,7 @@ describe("DTE builders", () => {
     ) as Record<string, any>;
 
     expect(document.receptor.tipoDocumento).toBe("13");
-    expect(document.receptor.numDocumento).toBe("10000002-7");
+    expect(document.receptor.numDocumento).toBe("100000027");
     expect(document.receptor.nombre).toBe("Ana Donante");
     expect(document.receptor.correo).toBe("ana@example.org");
     expect(document.receptor.telefono).toBe("70001111");
