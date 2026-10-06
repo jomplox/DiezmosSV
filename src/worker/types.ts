@@ -67,6 +67,11 @@ export type Env = Pick<CloudflareBindings, "DB" | "ASSETS" | "ARCHIVE"> &
     EMAIL_FROM?: string;
     EMISOR_CONFIG_JSON?: string;
     DONATION_INTAKE_DISABLED?: string;
+    RAY_MONITOR_ACCESS_TEAM_DOMAIN?: string;
+    RAY_MONITOR_ACCESS_AUD?: string;
+    RAY_MONITOR_ACCESS_CLIENT_ID?: string;
+    RAY_MONITOR_NOT_AFTER?: string;
+    RAY_MONITOR_RATE_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> };
   };
 
 export interface IssuanceMessage {
