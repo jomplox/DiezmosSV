@@ -27,7 +27,44 @@ export interface StripeCheckoutSnapshot {
   expiresAt: number;
 }
 
+export interface StripeLegacySubscriptionSnapshot {
+  id: string;
+  livemode: boolean;
+  status: string;
+  customerId: string | null;
+  donorName: string | null;
+  donorEmail: string | null;
+  metadata: Record<string, string>;
+  items: Array<{
+    amountCents: number | null;
+    currency: string | null;
+    interval: string | null;
+    intervalCount: number | null;
+    productName: string | null;
+  }>;
+}
+
+export interface StripeLegacyInvoiceSnapshot {
+  id: string;
+  livemode: boolean;
+  amountPaid: number;
+  currency: string;
+  paidAt: number | null;
+  payments: Array<{
+    type: string | null;
+    paymentIntentId: string | null;
+    status: string | null;
+    amountPaid: number | null;
+  }>;
+}
+
 export interface StripeGateway {
+  retrieveLegacySubscription(subscriptionId: string): Promise<StripeLegacySubscriptionSnapshot>;
+  listPaidSubscriptionInvoices(
+    subscriptionId: string,
+    paidFromSeconds: number
+  ): Promise<StripeLegacyInvoiceSnapshot[]>;
+  updateSubscriptionMetadata(subscriptionId: string, metadata: Record<string, string>): Promise<void>;
   createCheckoutSession(
     params: Stripe.Checkout.SessionCreateParams,
     idempotencyKey: string
@@ -112,6 +149,71 @@ class ApiStripeGateway implements StripeGateway {
 
   async retrieveCheckoutSession(sessionId: string): Promise<StripeCheckoutSnapshot> {
     return checkoutSnapshot(await this.stripe.checkout.sessions.retrieve(sessionId));
+  }
+
+  async retrieveLegacySubscription(subscriptionId: string): Promise<StripeLegacySubscriptionSnapshot> {
+    const subscription = await this.stripe.subscriptions.retrieve(subscriptionId, {
+      expand: ["customer", "items.data.price.product"]
+    });
+    const customer = typeof subscription.customer === "object" && !subscription.customer.deleted
+      ? subscription.customer
+      : null;
+    return {
+      id: subscription.id,
+      livemode: subscription.livemode,
+      status: subscription.status,
+      customerId: externalId(subscription.customer),
+      donorName: customer?.name ?? null,
+      donorEmail: customer?.email ?? null,
+      metadata: stringMetadata(subscription.metadata),
+      items: subscription.items.data.map((item) => {
+        const product = item.price.product;
+        return {
+          amountCents: item.price.unit_amount === null ? null : item.price.unit_amount * (item.quantity ?? 1),
+          currency: item.price.currency,
+          interval: item.price.recurring?.interval ?? null,
+          intervalCount: item.price.recurring?.interval_count ?? null,
+          productName: typeof product === "object" && !product.deleted ? product.name : null
+        };
+      })
+    };
+  }
+
+  async listPaidSubscriptionInvoices(
+    subscriptionId: string,
+    paidFromSeconds: number
+  ): Promise<StripeLegacyInvoiceSnapshot[]> {
+    const invoices: StripeLegacyInvoiceSnapshot[] = [];
+    // An invoice is created shortly before it is paid; the creation window is a
+    // coarse pre-filter and paid_at decides membership.
+    for await (const invoice of this.stripe.invoices.list({
+      subscription: subscriptionId,
+      status: "paid",
+      created: { gte: paidFromSeconds - 7 * 24 * 60 * 60 },
+      expand: ["data.payments"],
+      limit: 100
+    })) {
+      const paidAt = invoice.status_transitions?.paid_at ?? null;
+      if (paidAt === null || paidAt < paidFromSeconds) continue;
+      invoices.push({
+        id: invoice.id ?? "",
+        livemode: invoice.livemode,
+        amountPaid: invoice.amount_paid,
+        currency: invoice.currency,
+        paidAt,
+        payments: (invoice.payments?.data ?? []).map((payment) => ({
+          type: payment.payment.type ?? null,
+          paymentIntentId: externalId(payment.payment.payment_intent ?? null),
+          status: payment.status ?? null,
+          amountPaid: payment.amount_paid ?? null
+        }))
+      });
+    }
+    return invoices;
+  }
+
+  async updateSubscriptionMetadata(subscriptionId: string, metadata: Record<string, string>): Promise<void> {
+    await this.stripe.subscriptions.update(subscriptionId, { metadata });
   }
 
   async createBillingPortalSession(input: {

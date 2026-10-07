@@ -63,6 +63,7 @@ import {
 } from "./services/stripeDonations";
 import { processStripeWebhookEvent, StripeWebhookEventError } from "./services/stripeWebhook";
 import { deliverNextStripeAcknowledgment } from "./services/stripeAcknowledgment";
+import { adoptLegacyStripeSubscription, StripeLegacyAdoptionError } from "./services/stripeLegacyAdoption";
 import { logWorkerError } from "./services/observability";
 import { stagingSmokeRunId } from "./services/stagingSmoke";
 import {
@@ -105,6 +106,7 @@ import {
   StripeAnnualStatementConfigurationError,
   StripeAnnualStatementSingleDonorError,
   stripeUsTimeZone,
+  stripeUsYearWindow,
   type StripeAnnualStatementSendRequest
 } from "./services/stripeAnnualStatement";
 import { AnalyticsCapacityError, computeAnalytics, elSalvadorRangeWindow, type AnalyticsRange } from "./services/analytics";
@@ -3576,6 +3578,7 @@ const settingsRoutes: Array<Route<ApiRouteContext>> = [
   { pattern: "/api/settings/stripe", role: "OWNER", handler: handleStripeSettings },
   { method: "GET", pattern: "/api/settings/stripe/acknowledgments", role: "OWNER", handler: handleStripeAcknowledgmentReconciliationList },
   { method: "POST", pattern: /^\/api\/settings\/stripe\/acknowledgments\/([^/]+)\/reconcile$/, role: "OWNER", handler: handleStripeAcknowledgmentReconcile },
+  { method: "POST", pattern: "/api/settings/stripe/legacy-subscriptions/adopt", role: "OWNER", handler: handleStripeLegacySubscriptionAdopt },
   { pattern: "/api/settings/stripe/webhook-secret/stage", role: "OWNER", handler: handleStripeWebhookSecretStage },
   { pattern: "/api/settings/stripe/webhook-secret/promote", role: "OWNER", handler: handleStripeWebhookSecretPromote },
   { pattern: "/api/settings/stripe/webhook-secret/cancel", role: "OWNER", handler: handleStripeWebhookSecretCancel },
@@ -4503,6 +4506,96 @@ async function handleStripeAcknowledgmentReconcile(ctx: ApiRouteContext): Promis
     logWorkerError(ctx.env, "stripe_acknowledgment_reconciliation_audit_failed", error);
   }
   return jsonResponse({ ok: true, id, resolution });
+}
+
+async function handleStripeLegacySubscriptionAdopt(ctx: ApiRouteContext): Promise<Response> {
+  const body = await readJsonObject(ctx.request, {
+    limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES,
+    malformed: "throw"
+  });
+  const subscriptionId = typeof body.subscriptionId === "string" ? body.subscriptionId : "";
+  if (!/^sub_[A-Za-z0-9]{4,250}$/.test(subscriptionId)) {
+    return jsonResponse({ error: "invalid_stripe_subscription_id" }, { status: 400 });
+  }
+  let backfillFromIso: string;
+  try {
+    if (typeof body.backfillYear !== "number") throw new StripeAnnualStatementConfigurationError("invalid");
+    backfillFromIso = stripeUsYearWindow(ctx.env, body.backfillYear).startIso;
+  } catch (error) {
+    if (error instanceof StripeAnnualStatementConfigurationError) {
+      return jsonResponse({ error: "invalid_backfill_year" }, { status: 400 });
+    }
+    throw error;
+  }
+  const dryRun = body.dryRun !== false;
+  let configuration: ReturnType<typeof resolveStripeConfiguration>;
+  try {
+    configuration = resolveStripeConfiguration(ctx.env);
+  } catch (error) {
+    if (error instanceof StripeConfigurationError) {
+      return jsonResponse({ error: "stripe_unavailable" }, { status: 503 });
+    }
+    throw error;
+  }
+  if (configuration.mock) {
+    return jsonResponse({ error: "stripe_legacy_adoption_unavailable" }, { status: 503 });
+  }
+  let result;
+  try {
+    result = await adoptLegacyStripeSubscription({
+      repo: ctx.repo,
+      gateway: createStripeGateway(configuration),
+      subscriptionId,
+      livemode: configuration.livemode,
+      backfillFromIso,
+      dryRun,
+      now: nowIso()
+    });
+  } catch (error) {
+    if (error instanceof StripeLegacyAdoptionError) {
+      return jsonResponse({ error: error.code }, { status: 409 });
+    }
+    const providerError = stripeProviderErrorSummary(error);
+    if (providerError) {
+      logWorkerError(ctx.env, "stripe_legacy_adoption_provider_failed", error);
+      return jsonResponse({ error: "stripe_provider_error", provider: providerError }, { status: 502 });
+    }
+    throw error;
+  }
+  if (!dryRun) {
+    try {
+      await ctx.repo.createAudit({
+        actorType: "USER",
+        actorId: ctx.actor!.id,
+        action: "STRIPE_LEGACY_SUBSCRIPTION_ADOPTED",
+        entityType: "stripe_checkout",
+        entityId: result.checkoutId,
+        summary: "Suscripción heredada de Stripe incorporada",
+        metadata: {
+          giftType: result.giftType,
+          amountCents: result.amountCents,
+          invoicesRecorded: result.invoices.recorded,
+          invoicesAlreadyRecorded: result.invoices.alreadyRecorded,
+          backfilledCents: result.backfilledCents
+        }
+      });
+    } catch (error) {
+      logWorkerError(ctx.env, "stripe_legacy_adoption_audit_failed", error);
+    }
+  }
+  return jsonResponse(result);
+}
+
+function stripeProviderErrorSummary(error: unknown): { type: string; code: string | null; statusCode: number | null } | null {
+  if (!error || typeof error !== "object" || !("type" in error)) return null;
+  const type = String(error.type);
+  if (!type.startsWith("Stripe")) return null;
+  const statusCode = "statusCode" in error ? Number(error.statusCode) : NaN;
+  return {
+    type,
+    code: "code" in error && typeof error.code === "string" ? error.code : null,
+    statusCode: Number.isInteger(statusCode) ? statusCode : null
+  };
 }
 
 async function handleStripeWebhookSecretStage(ctx: ApiRouteContext): Promise<Response> {

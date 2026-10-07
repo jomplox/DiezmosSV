@@ -15,6 +15,7 @@ import {
 import {
   DEFAULT_EMAIL_TEMPLATES,
   EMAIL_TEMPLATES_SETTING_KEY,
+  escapeEmailTemplateFormattingValue,
   parseEmailTemplates,
   renderEmailTemplateValue,
   type EmailTemplateValue
@@ -47,6 +48,9 @@ export interface StripeAcknowledgmentContentInput {
   kind?: "ORIGINAL" | "PARTIAL_REFUND" | "FULL_REFUND";
   refundedAmountCents?: number;
   template?: EmailTemplateValue;
+  // Set only for the first acknowledgment of a subscription adopted from a
+  // retired donation site: the current site, shown as host/path.
+  adoptionIntroductionSite?: string;
 }
 
 export function stripeAcknowledgmentContent(
@@ -99,18 +103,38 @@ export function stripeAcknowledgmentContent(
     "{{nombreLegal}}": input.legalName,
     "{{ein}}": input.ein
   });
+  const introduction = kind === "ORIGINAL" && input.adoptionIntroductionSite
+    ? adoptionIntroduction(input.giftType, input.adoptionIntroductionSite)
+    : null;
   return {
     subject: rendered.subject,
-    text: rendered.text,
+    text: introduction ? afterGreeting(rendered.text, introduction) : rendered.text,
     html: editableDonorEmailHtml({
       organizationName: input.branding.organizationName,
       title: rendered.subject,
-      bodyText: rendered.formattedText,
+      bodyText: introduction
+        ? afterGreeting(rendered.formattedText, escapeEmailTemplateFormattingValue(introduction))
+        : rendered.formattedText,
       brandColor: input.branding.brandColor,
       supportEmail: input.branding.supportEmail,
       logoUrl: input.branding.logoUrl
     })
   };
+}
+
+function adoptionIntroduction(giftType: StripeGiftType, site: string): string {
+  const gift = giftType === "TITHE" ? "diezmo" : "ofrenda";
+  return `Gracias por su fidelidad. Su ${gift} mensual ahora se registra en nuestro nuevo ` +
+    `sitio de donaciones, ${site}. No necesita hacer nada: su aportación continúa igual, ` +
+    "y a partir de ahora recibirá este comprobante con cada entrega.";
+}
+
+// Owner-edited templates open with a greeting paragraph; the introduction
+// follows it so the email still reads as a letter.
+function afterGreeting(body: string, paragraph: string): string {
+  const paragraphs = body.split("\n\n");
+  paragraphs.splice(paragraphs.length > 1 ? 1 : paragraphs.length, 0, paragraph);
+  return paragraphs.join("\n\n");
 }
 
 export interface RenderStripeAcknowledgmentPdfInput {
@@ -600,6 +624,14 @@ export async function snapshotStripeAcknowledgmentEvidence(
   const branding = await loadEmailBranding(repo, env);
   const templates = parseEmailTemplates(await repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY));
   const timeZone = stripeUsTimeZone(env);
+  const donationSite = donationSiteLabel(env);
+  const introduceAdoption = source.kind === "ORIGINAL"
+    && donationSite !== null
+    && await repo.claimStripeAdoptionIntroduction({
+      deliveryId: source.id,
+      giftId: source.gift_id,
+      now
+    });
   const content = stripeAcknowledgmentContent({
     donorName: source.donor_name,
     amountCents: source.amount_cents,
@@ -614,7 +646,8 @@ export async function snapshotStripeAcknowledgmentEvidence(
     refundedAmountCents: source.evidence_refunded_amount_cents,
     template: source.kind === "ORIGINAL"
       ? templates.stripeAcknowledgment
-      : templates.stripeRefund
+      : templates.stripeRefund,
+    adoptionIntroductionSite: introduceAdoption ? donationSite : undefined
   });
   const evidence: StripeAcknowledgmentEvidenceV1 = {
     version: 1,
@@ -668,6 +701,14 @@ export async function snapshotStripeAcknowledgmentEvidence(
     throw new Error("Stripe acknowledgment evidence snapshot was not persisted");
   }
   return parseStripeAcknowledgmentEvidence(source.snapshot_json, source.snapshot_hash);
+}
+
+function donationSiteLabel(env: Env): string | null {
+  try {
+    return env.APP_ORIGIN ? `${new URL(env.APP_ORIGIN).host}/donar` : null;
+  } catch {
+    return null;
+  }
 }
 
 async function parseStripeAcknowledgmentEvidence(

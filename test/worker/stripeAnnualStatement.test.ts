@@ -1728,6 +1728,7 @@ function gift(overrides: Partial<StripeAnnualStatementGift> & { id: string }): S
     settled_at: overrides.settled_at ?? "2025-06-01T12:00:00.000Z",
     status: overrides.status ?? "PAID",
     refunded_amount_cents: refundedCents,
+    acknowledgment_suppressed: 0,
     net_amount_cents: overrides.net_amount_cents ?? amountCents - refundedCents,
     created_at: overrides.created_at ?? "2025-06-01T12:00:00.000Z",
     updated_at: overrides.updated_at ?? "2025-06-01T12:00:00.000Z"

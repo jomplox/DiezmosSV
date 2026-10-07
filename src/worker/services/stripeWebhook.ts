@@ -456,7 +456,7 @@ async function processChargeRefundedEvent(
     await applyStripeChargePaymentMethod(repo, event, charge, now, env);
     gift = await repo.getStripeGiftBySourceId(gift.source_id) ?? gift;
   }
-  if (env && gift.refunded_amount_cents > 0 && gift.payment_method_type) {
+  if (env && gift.refunded_amount_cents > 0 && gift.payment_method_type && !gift.acknowledgment_suppressed) {
     const correction = await repo.getStripeAcknowledgmentForGiftEvidence(
       gift.id,
       gift.refunded_amount_cents
@@ -581,7 +581,7 @@ async function applyStripeChargePaymentMethod(
       gift = await repo.getStripeGiftBySourceId(result.settlement.invoice_id);
     }
   }
-  if (env && gift) {
+  if (env && gift && !gift.acknowledgment_suppressed) {
     const delivery = await repo.getStripeAcknowledgmentForGiftEvidence(
       gift.id,
       gift.refunded_amount_cents
