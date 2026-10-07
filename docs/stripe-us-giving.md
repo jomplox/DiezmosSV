@@ -51,7 +51,7 @@ No cambiar ni modificar **live** hasta completar y documentar todo este bloque e
    - El acceso mínimo de lectura que Stripe exija para **Customers** al crear el portal; si la operación funciona sin él, manténgalo en `None`.
    - Todo lo demás en `None`. No se necesita una clave `sk_…` ni capacidad de reembolsar. La clave restringida nunca llega al navegador.
 3. Cree el endpoint `https://<host-staging>/webhooks/stripe`, fije su versión de API en
-   `2026-07-29.dahlia` y seleccione estos eventos exactos:
+   `2026-08-26.dahlia` y seleccione estos eventos exactos:
    - `checkout.session.completed`
    - `checkout.session.async_payment_succeeded`
    - `checkout.session.async_payment_failed`
@@ -81,7 +81,7 @@ No cambiar ni modificar **live** hasta completar y documentar todo este bloque e
 
 Si el runtime local de `workerd` no puede realizar HTTPS saliente, ejecute `npm run dev:stripe-api-proxy` y defina `STRIPE_API_PROXY_URL="http://127.0.0.1:8791"` en el archivo privado local. El Worker acepta ese puente únicamente con `APP_ENV=local` y un origen HTTP de loopback sin ruta ni credenciales; staging y producción lo rechazan.
 
-La versión fijada por el SDK es `2026-07-29.dahlia`. Sandbox requiere el par `rk_test_…` / `pk_test_…`; producción requiere `rk_live_…` / `pk_live_…`. El Worker rechaza claves de ambientes opuestos, una clave amplia `sk_…`, un evento `livemode` incorrecto, una versión API distinta o una firma inválida.
+La versión fijada por el SDK es `2026-08-26.dahlia`. Sandbox requiere el par `rk_test_…` / `pk_test_…`; producción requiere `rk_live_…` / `pk_live_…`. El Worker rechaza claves de ambientes opuestos, una clave amplia `sk_…`, un evento `livemode` incorrecto, una versión API distinta o una firma inválida.
 
 Las claves restringidas reducen el alcance de una exposición y deben permanecer solo en el servidor. Consulte [claves de API](https://docs.stripe.com/keys) y [prácticas de seguridad](https://docs.stripe.com/keys-best-practices).
 
