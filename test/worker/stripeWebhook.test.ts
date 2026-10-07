@@ -628,6 +628,110 @@ describe("Stripe signed webhooks", () => {
     expect(count(database, "stripe_acknowledgment_deliveries")).toBe(0);
   });
 
+  it("acknowledges events from other integrations on the shared Stripe account without recording them", async () => {
+    const foreignEvents = [
+      stripeEvent("evt_foreign_payment_link_expired", "checkout.session.expired", {
+        id: "cs_live_foreign_payment_link",
+        object: "checkout.session",
+        livemode: false,
+        status: "expired",
+        payment_status: "unpaid",
+        mode: "payment",
+        amount_total: 5000,
+        currency: "usd",
+        client_reference_id: null,
+        payment_link: "plink_foreign",
+        submit_type: "donate",
+        metadata: {},
+        expires_at: 1_786_370_400
+      }),
+      stripeEvent("evt_foreign_payment_link_completed", "checkout.session.completed", {
+        id: "cs_live_foreign_payment_link_paid",
+        object: "checkout.session",
+        livemode: false,
+        status: "complete",
+        payment_status: "paid",
+        mode: "payment",
+        amount_total: 1000,
+        currency: "usd",
+        client_reference_id: null,
+        payment_link: "plink_foreign",
+        payment_intent: "pi_foreign_payment_link",
+        metadata: {},
+        expires_at: 1_786_370_400
+      }),
+      stripeEvent("evt_foreign_givewp_invoice_paid", "invoice.paid", {
+        id: "in_foreign_givewp",
+        object: "invoice",
+        livemode: false,
+        amount_paid: 13500,
+        currency: "usd",
+        customer: "cus_foreign_givewp",
+        parent: {
+          type: "subscription_details",
+          subscription_details: {
+            subscription: "sub_foreign_givewp",
+            metadata: { "Donation Post ID": "32495", Email: "donante@example.org" }
+          }
+        }
+      }),
+      stripeEvent("evt_foreign_givewp_invoice_failed", "invoice.payment_failed", {
+        id: "in_foreign_givewp_failed",
+        object: "invoice",
+        livemode: false,
+        amount_paid: 0,
+        currency: "usd",
+        customer: "cus_foreign_givewp",
+        parent: {
+          type: "subscription_details",
+          subscription_details: {
+            subscription: "sub_foreign_givewp",
+            metadata: { "Donation Post ID": "32495", Email: "donante@example.org" }
+          }
+        }
+      }),
+      stripeEvent("evt_foreign_subscription_deleted", "customer.subscription.deleted", {
+        id: "sub_foreign_legacy",
+        object: "subscription",
+        livemode: false,
+        metadata: { created_by: "Legacy", first_name: "Donante", last_name: "Ejemplo" }
+      })
+    ];
+
+    for (const event of foreignEvents) {
+      const response = await sendSignedWebhook(workerEnv, event);
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({ received: true });
+    }
+    expect(database.prepare(
+      "SELECT status, COUNT(*) AS count FROM stripe_webhook_events GROUP BY status"
+    ).all()).toEqual([{ status: "PROCESSED", count: foreignEvents.length }]);
+    expect(count(database, "stripe_gifts")).toBe(0);
+    expect(count(database, "stripe_acknowledgment_deliveries")).toBe(0);
+  });
+
+  it("keeps rejecting a Checkout Session that carries this lane's metadata without its reference", async () => {
+    const event = stripeEvent("evt_lane_without_reference", "checkout.session.completed", {
+      ...checkoutSession({
+        id: "cs_test_lane_without_reference",
+        checkoutId: "stripe_checkout_missing_reference",
+        amountCents: 5000,
+        frequency: "once",
+        paymentIntentId: "pi_lane_without_reference"
+      }),
+      client_reference_id: null
+    });
+
+    const response = await sendSignedWebhook(workerEnv, event);
+    expect(response.status).toBe(500);
+    expect(database.prepare(
+      "SELECT status, failure_code FROM stripe_webhook_events WHERE id = ?"
+    ).get("evt_lane_without_reference")).toEqual({
+      status: "FAILED",
+      failure_code: "checkout_identity_mismatch"
+    });
+  });
+
   it("settles every monthly invoice once even when invoice delivery precedes Checkout completion", async () => {
     const checkout = await createCheckout(workerEnv, {
       requestId: "993b9407-9e16-4915-90ec-7f95855b8fab",
