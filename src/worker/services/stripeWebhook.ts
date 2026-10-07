@@ -19,6 +19,10 @@ export async function processStripeWebhookEvent(
   now: string,
   env?: Env
 ): Promise<void> {
+  // The Stripe account is shared with other integrations (Payment Links, retired
+  // donation sites). Their events carry none of this lane's markers; acknowledge
+  // them without recording anything. Anything carrying a marker is still validated.
+  if (isForeignEvent(event)) return;
   switch (event.type) {
     case "checkout.session.completed":
     case "checkout.session.async_payment_succeeded":
@@ -607,6 +611,32 @@ function assertCheckoutIdentity(
   ) {
     throw new StripeWebhookEventError("checkout_identity_mismatch");
   }
+}
+
+function isForeignEvent(event: Stripe.Event): boolean {
+  const object = optionalRecord(event.data.object);
+  if (!object) return false;
+  switch (event.type) {
+    case "checkout.session.completed":
+    case "checkout.session.async_payment_succeeded":
+    case "checkout.session.async_payment_failed":
+    case "checkout.session.expired":
+      return object.client_reference_id == null && !carriesLaneMetadata(object.metadata);
+    case "invoice.paid":
+    case "invoice.payment_failed":
+      return !carriesLaneMetadata(
+        optionalRecord(optionalRecord(object.parent)?.subscription_details)?.metadata
+      );
+    case "customer.subscription.deleted":
+      return !carriesLaneMetadata(object.metadata);
+    default:
+      return false;
+  }
+}
+
+function carriesLaneMetadata(value: unknown): boolean {
+  const metadata = optionalRecord(value);
+  return metadata?.lane !== undefined || metadata?.checkout_id !== undefined;
 }
 
 function reconciledCheckoutId(session: Record<string, unknown>): string {
