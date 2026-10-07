@@ -202,7 +202,7 @@ DiezmosSV/
 │   ├── client/                 # React + Vite admin panel, /donar, fonts, assets
 │   └── shared/                 # Catalogs · DUI · NIT · legal windows · password policy
 │                               # fiscal corrections · checkout · money · email
-├── migrations/                 # D1 schema (incremental, append-only 0001…0047)
+├── migrations/                 # D1 schema (incremental, append-only 0001…0048)
 ├── DTE/svfe-json-schemas/      # MH-bundled JSON schemas for validation
 ├── docs/                       # Deploy/UAT · operator runbook · retention-restore
 │                               # fiscal-claim cutover/reconciliation · pre-CDE recovery
@@ -1037,7 +1037,7 @@ The safety model is the fiscal-claim model applied to a repair path:
 ## 🗄 Data model
 
 <details>
-<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0047)</strong></summary>
+<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0048)</strong></summary>
 
 <br/>
 
@@ -1054,11 +1054,11 @@ The safety model is the fiscal-claim model applied to a repair path:
 | `document_sequences` | Control-number counters per environment/prefix. Advanced by the issuance pipeline and, for fiscal corrections, by a database trigger that increments the counter inside the same statement transaction as the reservation and aborts unless it moves exactly one row. |
 | `email_deliveries` | Claimed email attempts, dispatch/outcome evidence, provider IDs, and PDF/JSON evidence hashes. |
 | `operational_alert_deliveries` | Incident- and recipient-scoped claims for alert email delivery. |
-| `stripe_checkout_sessions` | U.S.-lane Checkout intent and sanitized provider state, including independent monotonic checkout/subscription chronology. |
+| `stripe_checkout_sessions` | U.S.-lane Checkout intent and sanitized provider state, including independent monotonic checkout/subscription chronology, and adoption markers for legacy monthly subscriptions brought in from a retired donation site (0048). |
 | `stripe_webhook_events` | Signed Stripe event replay fence and sanitized processing outcome; raw webhook bodies are never retained. |
 | `stripe_provider_recovery_reads` | Bounded, leased admission records for public provider-backed Session recovery reads. |
 | `stripe_invoice_settlements` | Order-independent monthly invoice, paid InvoicePayment, and non-sensitive actual-method evidence; records a gift after the financial evidence validates and holds acknowledgment delivery until signed Charge evidence converges. |
-| `stripe_gifts` | Settled U.S. gift source of truth, including donor-selected type, non-sensitive actual payment-method classification, and durable refund/net state. |
+| `stripe_gifts` | Settled U.S. gift source of truth, including donor-selected type, non-sensitive actual payment-method classification, and durable refund/net state. Gifts backfilled during a legacy-subscription adoption are flagged `acknowledgment_suppressed` and can never receive an acknowledgment. |
 | `stripe_acknowledgment_deliveries` | Immutable, revisioned immediate 501(c)(3) acknowledgment/correction evidence and provider outcomes. |
 | `stripe_annual_statement_deliveries` | Immutable U.S. annual statement snapshots, revision lineage, leased claims, and dispatch outcomes. |
 | `stripe_retention_generations` | Internal monotonic membership ledger for bounded, referentially consistent Stripe retention exports. It is restore metadata maintained by triggers, is not an archive payload, and is rebuilt automatically when Stripe rows are restored. |

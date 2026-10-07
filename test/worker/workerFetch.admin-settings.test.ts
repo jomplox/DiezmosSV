@@ -420,6 +420,32 @@ describe("Stripe owner settings", () => {
     expect(forbidden.status).toBe(403);
   });
 
+  it("keeps legacy Stripe subscription adoption owner-only and validates it before Stripe", async () => {
+    const db = new InMemoryD1();
+    const adopt = (body: unknown) => worker.fetch(new Request(
+      "https://example.org/api/settings/stripe/legacy-subscriptions/adopt",
+      {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      }
+    ), env(db, { STRIPE_MOCK_MODE: "1" }));
+
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    expect((await adopt({ subscriptionId: "sub_LegacyFixture1", backfillYear: 2026 })).status).toBe(403);
+
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    const invalidId = await adopt({ subscriptionId: "cus_not_a_subscription", backfillYear: 2026 });
+    expect(invalidId.status).toBe(400);
+    await expect(invalidId.json()).resolves.toEqual({ error: "invalid_stripe_subscription_id" });
+    const invalidYear = await adopt({ subscriptionId: "sub_LegacyFixture1", backfillYear: "2026" });
+    expect(invalidYear.status).toBe(400);
+    await expect(invalidYear.json()).resolves.toEqual({ error: "invalid_backfill_year" });
+    const mock = await adopt({ subscriptionId: "sub_LegacyFixture1", backfillYear: 2026 });
+    expect(mock.status).toBe(503);
+    await expect(mock.json()).resolves.toEqual({ error: "stripe_legacy_adoption_unavailable" });
+  });
+
   it("rejects invalid replacements before calling Cloudflare", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };

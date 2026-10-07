@@ -57,6 +57,8 @@ export interface StripeCheckoutRecord {
   subscription_event_created: number;
   subscription_event_rank: number;
   subscription_event_id: string | null;
+  adopted_at: string | null;
+  adoption_intro_delivery_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -84,6 +86,7 @@ export interface StripeGiftRecord {
   settled_at: string;
   status: "PAID" | "PARTIALLY_REFUNDED" | "REFUNDED";
   refunded_amount_cents: number;
+  acknowledgment_suppressed: 0 | 1;
   created_at: string;
   updated_at: string;
 }
@@ -1545,7 +1548,8 @@ export async function applyStripeRefund(
               gift.refunded_amount_cents, 'PENDING', 0, ?, ?
          FROM stripe_gifts AS gift
         WHERE gift.stripe_payment_intent_id = ?
-          AND gift.refunded_amount_cents > 0`
+          AND gift.refunded_amount_cents > 0
+          AND gift.acknowledgment_suppressed = 0`
     ).bind(acknowledgmentId, input.now, input.now, input.stripePaymentIntentId)
   ]);
   return db.prepare(
@@ -1684,6 +1688,178 @@ export async function attachStripeInvoicePaymentIntent(
     input.stripeInvoiceId,
     input.stripePaymentIntentId
   ).first<StripeGiftRecord>();
+}
+
+export async function adoptLegacyStripeCheckout(
+  db: D1Database,
+  input: {
+    id: string;
+    requestId: string;
+    subscriptionId: string;
+    customerId: string;
+    giftType: Exclude<StripeGiftType, "UNSPECIFIED">;
+    amountCents: number;
+    livemode: boolean;
+    donorName: string | null;
+    donorEmail: string | null;
+    now: string;
+  }
+): Promise<StripeCheckoutRecord | null> {
+  await db.prepare(
+    `INSERT OR IGNORE INTO stripe_checkout_sessions (
+       id, request_id, request_fingerprint, frequency, gift_type, amount_cents, currency,
+       livemode, status, payment_status, stripe_customer_id, stripe_subscription_id,
+       subscription_status, donor_name, donor_email, completed_at, adopted_at,
+       created_at, updated_at
+     ) VALUES (?, ?, 'legacy-adoption:v1', 'MONTHLY', ?, ?, 'usd', ?, 'COMPLETE', 'PAID',
+               ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?)`
+  ).bind(
+    input.id,
+    input.requestId,
+    input.giftType,
+    input.amountCents,
+    input.livemode ? 1 : 0,
+    input.customerId,
+    input.subscriptionId,
+    input.donorName,
+    input.donorEmail,
+    input.now,
+    input.now,
+    input.now,
+    input.now
+  ).run();
+  return getStripeCheckoutById(db, input.id);
+}
+
+// Records a legacy invoice as a gift that is never acknowledged. When the
+// webhook already staged the invoice's payment half, that row is completed and
+// its signed payment-method evidence carried onto the gift.
+export async function recordSuppressedStripeInvoiceGift(
+  db: D1Database,
+  input: {
+    giftId: string;
+    invoiceId: string;
+    checkoutId: string;
+    subscriptionId: string;
+    paymentIntentId: string;
+    giftType: Exclude<StripeGiftType, "UNSPECIFIED">;
+    amountCents: number;
+    livemode: boolean;
+    donorName: string | null;
+    donorEmail: string | null;
+    settledAt: string;
+    now: string;
+  }
+): Promise<{ inserted: boolean; record: StripeGiftRecord }> {
+  const settlement = await db.prepare(
+    "SELECT * FROM stripe_invoice_settlements WHERE invoice_id = ?"
+  ).bind(input.invoiceId).first<StripeInvoiceSettlementRecord>();
+  if (settlement && (
+    settlement.status === "REVIEW"
+    || (settlement.checkout_id !== null && settlement.checkout_id !== input.checkoutId)
+    || (settlement.payment_intent_id !== null && settlement.payment_intent_id !== input.paymentIntentId)
+  )) {
+    throw new StripeGiftConflictError();
+  }
+  const evidence = settlement?.payment_method_type
+    && settlement.payment_method_event_id
+    && settlement.payment_method_payment_intent_id === input.paymentIntentId
+    && settlement.payment_method_amount_cents === input.amountCents
+    ? settlement
+    : null;
+  const method = {
+    type: evidence?.payment_method_type ?? "legacy_stripe",
+    wallet: evidence?.payment_method_wallet ?? null,
+    chargeId: evidence?.payment_method_charge_id ?? null,
+    eventId: evidence?.payment_method_event_id ?? null
+  };
+  const [giftResult] = await db.batch([
+    db.prepare(
+      `INSERT OR IGNORE INTO stripe_gifts (
+         id, source_type, source_id, checkout_id, stripe_payment_intent_id,
+         stripe_invoice_id, stripe_subscription_id, frequency, gift_type, amount_cents,
+         currency, payment_method_type, payment_method_wallet,
+         payment_method_charge_id, payment_method_event_id,
+         donor_name, donor_email, settled_at, status, refunded_amount_cents,
+         acknowledgment_suppressed, created_at, updated_at
+       ) VALUES (?, 'INVOICE', ?, ?, ?, ?, ?, 'MONTHLY', ?, ?, 'usd', ?, ?, ?, ?, ?, ?, ?,
+                 'PAID', 0, 1, ?, ?)`
+    ).bind(
+      input.giftId,
+      input.invoiceId,
+      input.checkoutId,
+      input.paymentIntentId,
+      input.invoiceId,
+      input.subscriptionId,
+      input.giftType,
+      input.amountCents,
+      method.type,
+      method.wallet,
+      method.chargeId,
+      method.eventId,
+      input.donorName,
+      input.donorEmail,
+      input.settledAt,
+      input.now,
+      input.now
+    ),
+    db.prepare(
+      `UPDATE stripe_invoice_settlements
+          SET checkout_id = ?, subscription_id = ?, amount_cents = ?, currency = 'usd',
+              donor_name = ?, donor_email = ?, settled_at = ?, invoice_livemode = ?,
+              status = 'RECORDED', failure_code = NULL, recorded_at = ?, updated_at = ?,
+              gift_id = (SELECT id FROM stripe_gifts WHERE source_id = ?)
+        WHERE invoice_id = ? AND status = 'PENDING' AND checkout_id IS NULL`
+    ).bind(
+      input.checkoutId,
+      input.subscriptionId,
+      input.amountCents,
+      input.donorName,
+      input.donorEmail,
+      input.settledAt,
+      input.livemode ? 1 : 0,
+      input.now,
+      input.now,
+      input.invoiceId,
+      input.invoiceId
+    )
+  ]);
+  const record = await getStripeGiftBySourceId(db, input.invoiceId);
+  if (
+    !record
+    || record.source_type !== "INVOICE"
+    || record.checkout_id !== input.checkoutId
+    || record.stripe_payment_intent_id !== input.paymentIntentId
+    || record.stripe_subscription_id !== input.subscriptionId
+    || record.gift_type !== input.giftType
+    || record.amount_cents !== input.amountCents
+    || record.acknowledgment_suppressed !== 1
+  ) {
+    throw new StripeGiftConflictError();
+  }
+  return { inserted: Number(giftResult.meta?.changes ?? 0) > 0, record };
+}
+
+// The first ORIGINAL acknowledgment of an adopted subscription claims the
+// introduction. The claim is keyed by delivery so a retried snapshot keeps it.
+export async function claimStripeAdoptionIntroduction(
+  db: D1Database,
+  input: { deliveryId: string; giftId: string; now: string }
+): Promise<boolean> {
+  await db.prepare(
+    `UPDATE stripe_checkout_sessions
+        SET adoption_intro_delivery_id = ?, updated_at = ?
+      WHERE id = (SELECT checkout_id FROM stripe_gifts WHERE id = ?)
+        AND adopted_at IS NOT NULL
+        AND adoption_intro_delivery_id IS NULL`
+  ).bind(input.deliveryId, input.now, input.giftId).run();
+  const row = await db.prepare(
+    `SELECT checkout.adoption_intro_delivery_id
+       FROM stripe_gifts AS gift
+       JOIN stripe_checkout_sessions AS checkout ON checkout.id = gift.checkout_id
+      WHERE gift.id = ?`
+  ).bind(input.giftId).first<{ adoption_intro_delivery_id: string | null }>();
+  return row?.adoption_intro_delivery_id === input.deliveryId;
 }
 
 function stripeClaimStaleBefore(now: string): string {

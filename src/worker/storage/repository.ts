@@ -77,10 +77,12 @@ import {
   type IntentDatosInput
 } from "./repository/donationIntents";
 import {
+  adoptLegacyStripeCheckout as adoptLegacyStripeCheckoutRepository,
   applyStripeRefund as applyStripeRefundRepository,
   attachStripeCheckoutSession as attachStripeCheckoutSessionRepository,
   attachStripeInvoicePaymentIntent as attachStripeInvoicePaymentIntentRepository,
   claimNextStripeAcknowledgment as claimNextStripeAcknowledgmentRepository,
+  claimStripeAdoptionIntroduction as claimStripeAdoptionIntroductionRepository,
   claimStripeWebhookEvent as claimStripeWebhookEventRepository,
   failStripeCheckoutCreation as failStripeCheckoutCreationRepository,
   finalizeStripeAcknowledgment as finalizeStripeAcknowledgmentRepository,
@@ -100,6 +102,7 @@ import {
   reclaimStripeCheckoutCreation as reclaimStripeCheckoutCreationRepository,
   reconcileStripeAcknowledgment as reconcileStripeAcknowledgmentRepository,
   recordStripeGiftAndAcknowledgment as recordStripeGiftAndAcknowledgmentRepository,
+  recordSuppressedStripeInvoiceGift as recordSuppressedStripeInvoiceGiftRepository,
   recordStripePaymentMethodForCheckout as recordStripePaymentMethodForCheckoutRepository,
   recordStripePaymentMethodForInvoiceByPaymentIntent as recordStripePaymentMethodForInvoiceByPaymentIntentRepository,
   recordStripeWebhookPaymentMethodEvidence as recordStripeWebhookPaymentMethodEvidenceRepository,
@@ -529,6 +532,24 @@ export class Repository {
     input: Parameters<typeof finalizeStripeAcknowledgmentRepository>[1]
   ): Promise<boolean> {
     return finalizeStripeAcknowledgmentRepository(this.db, input);
+  }
+
+  async adoptLegacyStripeCheckout(
+    input: Parameters<typeof adoptLegacyStripeCheckoutRepository>[1]
+  ): Promise<StripeCheckoutRecord | null> {
+    return adoptLegacyStripeCheckoutRepository(this.db, input);
+  }
+
+  async recordSuppressedStripeInvoiceGift(
+    input: Parameters<typeof recordSuppressedStripeInvoiceGiftRepository>[1]
+  ): ReturnType<typeof recordSuppressedStripeInvoiceGiftRepository> {
+    return recordSuppressedStripeInvoiceGiftRepository(this.db, input);
+  }
+
+  async claimStripeAdoptionIntroduction(
+    input: Parameters<typeof claimStripeAdoptionIntroductionRepository>[1]
+  ): Promise<boolean> {
+    return claimStripeAdoptionIntroductionRepository(this.db, input);
   }
 
   async getStripeAcknowledgmentEvidenceSource(

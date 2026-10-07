@@ -114,6 +114,7 @@ async function renderAnnualPreview(configuration: StripeUsPdfPreviewConfiguratio
       settled_at: `2025-0${index + 1}-15T16:00:00.000Z`,
       status: "PAID",
       refunded_amount_cents: 0,
+      acknowledgment_suppressed: 0,
       net_amount_cents: 50_000,
       created_at: "2025-05-17T16:00:00.000Z",
       updated_at: "2025-05-17T16:00:00.000Z"
