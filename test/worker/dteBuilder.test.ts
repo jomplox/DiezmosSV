@@ -34,6 +34,36 @@ describe("DTE builders", () => {
     expect(document.cuerpoDocumento[0].descripcion).toBe("DONACIÓN");
   });
 
+  it("names the provider in the payment reference: Wompi unchanged, n1co labelled n1co", () => {
+    const wompi = buildCdeDocument(wompiSample as WompiWebhook, emisorConfig, {
+      sequence: 1,
+      issuedAt: new Date("2026-06-02T14:05:20.742-06:00")
+    }) as Record<string, any>;
+    const n1co = buildCdeDocument({
+      IdCuenta: "",
+      FechaTransaccion: "2026-10-10T18:00:00.000Z",
+      Monto: "25.50",
+      IdTransaccion: "n1co-22805",
+      ResultadoTransaccion: "ExitosaAprobada",
+      CodigoAutorizacion: "831000",
+      Cantidad: 1,
+      EsProductiva: false,
+      Proveedor: "N1CO",
+      EnlacePago: { Id: 22805, IdentificadorEnlaceComercio: "di_n1co" },
+      Cliente: { Nombre: "Ana Pérez", EMail: "ana@example.org" }
+    }, emisorConfig, { sequence: 2, issuedAt: new Date("2026-10-10T12:00:00-06:00") }) as Record<string, any>;
+
+    expect(wompi.otrosDocumentos[0].descDocumento).toBe("Referencia Wompi");
+    expect(wompi.apendice[0]).toMatchObject({ campo: "IdTransaccion", etiqueta: "Wompi" });
+    expect(n1co.otrosDocumentos[0]).toMatchObject({ descDocumento: "Referencia n1co", detalleDocumento: "n1co-22805" });
+    expect(n1co.apendice.slice(0, 3)).toEqual([
+      { campo: "IdTransaccion", etiqueta: "n1co", valor: "n1co-22805" },
+      { campo: "Autorizacion", etiqueta: "Código de autorización", valor: "831000" },
+      { campo: "Aplicativo", etiqueta: "Aplicativo", valor: "n1co" }
+    ]);
+    expect(n1co.resumen.pagos[0]).toMatchObject({ montoPago: 25.5, referencia: "831000" });
+  });
+
   it("uses the approved employee activity for domestic donations and preserves explicit activity", () => {
     const document = buildCdeDocument(wompiSample as WompiWebhook, emisorConfig, { sequence: 1 }) as Record<string, any>;
     expect(document.receptor).toMatchObject({ codDomiciliado: 1, codActividad: "10001", descActividad: "Empleados" });

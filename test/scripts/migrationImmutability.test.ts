@@ -45,7 +45,7 @@ describe("migration immutability checker", () => {
       await loadChecker();
 
     expect(Object.keys(IMMUTABLE_MIGRATION_SHA256).at(-1)).toBe(
-      "0048_stripe_legacy_subscription_adoption.sql"
+      "0049_n1co_secondary_provider.sql"
     );
     expect(Object.keys(IMMUTABLE_MIGRATION_SHA256)).toEqual([
       "0001_init.sql",
@@ -95,7 +95,8 @@ describe("migration immutability checker", () => {
       "0045_login_step_up_mfa.sql",
       "0046_provider_creation_budgets.sql",
       "0047_provider_creation_legacy_index.sql",
-      "0048_stripe_legacy_subscription_adoption.sql"
+      "0048_stripe_legacy_subscription_adoption.sql",
+      "0049_n1co_secondary_provider.sql"
     ]);
     expect(() => assertImmutableMigrations(migrationsDirectory)).not.toThrow();
   });
@@ -128,7 +129,8 @@ describe("migration immutability checker", () => {
       "0045_login_step_up_mfa.sql",
       "0046_provider_creation_budgets.sql",
       "0047_provider_creation_legacy_index.sql",
-      "0048_stripe_legacy_subscription_adoption.sql"
+      "0048_stripe_legacy_subscription_adoption.sql",
+      "0049_n1co_secondary_provider.sql"
     ]) {
       const copy = copiedMigrations();
       const target = join(copy, name);
@@ -183,7 +185,7 @@ describe("migration immutability checker", () => {
   it("accepts only the next unique additive migration prefix", async () => {
     const { assertImmutableMigrations } = await loadChecker();
     const copy = copiedMigrations();
-    writeFileSync(join(copy, "0049_future_addition.sql"), "SELECT 1;\n");
+    writeFileSync(join(copy, "0050_future_addition.sql"), "SELECT 1;\n");
 
     expect(() => assertImmutableMigrations(copy)).not.toThrow();
   });
