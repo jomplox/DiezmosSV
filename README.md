@@ -50,6 +50,7 @@ them to the **Ministerio de Hacienda**, and emails the donor a PDF receipt — a
 - [Configuration reference](#-configuration-reference)
 - [Security](#-security)
 - [Wompi webhook](#-wompi-webhook)
+- [n1co alternative](#-n1co-alternative)
 - [Online donations (/donar)](#-online-donations-donar)
 - [Admin panel & roles](#-admin-panel--roles)
 - [Document lifecycle](#-document-lifecycle)
@@ -139,7 +140,8 @@ The public `/donar` page opens on a two-door landing: **El Salvador y el mundo**
 SV fiscal form (Wompi + CDE), and **EE. UU.** defaults to Stripe's Spanish Embedded Checkout form on the US 501(c)(3)
 account for one-time or monthly gifts. When the target build has an explicit Diezmo/Ofrenda fund mapping, the
 donor may unmount Stripe and use the existing English Givebutter form instead (`?ruta=sv` / `?ruta=eeuu`
-deep-links a door). The whole web UI (donor pages
+deep-links a door). On the SV door, Wompi's embedded form stays the default and donors already
+in the n1co ecosystem may choose n1co's hosted page instead ([n1co alternative](#-n1co-alternative)). The whole web UI (donor pages
 and admin) uses **Gotham**, self-hosted as latin-subset woff2 under `src/client/fonts/` — the
 licensed OTFs are never committed; only the generated woff2 subsets are.
 
@@ -153,7 +155,7 @@ licensed OTFs are never committed; only the generated woff2 subsets are.
 | **D1** | `DB` | Wompi events, DTE documents, signed events, tokens, users, sessions, audit log, contingency periods, app settings. |
 | **Queues** | `ISSUANCE_QUEUE` → `diezmossv-local-issuance-example` (+ `-dlq`) | Async issuance (batch ≤ 10, up to 3 retries) for three message kinds: an approved Wompi webhook, a hand-issued advanced CDE, and a fiscal correction — each identified by its own ownership token, and a message carrying none is rejected outright. Messages that exhaust retries land in a dead-letter queue that audits and alerts on each one. |
 | **R2** | `ARCHIVE` → `diezmossv-<env>-archive-example` | Monthly legal-retention export bucket (NDJSON snapshots + SHA-256 manifest), plus the branding logo objects (`branding/logo`, `branding/donor-logo`). |
-| **Cron Triggers** | `*/15 * * * *` · `0 9 1 * *` | Every 15 min, ten independently-guarded sweeps: expired login/rate-limit claim cleanup, deferred-transmission retry, post-accept finalization retry, accepted-Wompi finalization retry, stalled pre-CDE event sweep, stalled fiscal-correction recovery, missed-webhook reconciliation against the Wompi payment-link API, donation-intent expiry + Wompi link deactivation, and the signer-certificate expiry check. One failing sweep never aborts the tick. Monthly (09:00 UTC on the 1st): R2 retention export. |
+| **Cron Triggers** | `*/15 * * * *` · `0 9 1 * *` | Every 15 min, eleven independently-guarded sweeps: expired login/rate-limit claim cleanup, deferred-transmission retry, post-accept finalization retry, accepted-Wompi finalization retry, stalled pre-CDE event sweep, stalled fiscal-correction recovery, missed-webhook reconciliation against the Wompi payment-link API, missed-callback reconciliation against the n1co order API, donation-intent expiry + Wompi link deactivation, and the signer-certificate expiry check. One failing sweep never aborts the tick. Monthly (09:00 UTC on the 1st): R2 retention export. |
 | **Static assets** | `ASSETS` → `./dist/client` | React admin panel served from the Worker with SPA fallback. |
 
 `compatibility_date = 2026-06-02` with `nodejs_compat` enabled for crypto operations. `APP_ORIGIN`
@@ -435,6 +437,8 @@ node scripts/run-private-wrangler.mjs secret put STRIPE_US_WEBSITE --env staging
 node scripts/run-private-wrangler.mjs secret put STRIPE_US_MAILING_ADDRESS --env staging
 node scripts/run-private-wrangler.mjs secret put STRIPE_US_SIGNER_NAME --env staging
 node scripts/run-private-wrangler.mjs secret put STRIPE_US_SIGNER_TITLE --env staging
+node scripts/run-private-wrangler.mjs secret put N1CO_CHECKOUT_SECRET_KEY --env staging   # optional: n1co sandbox key
+node scripts/run-private-wrangler.mjs secret put N1CO_WEBHOOK_SECRET --env staging   # optional: n1co sandbox webhook secret
 
 # Migrate and deploy through package scripts that use the same private wrapper.
 npm run cf:migrate:staging
@@ -508,6 +512,8 @@ node scripts/run-private-wrangler.mjs secret put EMAIL_PROVIDER_URL --env produc
 node scripts/run-private-wrangler.mjs secret put EMAIL_API_KEY --env production   # optional alternative-provider token
 node scripts/run-private-wrangler.mjs secret put EMAIL_FROM --env production
 node scripts/run-private-wrangler.mjs secret put EMISOR_CONFIG_JSON --env production
+node scripts/run-private-wrangler.mjs secret put N1CO_CHECKOUT_SECRET_KEY --env production   # optional: n1co production key
+node scripts/run-private-wrangler.mjs secret put N1CO_WEBHOOK_SECRET --env production   # optional: n1co production webhook secret
 
 # Assert branding first: it is read-only, so a regression fails the window before the
 # migration has written anything. Both remote steps refuse to run outside an acknowledged
@@ -558,6 +564,7 @@ by `DIEZMOSSV_WRANGLER_CONFIG`, or in the out-of-tree file selected by `DIEZMOSS
 |---|---|
 | `WOMPI_API_SECRET` | HMAC secret used to verify the `wompi_hash` on incoming webhooks. |
 | `WOMPI_CLIENT_ID` / `WOMPI_CLIENT_SECRET` | OAuth client-credentials used to mint the single-use, cards-only Wompi payment links behind `/donar`, and to read a link back during missed-webhook reconciliation. Obtain them from the Wompi merchant panel under **Datos del negocio**. The legacy static-payment-link flow does not need them. |
+| `N1CO_CHECKOUT_SECRET_KEY` / `N1CO_WEBHOOK_SECRET` | Optional. The n1co CheckoutLink API key (mints the n1co link and reads orders back) and the webhook HMAC secret. Set both to offer the [n1co alternative](#-n1co-alternative) on `/donar`; staging takes sandbox values, production takes production values. |
 | `BOOTSTRAP_OWNER_TOKEN` | One-time setup secret required by `/api/auth/bootstrap-owner` before the first owner exists. It must be generated from 32 random bytes and formatted as `bt_` plus 43 base64url characters. Rotate or remove it after the owner account exists. |
 | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account target used by the OWNER-only credential UI when saving Worker secrets. |
 | `CLOUDFLARE_API_TOKEN` | Scoped Cloudflare API token used by the OWNER-only credential UI to call the Worker secret bulk-update endpoint. |
@@ -694,6 +701,52 @@ correlation, and dedup that a real webhook goes through — recorded as `WOMPI_R
 with `source: payment_link_api`. Because the numeric payment-link id is a unique dedup
 key, a webhook that arrives *after* reconciliation cannot produce a second CDE. The
 sweep is disabled under `MOCK_EXTERNAL_SERVICES = "true"`.
+
+---
+
+## 🟢 n1co alternative
+
+On the SV door, Paso 3 keeps Wompi's embedded form as the default. Below it, donors who already
+use n1co see a small **Diezmar con n1co / Ofrendar con n1co** option (shaped like the U.S.
+Givebutter option) that hands them to n1co's hosted page in the same tab. Both lanes end in the
+same CDE: n1co never issues a DTE of its own.
+
+The option is offered only when the Worker has both `N1CO_CHECKOUT_SECRET_KEY` and
+`N1CO_WEBHOOK_SECRET` (or runs with `MOCK_EXTERNAL_SERVICES = "true"`). Omit both to hide it.
+
+**Switching an intent.** `POST /api/donations/intent/{id}/n1co` mints an n1co CheckoutLink for the
+exact intent amount (`orderReference` = the intent id; success returns to `/donar/gracias`, cancel to
+`/donar?ruta=sv`; the link expires with the intent, within 5–60 minutes). Only then does it
+deactivate the intent's Wompi link and re-read it: if Wompi already received the gift, the switch is
+refused with `409 intent_already_paid`. A D1 trigger makes the switch one-way (`WOMPI → N1CO`, unpaid
+intents only), and a late Wompi payment on a switched intent is quarantined, not issued.
+
+**Environment.** The deployment selects the n1co environment: `production` talks to
+`api-pay.n1co.shop`, every other deployment to the sandbox (`api-pay-sandbox.n1co.shop`). The
+resulting `EsProductiva` drives MH `ambiente` and the same deployment quarantine as Wompi, so staging
+can never take a real n1co gift.
+
+**Webhook.** In the n1co portal, point the webhook at:
+
+```text
+https://YOUR_WORKER_DOMAIN/webhooks/n1co
+```
+
+The body must carry a valid `X-H4B-Hmac-Sha256` (Base64 HMAC-SHA256 of the raw body, keyed with
+`N1CO_WEBHOOK_SECRET`). The webhook is only a signal: the Worker re-reads the order through the
+authenticated API and issues only when the order is `PAID`/`FINALIZED`, in USD, for exactly the
+intent amount. A disagreeing order is audited as `N1CO_ORDER_REJECTED` and never issued. Accepted
+orders enter the Wompi pipeline as a canonical payload marked `Proveedor: "N1CO"`, deduplicated by
+`IdTransaccion = n1co-<orderId>` and audited as `N1CO_RECEIVED` / `N1CO_DUPLICATE`.
+
+**When the webhook never arrives.** The 15-minute cron re-reads unresolved n1co intents from the last
+7 days (each at most every 10 minutes) and replays a paid order through the same ingest, audited as
+`N1CO_RECONCILED`. The donor's status poll also checks the order, at most once every 20 seconds.
+
+**Bot protection.** If the Worker's custom domain sits in a zone that challenges non-browser traffic,
+add a WAF skip rule for `POST /webhooks/n1co` in the Cloudflare dashboard. n1co does not publish its
+source IPs, so an IP allowlist is not an option. Without the rule, reconciliation still records every
+paid gift, only later.
 
 ---
 

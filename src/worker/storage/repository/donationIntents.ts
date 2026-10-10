@@ -409,3 +409,125 @@ export async function hasAuditAction(
     .first<{ id: string }>();
   return Boolean(row);
 }
+
+// n1co (migration 0049). The switch is a single CAS: only an unpaid, unexpired
+// LINK_CREATED Wompi intent whose fiscal data is attached moves to n1co, once.
+export async function switchIntentToN1co(
+  db: D1Database,
+  id: string,
+  link: { orderId: number; orderCode: string; paymentLinkUrl: string },
+  now: string
+): Promise<DonationIntentRecord | null> {
+  return db
+    .prepare(
+      `UPDATE donation_intents
+          SET payment_provider = 'N1CO',
+              n1co_order_id = ?,
+              n1co_order_code = ?,
+              n1co_payment_link_url = ?,
+              updated_at = ?
+        WHERE id = ?
+          AND payment_provider = 'WOMPI'
+          AND status = 'LINK_CREATED'
+          AND paid_at IS NULL
+          AND donor_document IS NOT NULL
+          AND expires_at > ?
+        RETURNING *`
+    )
+    .bind(link.orderId, link.orderCode, link.paymentLinkUrl, now, id, now)
+    .first<DonationIntentRecord>();
+}
+
+export async function markN1coIntentPaid(
+  db: D1Database,
+  id: string,
+  expectedOrderId: number,
+  donorPhone: string | null,
+  now: string
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE donation_intents
+          SET paid_at = ?,
+              updated_at = ?,
+              donor_phone = COALESCE(donor_phone, ?)
+        WHERE id = ?
+          AND payment_provider = 'N1CO'
+          AND n1co_order_id = ?
+          AND status IN ('LINK_CREATED', 'EXPIRED')
+          AND paid_at IS NULL`
+    )
+    .bind(now, now, donorPhone, id, expectedOrderId)
+    .run();
+}
+
+// First observation of PAID wins; every later webhook or reconciliation reads the
+// same instant back, so the canonical event body never differs between replays.
+export async function observeN1coPaid(
+  db: D1Database,
+  id: string,
+  expectedOrderId: number,
+  now: string
+): Promise<string | null> {
+  const row = await db
+    .prepare(
+      `UPDATE donation_intents
+          SET n1co_paid_observed_at = COALESCE(n1co_paid_observed_at, ?)
+        WHERE id = ?
+          AND payment_provider = 'N1CO'
+          AND n1co_order_id = ?
+        RETURNING n1co_paid_observed_at`
+    )
+    .bind(now, id, expectedOrderId)
+    .first<{ n1co_paid_observed_at: string | null }>();
+  return row?.n1co_paid_observed_at ?? null;
+}
+
+// n1co retries a webhook for only ~6 s, so unpaid n1co intents are polled by
+// their stored order code, never by n1co's /Orders list filters (which silently
+// ignore unknown fields and return every order).
+export async function listIntentsForN1coReconciliation(
+  db: D1Database,
+  createdAfter: string,
+  checkedBefore: string,
+  limit = INTENT_RECONCILIATION_SWEEP_LIMIT
+): Promise<DonationIntentRecord[]> {
+  const safeLimit = Math.max(1, Math.min(Math.trunc(limit), INTENT_RECONCILIATION_SWEEP_LIMIT));
+  const result = await db
+    .prepare(
+      `SELECT *
+         FROM donation_intents
+        WHERE payment_provider = 'N1CO'
+          AND n1co_order_code IS NOT NULL
+          AND status IN ('LINK_CREATED','EXPIRED')
+          AND paid_at IS NULL
+          AND created_at >= ?
+          AND (n1co_checked_at IS NULL OR n1co_checked_at < ?)
+        ORDER BY COALESCE(n1co_checked_at, created_at) ASC, id ASC
+        LIMIT ?`
+    )
+    .bind(createdAfter, checkedBefore, safeLimit)
+    .all<DonationIntentRecord>();
+  return result.results;
+}
+
+// Claims the next order lookup for one intent: callers that lose the CAS skip the
+// network call, so overlapping polls, webhooks, and cron ticks cost n1co one GET.
+export async function claimN1coCheck(
+  db: D1Database,
+  id: string,
+  checkedAt: string,
+  checkedBefore: string
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE donation_intents
+          SET n1co_checked_at = ?
+        WHERE id = ?
+          AND payment_provider = 'N1CO'
+          AND (n1co_checked_at IS NULL OR n1co_checked_at < ?)`
+    )
+    .bind(checkedAt, id, checkedBefore)
+    .run();
+  return Number(result.meta?.changes ?? 0) === 1;
+}

@@ -12,6 +12,7 @@ export type DonationIntentBinding =
         | "commerce_id_mismatch"
         | "intent_not_found"
         | "ineligible_status"
+        | "provider_mismatch"
         | "missing_payload_link_id"
         | "missing_stored_link_id"
         | "link_id_mismatch";
@@ -41,17 +42,25 @@ export async function resolveDonationIntentBinding(repo: Repository, payload: Wo
   if (!intent) {
     return unbound(canonicalId, "intent_not_found", null, payloadLinkId);
   }
+  // An intent accepts an approved payment only from its current provider. After the
+  // donor moves to n1co, a late Wompi payment (and vice versa) is quarantined.
+  const n1coPayload = payload.Proveedor === "N1CO";
+  const n1coIntent = intent.payment_provider === "N1CO";
+  const storedLinkId = n1coPayload ? intent.n1co_order_id ?? null : intent.wompi_id_enlace;
   if (intent.status !== "LINK_CREATED" && intent.status !== "EXPIRED") {
-    return unbound(canonicalId, "ineligible_status", intent.wompi_id_enlace, payloadLinkId);
+    return unbound(canonicalId, "ineligible_status", storedLinkId, payloadLinkId);
+  }
+  if (n1coPayload !== n1coIntent) {
+    return unbound(canonicalId, "provider_mismatch", storedLinkId, payloadLinkId);
   }
   if (payloadLinkId === null) {
-    return unbound(canonicalId, "missing_payload_link_id", intent.wompi_id_enlace, null);
+    return unbound(canonicalId, "missing_payload_link_id", storedLinkId, null);
   }
-  if (intent.wompi_id_enlace === null) {
+  if (storedLinkId === null) {
     return unbound(canonicalId, "missing_stored_link_id", null, payloadLinkId);
   }
-  if (payloadLinkId !== intent.wompi_id_enlace) {
-    return unbound(canonicalId, "link_id_mismatch", intent.wompi_id_enlace, payloadLinkId);
+  if (payloadLinkId !== storedLinkId) {
+    return unbound(canonicalId, "link_id_mismatch", storedLinkId, payloadLinkId);
   }
   return { kind: "bound", intent };
 }
