@@ -78,6 +78,7 @@ import {
   markN1coIntentPaid as markN1coIntentPaidRepository,
   observeN1coPaid as observeN1coPaidRepository,
   switchIntentToN1co as switchIntentToN1coRepository,
+  prepareIntentN1coLink as prepareIntentN1coLinkRepository,
   claimN1coCheck as claimN1coCheckRepository,
   type CreateDonationIntentInput,
   type IntentDatosInput
@@ -1012,6 +1013,14 @@ export class Repository {
     now: string
   ): Promise<boolean> {
     return attachIntentN1coLinkRepository(this.db, id, link, now);
+  }
+
+  async prepareIntentN1coLink(
+    id: string,
+    link: { orderId: number; orderCode: string; paymentLinkUrl: string },
+    now: string
+  ): Promise<boolean> {
+    return prepareIntentN1coLinkRepository(this.db, id, link, now);
   }
 
   async applyIntentDatosWithCapability(

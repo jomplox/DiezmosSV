@@ -1,5 +1,5 @@
 import { isMockMode, requireSecret } from "../config";
-import type { DonationIntentRecord, Env } from "../types";
+import type { DonationGiftType, DonationIntentRecord, Env } from "../types";
 import { assertFiscalCollectionReady, deploymentEnvironmentPolicy } from "./environmentPolicy";
 
 // CheckoutLink API. The deployment, not a separate setting, selects the n1co
@@ -16,6 +16,10 @@ const PAY_HOST = {
 // Shown to the donor on n1co's hosted page; mirrors the Wompi sheet and the /donar
 // brand title rather than naming a product.
 const ORDER_NAME = "Diezmos y Ofrendas";
+// The gift is sent as one named line item: a bare amount leaves the page's product
+// row blank. The name is the gift itself, never a product.
+const LINE_ITEM_NAME: Record<DonationGiftType, string> = { DIEZMO: "Diezmo", OFRENDA: "Ofrenda" };
+const MAX_IMAGE_URL_LENGTH = 512;
 const ORDER_CODE_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const MIN_LINK_MINUTES = 5;
 const MAX_LINK_MINUTES = 60;
@@ -55,9 +59,11 @@ export class N1coApiService {
     return n1coEnvironment(this.env) === "production";
   }
 
+  // imageUrl, when given, replaces n1co's generic product icon (the church's donor logo).
   async createCheckoutLink(
-    intent: Pick<DonationIntentRecord, "id" | "amount_cents" | "expires_at">,
-    origin: string
+    intent: Pick<DonationIntentRecord, "id" | "amount_cents" | "expires_at" | "gift_type">,
+    origin: string,
+    imageUrl: string | null = null
   ): Promise<N1coCheckoutLink> {
     if (isMockMode(this.env)) {
       const orderCode = `mock-${intent.id.replace(/[^A-Za-z0-9]/g, "").slice(-24)}`;
@@ -81,7 +87,15 @@ export class N1coApiService {
     const response = await this.request("/paymentlink/checkout", "POST", {
       orderReference: intent.id,
       orderName: ORDER_NAME,
-      amount: Number(amount),
+      lineItems: [{
+        product: {
+          name: intent.gift_type ? LINE_ITEM_NAME[intent.gift_type] : ORDER_NAME,
+          price: Number(amount),
+          ...(imageUrl && imageUrl.length <= MAX_IMAGE_URL_LENGTH ? { imageUrl } : {}),
+          requiresShipping: false
+        },
+        quantity: 1
+      }],
       successUrl: successUrl.toString(),
       cancelUrl: cancelUrl.toString(),
       metadata: [{ name: "intentId", value: intent.id }],

@@ -167,10 +167,11 @@ const wompiToken: Route = (url) =>
     : undefined;
 const wompiDeactivate: Route = (url, init) =>
   url === "https://api.wompi.sv/EnlacePago/987654" && init?.method === "PUT" ? json({ idEnlace: 987654 }) : undefined;
-const wompiLinkUnpaid: Route = (url, init) =>
+const wompiLinkUnpaidFor = (intentId: string): Route => (url, init) =>
   url === "https://api.wompi.sv/EnlacePago/987654" && (init?.method ?? "GET") === "GET"
-    ? json({ idEnlace: 987654, nombreEnlace: INTENT_ID, transacciones: [] })
+    ? json({ idEnlace: 987654, nombreEnlace: intentId, transacciones: [] })
     : undefined;
+const wompiLinkUnpaid = wompiLinkUnpaidFor(INTENT_ID);
 const n1coCreate: Route = (url, init) =>
   url === "https://api-pay-sandbox.n1co.shop/api/paymentlink/checkout" && init?.method === "POST" ? json(ORDER) : undefined;
 const n1coOrder = (order: Record<string, unknown>): Route => (url) =>
@@ -213,7 +214,8 @@ describe("n1co secondary provider", () => {
       expect(JSON.parse(String(createInit?.body))).toEqual({
         orderReference: INTENT_ID,
         orderName: "Diezmos y Ofrendas",
-        amount: 25.5,
+        // A named line item, not a bare amount: n1co's page otherwise shows a blank product row.
+        lineItems: [{ product: { name: "Diezmo", price: 25.5, requiresShipping: false }, quantity: 1 }],
         successUrl: `https://donar.example.org/donar/gracias?identificadorEnlaceComercio=${INTENT_ID}&monto=25.50`,
         cancelUrl: "https://donar.example.org/donar?ruta=sv",
         metadata: [{ name: "intentId", value: INTENT_ID }],
@@ -547,10 +549,8 @@ describe("n1co secondary provider", () => {
 
       expect(response.status).toBe(201);
       await expect(response.json()).resolves.toMatchObject({ urlEnlace: "https://s.wompi.sv/abc", paymentProvider: "WOMPI" });
-      expect(onlyRow()).toMatchObject({ payment_provider: "WOMPI", wompi_id_enlace: 987654, n1co_order_id: null });
-      expect(fetchSpy.mock.calls.map(([url]) => String(url))).not.toContain(
-        "https://api-pay-sandbox.n1co.shop/api/paymentlink/checkout"
-      );
+      expect(onlyRow()).toMatchObject({ payment_provider: "WOMPI", wompi_id_enlace: 987654 });
+      expect(fetchSpy.mock.calls.map(([url]) => String(url))).toContain("https://api.wompi.sv/EnlacePago");
     });
 
     it("refuses a gift above the cap when n1co is not configured", async () => {
@@ -594,6 +594,114 @@ describe("n1co secondary provider", () => {
         error: "invalid_amount",
         message: "El monto debe estar entre $1.00 y $1,000.00."
       });
+    });
+  });
+
+  describe("prepared n1co order", () => {
+    const fullCreate = (amount = "25.50", giftType = "DIEZMO") => new Request("https://donar.example.org/api/donations/intent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "cf-connecting-ip": "203.0.113.7" },
+      body: JSON.stringify({
+        amount,
+        giftType,
+        donorDocumentType: "13",
+        donorDocument: "10000001-9",
+        departamento: "06",
+        municipio: "23",
+        distrito: "14"
+      })
+    });
+    const wompiCreate: Route = (url, init) => url === "https://api.wompi.sv/EnlacePago" && init?.method === "POST"
+      ? json({ idEnlace: 987654, urlEnlace: "https://s.wompi.sv/abc", urlEnlaceLargo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=abc" })
+      : undefined;
+    const onlyRow = () => h.database.prepare("SELECT * FROM donation_intents").get() as Record<string, unknown>;
+    const n1coBodies = (spy: ReturnType<typeof stubFetch>) => spy.mock.calls
+      .filter(([url]) => String(url) === "https://api-pay-sandbox.n1co.shop/api/paymentlink/checkout")
+      .map(([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>);
+
+    it("is prepared behind a Wompi create without reaching the donor, and the switch reuses it", async () => {
+      const fetchSpy = stubFetch(wompiToken, wompiCreate, n1coCreate);
+
+      const response = await worker.fetch(fullCreate(), await realModeEnv(h));
+
+      expect(response.status).toBe(201);
+      expect(await response.text()).not.toContain("n1co.shop");
+      expect(onlyRow()).toMatchObject({
+        payment_provider: "WOMPI",
+        wompi_id_enlace: 987654,
+        n1co_order_id: ORDER.orderId,
+        n1co_order_code: ORDER.orderCode,
+        n1co_payment_link_url: ORDER.paymentLinkUrl
+      });
+      expect(n1coBodies(fetchSpy)).toHaveLength(1);
+
+      fetchSpy.mockRestore();
+      const intentId = String(onlyRow().id);
+      const switchSpy = stubFetch(wompiToken, wompiDeactivate, wompiLinkUnpaidFor(intentId));
+      const chosen = await worker.fetch(switchRequest(intentId), await realModeEnv(h));
+
+      await expect(chosen.json()).resolves.toEqual({ paymentLinkUrl: ORDER.paymentLinkUrl });
+      expect(switchSpy.mock.calls.map(([url]) => String(url))).not.toContain(
+        "https://api-pay-sandbox.n1co.shop/api/paymentlink/checkout"
+      );
+      expect(onlyRow()).toMatchObject({ payment_provider: "N1CO", n1co_order_id: ORDER.orderId });
+    });
+
+    it("leaves a failed preparation to the switch, which mints on demand", async () => {
+      stubFetch(wompiToken, wompiCreate, (url) => (url.includes("n1co.shop") ? json({ title: "boom" }, 500) : undefined));
+
+      const response = await worker.fetch(fullCreate(), await realModeEnv(h));
+
+      expect(response.status).toBe(201);
+      expect(onlyRow()).toMatchObject({ payment_provider: "WOMPI", n1co_order_id: null });
+
+      vi.restoreAllMocks();
+      const intentId = String(onlyRow().id);
+      stubFetch(n1coCreate, wompiToken, wompiDeactivate, wompiLinkUnpaidFor(intentId));
+      const chosen = await worker.fetch(switchRequest(intentId), await realModeEnv(h));
+      await expect(chosen.json()).resolves.toEqual({ paymentLinkUrl: ORDER.paymentLinkUrl });
+    });
+
+    it("keeps the order a racing preparation stored instead of failing the switch", async () => {
+      seedIntent(h.database);
+      const prepared = { orderId: 22900, orderCode: "prep001", paymentLinkUrl: "https://pay-sandbox.n1co.shop/prep001" };
+      stubFetch(wompiToken, wompiDeactivate, wompiLinkUnpaid, (url, init) => {
+        if (url !== "https://api-pay-sandbox.n1co.shop/api/paymentlink/checkout" || init?.method !== "POST") return undefined;
+        // The background preparation lands while the switch is minting its own order.
+        h.database.prepare(
+          "UPDATE donation_intents SET n1co_order_id = ?, n1co_order_code = ?, n1co_payment_link_url = ? WHERE id = ?"
+        ).run(prepared.orderId, prepared.orderCode, prepared.paymentLinkUrl, INTENT_ID);
+        return json(ORDER);
+      });
+
+      const chosen = await worker.fetch(switchRequest(), await realModeEnv(h));
+
+      expect(chosen.status).toBe(200);
+      await expect(chosen.json()).resolves.toEqual({ paymentLinkUrl: prepared.paymentLinkUrl });
+      expect(intentRow(h.database)).toMatchObject({ payment_provider: "N1CO", n1co_order_id: prepared.orderId });
+    });
+
+    it("names the gift and carries the donor logo onto n1co's page", async () => {
+      h.database.prepare("INSERT INTO app_settings (key, value) VALUES (?, ?)").run(
+        "branding_donor_logo",
+        JSON.stringify({ contentType: "image/png", size: 2048, version: "v42" })
+      );
+      const fetchSpy = stubFetch(wompiToken, wompiCreate, n1coCreate);
+
+      await worker.fetch(fullCreate("40.00", "OFRENDA"), await realModeEnv(h));
+
+      expect(n1coBodies(fetchSpy)[0]).toMatchObject({
+        lineItems: [{
+          product: {
+            name: "Ofrenda",
+            price: 40,
+            imageUrl: "https://donar.example.org/api/branding/donor-logo?v=v42",
+            requiresShipping: false
+          },
+          quantity: 1
+        }]
+      });
+      expect(n1coBodies(fetchSpy)[0]).not.toHaveProperty("amount");
     });
   });
 

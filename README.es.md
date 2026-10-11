@@ -750,6 +750,16 @@ complete su entrega de forma segura con n1co." Sin n1co configurado, ese monto s
 con `400 invalid_amount` ($1.00–$1,000.00). La creación en borrador siempre genera Wompi, por lo que
 mantiene el límite de $1,000.00.
 
+**Orden n1co preparada.** Cada intento de Wompi también obtiene su orden n1co generada en segundo plano
+(`prepareN1coLink`, ejecutado con `waitUntil`), igual que se pregenera el enlace de Wompi, de modo que
+elegir n1co solo desactiva Wompi y cambia el proveedor. La orden preparada se guarda en la fila pero
+nunca llega al donante: el webhook, la vinculación del cobro y la conciliación la ignoran hasta el
+cambio, y vence con el intento. Si la preparación falla, el cambio la genera en el momento; si ambos
+compiten, el cambio conserva la orden ya guardada. El costo es una orden n1co sin cobrar por cada
+entrega SV en el panel de n1co. La API de n1co no acepta datos del comprador, así que el nombre, correo
+y teléfono del donante no se pueden prellenar; la entrega viaja como una línea llamada "Diezmo" u
+"Ofrenda", con el logo del donante como imagen cuando hay uno cargado.
+
 **Cambio de un intento.** `POST /api/donations/intent/{id}/n1co` genera un CheckoutLink de n1co por el
 monto exacto del intento (`orderReference` = el id del intento; el éxito regresa a `/donar/gracias` y la
 cancelación a `/donar?ruta=sv`; el enlace vence con el intento, entre 5 y 60 minutos). Solo entonces

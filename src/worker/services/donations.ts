@@ -13,7 +13,8 @@ import { addHours, nowIso } from "../utils/dates";
 import { base64UrlFromBytes, sha256Hex, utf8Bytes } from "../utils/encoding";
 import { newId } from "../utils/ids";
 import { Repository } from "../storage/repository";
-import { N1coApiError, N1coApiService } from "./n1coApi";
+import { BRANDING_DONOR_LOGO_SETTING_KEY, parseBrandingLogoMeta } from "./branding";
+import { N1coApiError, N1coApiService, type N1coCheckoutLink } from "./n1coApi";
 import { WompiApiError, WompiApiService } from "./wompiApi";
 
 // Public donor-checkout limits. Amounts arrive as dollars (string or number) and
@@ -464,12 +465,34 @@ async function mintLinkForIntent(env: Env, repo: Repository, intent: DonationInt
   };
 }
 
+// Mints an n1co order for the intent. The church's donor logo, when one is uploaded,
+// replaces n1co's generic product icon on the hosted page.
+export async function createN1coCheckoutLink(env: Env, repo: Repository, intent: DonationIntentRecord): Promise<N1coCheckoutLink> {
+  const origin = requireSecret(env, "APP_ORIGIN");
+  const logo = parseBrandingLogoMeta(await repo.getSetting(BRANDING_DONOR_LOGO_SETTING_KEY));
+  const imageUrl = logo ? new URL(`/api/branding/donor-logo?v=${encodeURIComponent(logo.version)}`, origin).toString() : null;
+  return new N1coApiService(env).createCheckoutLink(intent, origin, imageUrl);
+}
+
+// Prepares the n1co order behind a fresh Wompi intent, so a donor who chooses n1co
+// is not kept waiting on the mint. The order is stored only: the webhook, the
+// payment binding and reconciliation all ignore it until the switch makes n1co the
+// intent's provider, and it expires with the intent. Throws on failure; the caller
+// treats it as best effort and the switch mints on demand instead.
+export async function prepareN1coLink(env: Env, repo: Repository, intentId: string): Promise<void> {
+  const intent = await repo.getDonationIntent(intentId);
+  if (!intent || intent.payment_provider !== "WOMPI" || intent.paid_at != null || intent.n1co_order_id != null) {
+    return;
+  }
+  await repo.prepareIntentN1coLink(intent.id, await createN1coCheckoutLink(env, repo, intent), nowIso());
+}
+
 // Above Wompi's tope the intent is born on n1co: its checkout link is minted and
 // attached directly, and no Wompi link ever exists for a late payment to reach.
 async function mintN1coLinkForIntent(env: Env, repo: Repository, intent: DonationIntentRecord): Promise<CreatedIntent> {
   let link;
   try {
-    link = await new N1coApiService(env).createCheckoutLink(intent, requireSecret(env, "APP_ORIGIN"));
+    link = await createN1coCheckoutLink(env, repo, intent);
   } catch (error) {
     if (error instanceof N1coApiError) {
       throw new IntentLinkError(error.message, { cause: error, provider: "N1CO" });
