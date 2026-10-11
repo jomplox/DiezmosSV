@@ -38,6 +38,8 @@ export type Env = Pick<CloudflareBindings, "DB" | "ASSETS" | "ARCHIVE"> &
     WOMPI_API_SECRET?: string;
     WOMPI_CLIENT_ID?: string;
     WOMPI_CLIENT_SECRET?: string;
+    N1CO_CHECKOUT_SECRET_KEY?: string;
+    N1CO_WEBHOOK_SECRET?: string;
     STRIPE_RESTRICTED_KEY?: string;
     STRIPE_API_PROXY_URL?: string;
     STRIPE_PUBLISHABLE_KEY?: string;
@@ -154,6 +156,9 @@ export interface WompiWebhook {
   Tarjeta?: string;
   EsInternacional?: boolean;
   IdExterno?: string;
+  // Never sent by Wompi. Present only on the canonical payload this Worker builds
+  // from an authenticated n1co order lookup; absent means the event is Wompi's.
+  Proveedor?: "N1CO";
 }
 
 export interface EmisorConfig {
@@ -323,10 +328,20 @@ export interface DonationIntentRecord {
   // means the CDE was accepted by MH; paid_at means the donor paid. The donor-facing
   // "thanks" keys on paid_at, not on MH acceptance. Null until (and unless) paid.
   paid_at: string | null;
+  // Donor-selected provider (migration 0049). Optional on the type because rows
+  // read before the migration lack it; absent means WOMPI.
+  payment_provider?: DonationPaymentProvider;
+  n1co_order_id?: number | null;
+  n1co_order_code?: string | null;
+  n1co_payment_link_url?: string | null;
+  n1co_paid_observed_at?: string | null;
+  n1co_checked_at?: string | null;
   created_at: string;
   updated_at: string;
   expires_at: string;
 }
+
+export type DonationPaymentProvider = "WOMPI" | "N1CO";
 
 // The admin "Donaciones en línea" listing (Task 5): an allowlisted view of a donation
 // intent joined with the emitted CDE it produced (present only for COMPLETED intents

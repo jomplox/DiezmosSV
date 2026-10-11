@@ -46,6 +46,13 @@ export function normalizeWompiWebhook(input: unknown): WompiWebhook {
     EsInternacional: optionalBoolean(input, "EsInternacional", "esInternacional"),
     IdExterno: optionalString(input, "IdExterno", "idExterno")
   };
+  const provider = optionalString(input, "Proveedor");
+  if (provider !== undefined) {
+    if (provider !== "N1CO") {
+      throw new WompiPayloadError("Proveedor de pago desconocido");
+    }
+    payload.Proveedor = "N1CO";
+  }
 
   if (app) {
     payload.Aplicativo = {

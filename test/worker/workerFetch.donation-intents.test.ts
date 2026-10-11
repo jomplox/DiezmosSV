@@ -731,7 +731,9 @@ describe("donation intents", () => {
       expect(handoff).toEqual({
         intentId: payload.intentId,
         urlEnlace: "https://s.wompi.sv/1234568xY-",
-        urlEnlaceLargo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=synthetic-link"
+        urlEnlaceLargo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=synthetic-link",
+        // No n1co secrets in this environment, so the alternative is not offered.
+        n1coAvailable: false
       });
       // Completing fiscal data must reuse the stored link, never mint a second one.
       expect(fetchSpy).toHaveBeenCalledTimes(2);
@@ -1446,7 +1448,8 @@ describe("donation intents", () => {
       await expect(response.json()).resolves.toEqual({
         intentId: "di_draft_1",
         urlEnlace: "https://mock.wompi.sv/enlace/di_draft_1",
-        urlEnlaceLargo: "https://mock.wompi.sv/enlace-largo/di_draft_1"
+        urlEnlaceLargo: "https://mock.wompi.sv/enlace-largo/di_draft_1",
+        n1coAvailable: true
       });
       // No outbound HTTP: datos is D1-only.
       expect(fetchSpy).not.toHaveBeenCalled();

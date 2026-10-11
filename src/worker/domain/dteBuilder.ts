@@ -173,6 +173,8 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
   const donorDocument = donorIsDui ? formatDui(donorDocumentRaw) : donorDocumentRaw ?? "SIN-DOCUMENTO";
   const override = options.donorOverride;
   const ambiente = options.environment ?? ambienteFromWompi(payload);
+  // The payment reference names the provider that took the entrega.
+  const providerLabel = payload.Proveedor === "N1CO" ? "n1co" : "Wompi";
   const document = {
     identificacion: {
       version: 2,
@@ -205,7 +207,7 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
     otrosDocumentos: [
       {
         codDocAsociado: 1,
-        descDocumento: "Referencia Wompi",
+        descDocumento: `Referencia ${providerLabel}`,
         detalleDocumento: payload.IdTransaccion
       }
     ],
@@ -234,9 +236,9 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
       ]
     },
     apendice: [
-      { campo: "IdTransaccion", etiqueta: "Wompi", valor: payload.IdTransaccion },
+      { campo: "IdTransaccion", etiqueta: providerLabel, valor: payload.IdTransaccion },
       { campo: "Autorizacion", etiqueta: "Código de autorización", valor: payload.CodigoAutorizacion ?? "N/D" },
-      { campo: "Aplicativo", etiqueta: "Aplicativo", valor: payload.Aplicativo?.Nombre ?? "Wompi" },
+      { campo: "Aplicativo", etiqueta: "Aplicativo", valor: payload.Aplicativo?.Nombre ?? providerLabel },
       // Informational "Tipo" line, present only when the correlated intent carries a
       // gift_type. The legal descripcion above stays "DONACIÓN"; this is metadata.
       ...(override?.giftType

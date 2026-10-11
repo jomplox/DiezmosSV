@@ -218,8 +218,11 @@ export async function getWompiEventByPaymentLinkId(
 function dynamicApprovedPaymentLinkId(payload: WompiWebhook): number | null {
   const intentId = payload.EnlacePago?.IdentificadorEnlaceComercio?.trim() ?? "";
   const linkId = payload.EnlacePago?.Id;
+  // n1co order ids share no namespace with Wompi link ids, so they never occupy the
+  // Wompi payment-link uniqueness slot; n1co events dedupe on transaction_id.
   return (
-    isApprovedDonation(payload)
+    payload.Proveedor !== "N1CO"
+    && isApprovedDonation(payload)
     && intentId.startsWith("di_")
     && Number.isInteger(linkId)
     && Number(linkId) > 0

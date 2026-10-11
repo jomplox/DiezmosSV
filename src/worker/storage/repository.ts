@@ -73,6 +73,11 @@ import {
   markIntentCompleted as markIntentCompletedRepository,
   markIntentPaid as markIntentPaidRepository,
   touchIntentWompiReconciliationCheck as touchIntentWompiReconciliationCheckRepository,
+  listIntentsForN1coReconciliation as listIntentsForN1coReconciliationRepository,
+  markN1coIntentPaid as markN1coIntentPaidRepository,
+  observeN1coPaid as observeN1coPaidRepository,
+  switchIntentToN1co as switchIntentToN1coRepository,
+  claimN1coCheck as claimN1coCheckRepository,
   type CreateDonationIntentInput,
   type IntentDatosInput
 } from "./repository/donationIntents";
@@ -1027,6 +1032,34 @@ export class Repository {
     direccionComplemento: string | null = null
   ): Promise<void> {
     return markIntentPaidRepository(this.db, id, expectedLinkId, donorPhone, direccionComplemento);
+  }
+
+  async switchIntentToN1co(
+    id: string,
+    link: { orderId: number; orderCode: string; paymentLinkUrl: string },
+    now: string
+  ): Promise<DonationIntentRecord | null> {
+    return switchIntentToN1coRepository(this.db, id, link, now);
+  }
+
+  async markN1coIntentPaid(id: string, expectedOrderId: number, donorPhone: string | null, now: string): Promise<void> {
+    return markN1coIntentPaidRepository(this.db, id, expectedOrderId, donorPhone, now);
+  }
+
+  async observeN1coPaid(id: string, expectedOrderId: number, now: string): Promise<string | null> {
+    return observeN1coPaidRepository(this.db, id, expectedOrderId, now);
+  }
+
+  async listIntentsForN1coReconciliation(
+    createdAfter: string,
+    checkedBefore: string,
+    limit = DONATION_INTENT_RECONCILIATION_SWEEP_LIMIT
+  ): Promise<DonationIntentRecord[]> {
+    return listIntentsForN1coReconciliationRepository(this.db, createdAfter, checkedBefore, limit);
+  }
+
+  async claimN1coCheck(id: string, checkedAt: string, checkedBefore: string): Promise<boolean> {
+    return claimN1coCheckRepository(this.db, id, checkedAt, checkedBefore);
   }
 
   async listIntentsForWompiReconciliation(

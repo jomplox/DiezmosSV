@@ -1240,6 +1240,74 @@ describe("Stripe donar page source contract", () => {
   });
 });
 
+// n1co is a second-class alternative on the SV door: Wompi's embedded form stays the
+// default on Paso 3, and donors already in the n1co ecosystem get a small dock (same
+// shape as the U.S. Givebutter dock) that hands them to n1co's hosted page.
+describe("donar n1co alternative", () => {
+  const svEntrega = donarSource.slice(
+    donarSource.indexOf("{/* Paso 3 — Entrega (SV door)"),
+    donarSource.indexOf("function DonarThankYou")
+  );
+  const n1coDock = svEntrega.slice(svEntrega.indexOf("donar-provider-dock"));
+
+  it("offers the dock only when the server advertises n1co, below the default Wompi form", () => {
+    expect(donarSource).toMatch(/interface DonarIntent \{[^}]*n1coAvailable\?: boolean;/);
+    expect(svEntrega).toContain("intent.n1coAvailable && (");
+    // Wompi's iframe renders first and unconditionally; the dock never replaces it.
+    expect(svEntrega.indexOf('className="donar-hosted-surface donar-embed"')).toBeGreaterThan(-1);
+    expect(svEntrega.indexOf("donar-provider-dock")).toBeGreaterThan(
+      svEntrega.indexOf('className="donar-hosted-surface donar-embed"')
+    );
+    expect(donarSource.match(/className="donar-hosted-surface donar-embed"/g) ?? []).toHaveLength(1);
+  });
+
+  it("names the gift and the n1co account in the dock, with the bundled n1co mark", () => {
+    expect(n1coDock).toContain("N1CO_ICON_DATA_URI");
+    expect(n1coDock).toContain('"Ofrendar con n1co"');
+    expect(n1coDock).toContain('"Diezmar con n1co"');
+    expect(n1coDock).toContain("(Con su cuenta n1co)");
+    expect(n1coDock).toContain("donar-provider-choice donar-provider-choice-n1co");
+    expect(stylesSource).toMatch(/\.donar-provider-choice-n1co img\s*\{[^}]*background:\s*#000000;/);
+  });
+
+  it("switches the intent server-side, then leaves in the same tab for n1co's hosted page", () => {
+    const chooser = donarSource.slice(donarSource.indexOf("async function chooseN1co"));
+    expect(chooser).toContain("`${DONAR_INTENT_PATH}/${encodeURIComponent(intent.intentId)}/n1co`");
+    expect(chooser).toContain('method: "POST"');
+    expect(chooser).toContain("window.location.assign(paymentLinkUrl)");
+    expect(n1coDock).not.toContain('target="_blank"');
+    expect(donarSource).not.toContain("window.open(");
+  });
+
+  it("treats an entrega Wompi already received as verifying, never as a second gift", () => {
+    const chooser = donarSource.slice(donarSource.indexOf("async function chooseN1co"));
+    expect(chooser).toContain('err.code === "intent_already_paid"');
+    expect(chooser.slice(chooser.indexOf('"intent_already_paid"'))).toMatch(/^[^}]*setHandoff\("verifying"\)/);
+  });
+
+  it("disables the dock while the n1co entrega is being prepared and keeps Wompi on failure", () => {
+    expect(n1coDock).toContain("disabled={n1coRedirecting}");
+    expect(n1coDock).toContain('"Preparando su entrega con n1co…"');
+    expect(svEntrega).toContain("{n1coError && <p className=\"auth-notice\" role=\"alert\">{n1coError}</p>}");
+  });
+
+  it("resets a page restored from the back-forward cache after leaving for n1co", () => {
+    const effect = donarSource.slice(donarSource.indexOf('window.addEventListener("pageshow"') - 400);
+    expect(effect).toContain("event.persisted");
+    expect(effect).toContain("n1coLeftRef.current");
+  });
+
+  it("keeps the mobile dock in flow so it never covers the Wompi form", () => {
+    expect(svEntrega).toContain("donar-wompi-has-provider-dock");
+    expect(stylesSource).toMatch(/\.donar-wompi-has-provider-dock \.donar-provider-dock\s*\{[^}]*position:\s*static;/);
+  });
+
+  it("shows n1co's hosted page the brand title, never transactional wording", () => {
+    const n1coApiSource = readFileSync(resolve(import.meta.dirname, "../../src/worker/services/n1coApi.ts"), "utf8");
+    expect(n1coApiSource).toContain('const ORDER_NAME = "Diezmos y Ofrendas";');
+  });
+});
+
 describe("two-door landing deep-link helpers", () => {
   it("reads ?ruta=sv / ?ruta=eeuu into a door, ignoring anything else", () => {
     expect(doorFromSearch("?ruta=sv")).toBe("sv");

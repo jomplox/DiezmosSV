@@ -51,6 +51,7 @@ por correo — todo desde un solo Worker.
 - [Referencia de configuración](#-referencia-de-configuración)
 - [Seguridad](#-seguridad)
 - [Webhook de Wompi](#-webhook-de-wompi)
+- [Alternativa n1co](#-alternativa-n1co)
 - [Donaciones en línea (/donar)](#-donaciones-en-línea-donar)
 - [Panel de administración y roles](#-panel-de-administración-y-roles)
 - [Ciclo de vida del documento](#-ciclo-de-vida-del-documento)
@@ -141,7 +142,9 @@ La página pública `/donar` abre con una portada de dos puertas: **El Salvador 
 formulario fiscal SV (Wompi + CDE), y **EE. UU.** usa por defecto Stripe Embedded Checkout en español y dentro de la misma página sobre la
 cuenta 501(c)(3) estadounidense para entregas únicas o mensuales. Cuando el build del ambiente tiene un
 mapeo explícito de fondos para Diezmo/Ofrenda, el donante puede desmontar Stripe y usar el formulario
-existente de Givebutter en inglés (`?ruta=sv` / `?ruta=eeuu` enlaza directo a una puerta). Toda la
+existente de Givebutter en inglés (`?ruta=sv` / `?ruta=eeuu` enlaza directo a una puerta). En la puerta SV, el formulario embebido
+de Wompi sigue siendo el predeterminado y los donantes que ya están en el ecosistema n1co pueden
+elegir la página alojada de n1co ([Alternativa n1co](#-alternativa-n1co)). Toda la
 interfaz web (páginas del donante y panel de administración) usa **Gotham**, autoalojada como woff2
 del subconjunto latino en `src/client/fonts/` — los OTF licenciados nunca se versionan; solo se
 versionan los subconjuntos woff2 generados.
@@ -156,7 +159,7 @@ versionan los subconjuntos woff2 generados.
 | **D1** | `DB` | Eventos de Wompi, documentos DTE, eventos firmados, tokens, usuarios, sesiones, bitácora de auditoría, periodos de contingencia y configuración de la aplicación. |
 | **Queues** | `ISSUANCE_QUEUE` → `diezmossv-local-issuance-example` (+ `-dlq`) | Emisión asíncrona (lotes ≤ 10, hasta 3 reintentos) para tres tipos de mensaje: un webhook aprobado de Wompi, un CDE avanzado emitido a mano y una corrección fiscal — cada uno identificado por su propio token de propiedad, y un mensaje que no lleve ninguno se rechaza de plano. Los mensajes que agotan los reintentos caen en una cola de mensajes fallidos que audita y alerta por cada uno. |
 | **R2** | `ARCHIVE` → `diezmossv-<env>-archive-example` | Bucket de la exportación mensual de retención legal (instantáneas NDJSON + manifiesto SHA-256), más los objetos del logo de marca (`branding/logo`, `branding/donor-logo`). |
-| **Cron Triggers** | `*/15 * * * *` · `0 9 1 * *` | Cada 15 min, diez barridos protegidos de forma independiente: limpieza de claims vencidos de login/límite de tasa, reintento de transmisión diferida, reintento de finalización posterior a la aceptación, reintento de finalización de Wompi aceptado, barrido de eventos previos al CDE estancados, recuperación de correcciones fiscales estancadas, conciliación de webhooks no recibidos contra la API de enlaces de pago de Wompi, expiración de intentos de donación + desactivación del enlace de Wompi, y la revisión de vencimiento del certificado del firmador. Un barrido que falle nunca aborta el ciclo. Mensual (09:00 UTC del día 1): exportación de retención a R2. |
+| **Cron Triggers** | `*/15 * * * *` · `0 9 1 * *` | Cada 15 min, once barridos protegidos de forma independiente: limpieza de claims vencidos de login/límite de tasa, reintento de transmisión diferida, reintento de finalización posterior a la aceptación, reintento de finalización de Wompi aceptado, barrido de eventos previos al CDE estancados, recuperación de correcciones fiscales estancadas, conciliación de webhooks no recibidos contra la API de enlaces de pago de Wompi, conciliación de callbacks no recibidos contra la API de órdenes de n1co, expiración de intentos de donación + desactivación del enlace de Wompi, y la revisión de vencimiento del certificado del firmador. Un barrido que falle nunca aborta el ciclo. Mensual (09:00 UTC del día 1): exportación de retención a R2. |
 | **Activos estáticos** | `ASSETS` → `./dist/client` | Panel de administración de React servido desde el Worker con fallback de SPA. |
 
 `compatibility_date = 2026-06-02` con `nodejs_compat` habilitado para las operaciones de criptografía.
@@ -449,6 +452,8 @@ node scripts/run-private-wrangler.mjs secret put STRIPE_US_WEBSITE --env staging
 node scripts/run-private-wrangler.mjs secret put STRIPE_US_MAILING_ADDRESS --env staging
 node scripts/run-private-wrangler.mjs secret put STRIPE_US_SIGNER_NAME --env staging
 node scripts/run-private-wrangler.mjs secret put STRIPE_US_SIGNER_TITLE --env staging
+node scripts/run-private-wrangler.mjs secret put N1CO_CHECKOUT_SECRET_KEY --env staging   # opcional: llave sandbox de n1co
+node scripts/run-private-wrangler.mjs secret put N1CO_WEBHOOK_SECRET --env staging   # opcional: secreto sandbox del webhook de n1co
 
 # Migre y despliegue con los scripts de npm, que usan la misma envoltura privada.
 npm run cf:migrate:staging
@@ -523,6 +528,8 @@ node scripts/run-private-wrangler.mjs secret put EMAIL_PROVIDER_URL --env produc
 node scripts/run-private-wrangler.mjs secret put EMAIL_API_KEY --env production   # token opcional del proveedor alternativo
 node scripts/run-private-wrangler.mjs secret put EMAIL_FROM --env production
 node scripts/run-private-wrangler.mjs secret put EMISOR_CONFIG_JSON --env production
+node scripts/run-private-wrangler.mjs secret put N1CO_CHECKOUT_SECRET_KEY --env production   # opcional: llave de producción de n1co
+node scripts/run-private-wrangler.mjs secret put N1CO_WEBHOOK_SECRET --env production   # opcional: secreto de producción del webhook de n1co
 
 # Verifique la marca primero: es de solo lectura, así que una regresión falla la ventana
 # antes de que la migración haya escrito nada. Ambos pasos remotos se niegan a correr fuera
@@ -576,6 +583,7 @@ del repositorio seleccionado por `DIEZMOSSV_ENV_FILE`:
 |---|---|
 | `WOMPI_API_SECRET` | Secreto HMAC usado para verificar el `wompi_hash` de los webhooks entrantes. |
 | `WOMPI_CLIENT_ID` / `WOMPI_CLIENT_SECRET` | Credenciales de cliente OAuth usadas para generar los enlaces de pago de Wompi de un solo uso y solo con tarjeta que están detrás de `/donar`, y para releer un enlace durante la conciliación de webhooks no recibidos. Obténgalas en el panel de comercios de Wompi bajo **Datos del negocio**. El flujo heredado de enlace de pago estático no las necesita. |
+| `N1CO_CHECKOUT_SECRET_KEY` / `N1CO_WEBHOOK_SECRET` | Opcionales. La llave de la API CheckoutLink de n1co (genera el enlace de n1co y relee las órdenes) y el secreto HMAC del webhook. Configure ambos para ofrecer la [alternativa n1co](#-alternativa-n1co) en `/donar`; staging usa valores sandbox y producción valores de producción. |
 | `BOOTSTRAP_OWNER_TOKEN` | Secreto de configuración de un solo uso exigido por `/api/auth/bootstrap-owner` antes de que exista el primer owner. Debe generarse a partir de 32 bytes aleatorios y tener el formato `bt_` más 43 caracteres base64url. Rótelo o elimínelo una vez que la cuenta owner exista. |
 | `CLOUDFLARE_ACCOUNT_ID` | Cuenta de Cloudflare destino que usa la interfaz de credenciales exclusiva de OWNER al guardar secretos del Worker. |
 | `CLOUDFLARE_API_TOKEN` | Token de API de Cloudflare con alcance acotado que usa la interfaz de credenciales exclusiva de OWNER para llamar al endpoint de actualización masiva de secretos del Worker. |
@@ -721,6 +729,54 @@ deduplicación que atraviesa un webhook real — registrado como `WOMPI_RECONCIL
 `source: payment_link_api`. Como el id numérico del enlace de pago es una llave de deduplicación
 única, un webhook que llegue *después* de la conciliación no puede producir un segundo CDE. El barrido
 se desactiva con `MOCK_EXTERNAL_SERVICES = "true"`.
+
+---
+
+## 🟢 Alternativa n1co
+
+En la puerta SV, el Paso 3 mantiene el formulario embebido de Wompi como opción predeterminada. Debajo,
+los donantes que ya usan n1co ven una pequeña opción **Diezmar con n1co / Ofrendar con n1co** (con la
+forma de la opción Givebutter de EE. UU.) que los lleva a la página alojada de n1co en la misma
+pestaña. Ambos carriles terminan en el mismo CDE: n1co nunca emite un DTE propio.
+
+La opción solo se ofrece cuando el Worker tiene `N1CO_CHECKOUT_SECRET_KEY` y `N1CO_WEBHOOK_SECRET`
+(o corre con `MOCK_EXTERNAL_SERVICES = "true"`). Omita ambos para ocultarla.
+
+**Cambio de un intento.** `POST /api/donations/intent/{id}/n1co` genera un CheckoutLink de n1co por el
+monto exacto del intento (`orderReference` = el id del intento; el éxito regresa a `/donar/gracias` y la
+cancelación a `/donar?ruta=sv`; el enlace vence con el intento, entre 5 y 60 minutos). Solo entonces
+desactiva el enlace de Wompi del intento y lo vuelve a leer: si Wompi ya recibió la entrega, el cambio
+se rechaza con `409 intent_already_paid`. Un trigger de D1 hace el cambio de una sola vía
+(`WOMPI → N1CO`, solo intentos sin entrega recibida), y una transacción tardía de Wompi sobre un
+intento cambiado queda en cuarentena, no se emite.
+
+**Ambiente.** El despliegue selecciona el ambiente de n1co: `production` habla con `api-pay.n1co.shop`
+y cualquier otro despliegue con el sandbox (`api-pay-sandbox.n1co.shop`). El `EsProductiva` resultante
+determina el `ambiente` de MH y la misma cuarentena por despliegue que Wompi, así que staging nunca
+puede recibir una entrega real por n1co.
+
+**Webhook.** En el portal de n1co, apunte el webhook a:
+
+```text
+https://YOUR_WORKER_DOMAIN/webhooks/n1co
+```
+
+El cuerpo debe traer un `X-H4B-Hmac-Sha256` válido (HMAC-SHA256 en Base64 del cuerpo crudo, con la
+llave `N1CO_WEBHOOK_SECRET`). El webhook es solo una señal: el Worker vuelve a leer la orden por la API
+autenticada y emite solo cuando la orden está `PAID`/`FINALIZED`, en USD y por el monto exacto del
+intento. Una orden que no coincide se audita como `N1CO_ORDER_REJECTED` y nunca se emite. Las órdenes
+aceptadas entran al pipeline de Wompi como un payload canónico marcado `Proveedor: "N1CO"`,
+deduplicado por `IdTransaccion = n1co-<orderId>` y auditado como `N1CO_RECEIVED` / `N1CO_DUPLICATE`.
+
+**Cuando el webhook nunca llega.** El cron de 15 minutos vuelve a leer los intentos n1co sin resolver de
+los últimos 7 días (cada uno como máximo cada 10 minutos) y reproduce una orden con entrega recibida
+por el mismo ingreso, auditada como `N1CO_RECONCILED`. La consulta de estado del donante también revisa
+la orden, como máximo una vez cada 20 segundos.
+
+**Protección contra bots.** Si el dominio propio del Worker está en una zona que desafía el tráfico que
+no viene de un navegador, agregue en el panel de Cloudflare una regla WAF de omisión para
+`POST /webhooks/n1co`. n1co no publica sus IP de origen, así que una lista de IP permitidas no es
+opción. Sin la regla, la conciliación igual registra cada entrega recibida, solo que más tarde.
 
 ---
 

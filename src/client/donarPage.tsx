@@ -1,6 +1,7 @@
 import { markDonorBrandingSettled } from "./donorReady";
 import svFlag from "./assets/sv-flag.svg";
 import { GIVEBUTTER_ICON_DATA_URI } from "./assets/givebutterIcon";
+import { N1CO_ICON_DATA_URI } from "./assets/n1coIcon";
 import { AlertCircle, CheckCircle2, ShieldCheck, SquareArrowOutUpRight } from "lucide-react";
 import { type FormEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
@@ -260,6 +261,8 @@ interface DonarIntent {
   intentId: string;
   urlEnlace: string;
   urlEnlaceLargo: string;
+  // The server offers n1co only when it can both mint the link and verify its webhook.
+  n1coAvailable?: boolean;
 }
 
 // The built-in default logo, reusing the vector paths shared with the worker's PDF
@@ -475,6 +478,11 @@ export function DonarPage() {
   // (min(78vh, 820px)) until the first message. Tablet/desktop can then track the full
   // content height; mobile CSS caps the frame and keeps Wompi's own scrolling available.
   const [embedHeight, setEmbedHeight] = useState<number | null>(null);
+  // n1co alternative on Paso 3: the switch request in flight, its donor-facing failure,
+  // and whether this page already left for n1co's hosted page (bfcache restore).
+  const [n1coRedirecting, setN1coRedirecting] = useState(false);
+  const [n1coError, setN1coError] = useState("");
+  const n1coLeftRef = useRef(false);
   // Explicit focus targets: the hero amount input after a quick-fill and the
   // summary's Editar control on an embedded handoff step.
   const heroInputRef = useRef<HTMLInputElement | null>(null);
@@ -809,6 +817,25 @@ export function DonarPage() {
     };
   }, [stage, intent, verifyingWompiClose]);
 
+  // Back from n1co's hosted page, the browser may restore this page as it was left:
+  // "preparando" on an intent whose Wompi link the switch deactivated. Return the
+  // donor to Paso 2 so the next entry creates a fresh intent.
+  useEffect(() => {
+    function onPageShow(event: PageTransitionEvent) {
+      if (!event.persisted || !n1coLeftRef.current) {
+        return;
+      }
+      n1coLeftRef.current = false;
+      setN1coRedirecting(false);
+      setN1coError("");
+      setIntent(null);
+      setStage("form");
+      setStep(2);
+    }
+    window.addEventListener("pageshow", onPageShow);
+    return () => window.removeEventListener("pageshow", onPageShow);
+  }, []);
+
   // Paso 1 → Paso 2. The SV and U.S. doors both gate on amount; U.S. gift type
   // is always an explicit state choice and travels in the Stripe request.
   function continueFromMonto(event: FormEvent) {
@@ -852,6 +879,7 @@ export function DonarPage() {
         body: donationIntentBody(form)
       });
       setHandoff("loading");
+      setN1coError("");
       setIntent(created);
       setStage("widget");
       setStep(3);
@@ -859,6 +887,33 @@ export function DonarPage() {
       setError(userFacingErrorMessage(err instanceof Error ? err.message : String(err)));
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  // The donor picked n1co over the default Wompi form. The server mints the n1co link
+  // and retires the Wompi one before answering, so leaving in the same tab can never
+  // leave two live ways to give for one intent.
+  async function chooseN1co() {
+    if (!intent || n1coRedirecting) {
+      return;
+    }
+    setN1coError("");
+    setN1coRedirecting(true);
+    try {
+      const { paymentLinkUrl } = await donarApi<{ paymentLinkUrl: string }>(
+        `${DONAR_INTENT_PATH}/${encodeURIComponent(intent.intentId)}/n1co`,
+        { method: "POST", body: {} }
+      );
+      n1coLeftRef.current = true;
+      window.location.assign(paymentLinkUrl);
+    } catch (err) {
+      setN1coRedirecting(false);
+      if (err instanceof DonarApiError && err.code === "intent_already_paid") {
+        // Wompi already received this entrega: confirm it instead of offering a second.
+        setHandoff("verifying");
+        return;
+      }
+      setN1coError(userFacingErrorMessage(err instanceof Error ? err.message : String(err)));
     }
   }
 
@@ -916,6 +971,7 @@ export function DonarPage() {
     // Inline errors belong to a submit attempt on the screen being left.
     setFieldErrors({});
     if (step === 3) {
+      setN1coError("");
       setIntent(null);
       setStage("form");
       setStep(2);
@@ -1483,7 +1539,7 @@ export function DonarPage() {
         {/* Paso 3 — Entrega (SV door). Summary line above the existing Wompi
             handoff: embedded checkout iframe, manual backup, polling, neutral close. */}
         {step === 3 && !usDonation && (
-          <div className="donar-step donar-wompi">
+          <div className={`donar-step donar-wompi${stage === "widget" && intent?.n1coAvailable ? " donar-wompi-has-provider-dock" : ""}`}>
             {summary}
 
             {stage === "widget" && intent && (
@@ -1518,6 +1574,30 @@ export function DonarPage() {
                 <a className="link-button donar-wompi-hint" href={intent.urlEnlace}>
                   ¿Problemas con el formulario? Continúe aquí
                 </a>
+                {n1coError && <p className="auth-notice" role="alert">{n1coError}</p>}
+                {/* Second-class alternative for donors already in the n1co ecosystem,
+                    shaped like the U.S. Givebutter dock. Wompi stays the default form. */}
+                {intent.n1coAvailable && (
+                  <div className="donar-provider-dock">
+                    <button
+                      type="button"
+                      className="donar-provider-choice donar-provider-choice-n1co"
+                      disabled={n1coRedirecting}
+                      onClick={() => void chooseN1co()}
+                    >
+                      <img src={N1CO_ICON_DATA_URI} alt="" aria-hidden="true" />
+                      <span className="donar-provider-choice-copy">
+                        <strong>
+                          {n1coRedirecting
+                            ? "Preparando su entrega con n1co…"
+                            : form.giftType === "OFRENDA" ? "Ofrendar con n1co" : "Diezmar con n1co"}
+                        </strong>
+                        <small>(Con su cuenta n1co)</small>
+                      </span>
+                      <span className="donar-provider-choice-arrow" aria-hidden="true">→</span>
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 

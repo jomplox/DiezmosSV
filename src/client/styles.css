@@ -4172,6 +4172,18 @@ pre {
   background: #febf10;
 }
 
+/* n1co's mark is a black disc; keep its own swatch instead of Givebutter's. */
+.donar-provider-choice-n1co img {
+  border-radius: 50%;
+  background: #000000;
+}
+
+.donar-provider-choice:disabled {
+  cursor: progress;
+  opacity: 0.7;
+  transform: none;
+}
+
 .donar-provider-stripe-mark {
   display: grid;
   place-items: center;
@@ -4762,6 +4774,21 @@ pre {
 
   .donar-stripe-has-provider-dock {
     padding-bottom: calc(112px + env(safe-area-inset-bottom));
+  }
+
+  /* Wompi is the primary form on the SV door, so its n1co dock stays in flow as
+     one compact row under the Wompi escape hatch instead of a fixed bar. */
+  .donar-wompi-has-provider-dock .donar-provider-dock {
+    position: static;
+    padding: 0 22px;
+    border-top: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .donar-wompi-has-provider-dock .donar-provider-choice {
+    min-height: 44px;
+    padding: 5px 11px;
   }
 
   .donar-provider-dock {

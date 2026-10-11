@@ -529,7 +529,9 @@ test("SV embedded form uses the compact mobile provider shell", async ({ page },
     await page.setViewportSize({ width, height });
     const box = await embed.boundingBox();
     expect(box!.y).toBeLessThan(260);
-    expect(box!.height).toBeGreaterThan(350);
+    // Mock mode offers n1co, whose one-row dock sits under the form (~52px).
+    await expect(page.getByRole("button", { name: /^Diezmar con n1co/ })).toBeInViewport();
+    expect(box!.height).toBeGreaterThan(300);
     expect(box!.y + box!.height).toBeLessThan(height);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
     expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBeLessThanOrEqual(height + 1);
@@ -672,7 +674,8 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   expect(mobileCardBox!.x + mobileCardBox!.width).toBeCloseTo(mobileViewport.width, 1);
   expect(mobileEmbedBox!.x).toBeCloseTo(0, 1);
   expect(mobileEmbedBox!.x + mobileEmbedBox!.width).toBeCloseTo(mobileViewport.width, 1);
-  expect(mobileEmbedBox!.height).toBeGreaterThan(500);
+  // The in-flow n1co dock (mock mode offers it) takes ~52px from the frame.
+  expect(mobileEmbedBox!.height).toBeGreaterThan(480);
   expect(mobileEmbedBox!.y).toBeLessThan(260);
   expect(mobileEmbedBox!.y + mobileEmbedBox!.height).toBeLessThan(mobileViewport.height);
   expect(await embed.getAttribute("scrolling")).toBeNull();
@@ -699,6 +702,93 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
 
   await expect(page.getByRole("link", { name: "¿Problemas con el formulario? Continúe aquí" })).toBeVisible();
   expect(new URL(page.url()).pathname).toBe("/");
+});
+
+test("offers n1co as a quiet alternative beneath the default Wompi form", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.route("https://mock.wompi.sv/**", (route) => route.fulfill({
+    contentType: "text/html",
+    body: "<html><body>mock wompi hosted flow</body></html>"
+  }));
+  await page.route("https://pay-sandbox.n1co.shop/**", (route) => route.fulfill({
+    contentType: "text/html",
+    body: "<html><body>mock n1co hosted flow</body></html>"
+  }));
+  // The intent and the switch are stubbed: this spec already spends the per-IP
+  // creation budget, and the server-side switch is covered by workerFetch.n1co.
+  await page.route("**/api/donations/intent", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({
+      intentId: "di_e2e_n1co",
+      urlEnlace: "https://mock.wompi.sv/e2e",
+      urlEnlaceLargo: "https://mock.wompi.sv/e2e/largo",
+      n1coAvailable: true
+    })
+  }));
+  await page.route("**/api/donations/intent/di_e2e_n1co/status", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({ status: "LINK_CREATED", paid: false })
+  }));
+  const switchRequests: { method: string; contentType: string | null }[] = [];
+  let switchFails = true;
+  await page.route("**/api/donations/intent/di_e2e_n1co/n1co", (route) => {
+    switchRequests.push({ method: route.request().method(), contentType: route.request().headers()["content-type"] ?? null });
+    return switchFails
+      ? route.fulfill({
+        status: 502,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "n1co_link_failed", message: "No se pudo preparar su entrega con n1co. Puede continuar con Wompi." })
+      })
+      : route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ paymentLinkUrl: "https://pay-sandbox.n1co.shop/mock-e2e" })
+      });
+  });
+  await page.setViewportSize({ width: 671, height: 944 });
+  await enterWompiHandoff(page);
+
+  // Wompi stays the default form; n1co is the small dock below it.
+  const embed = page.locator("iframe.donar-embed");
+  await expect(embed).toBeVisible();
+  const choice = page.getByRole("button", { name: /^Diezmar con n1co/ });
+  await expect(choice).toBeVisible();
+  await expect(choice).toContainText("(Con su cuenta n1co)");
+  await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas" })).toBeVisible();
+  expect((await choice.boundingBox())!.y).toBeGreaterThan((await embed.boundingBox())!.y);
+  await page.screenshot({ path: testInfo.outputPath("sv-n1co-desktop.png"), fullPage: true, animations: "disabled" });
+
+  // On mobile the dock stays in flow under the Wompi escape hatch: it never covers
+  // the form, and it is visible without page scrolling.
+  for (const [width, height] of [[393, 700], [320, 700], [393, 852]]) {
+    await page.setViewportSize({ width, height });
+    const dockTop = (await page.locator(".donar-provider-dock").boundingBox())!.y;
+    const mobileEmbed = (await embed.boundingBox())!;
+    expect(mobileEmbed.y + mobileEmbed.height).toBeLessThanOrEqual(dockTop + 1);
+    const hint = (await page.getByRole("link", { name: "¿Problemas con el formulario? Continúe aquí" }).boundingBox())!;
+    expect(hint.y + hint.height).toBeLessThanOrEqual(dockTop + 1);
+    await expect(choice).toBeInViewport();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
+    expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBeLessThanOrEqual(height + 1);
+  }
+  await page.screenshot({ path: testInfo.outputPath("sv-n1co-mobile.png"), animations: "disabled" });
+
+  // A failed switch keeps the donor on Wompi with a plain explanation.
+  await choice.click();
+  await expect(page.getByRole("alert")).toHaveText("No se pudo preparar su entrega con n1co. Puede continuar con Wompi.");
+  await expect(embed).toBeVisible();
+  await expect(choice).toBeEnabled();
+
+  // Choosing n1co leaves in the same tab for n1co's hosted page.
+  switchFails = false;
+  await choice.click();
+  await page.waitForURL("https://pay-sandbox.n1co.shop/mock-e2e");
+  await expect(page.getByText("mock n1co hosted flow")).toBeVisible();
+  expect(switchRequests).toEqual([
+    { method: "POST", contentType: "application/json" },
+    { method: "POST", contentType: "application/json" }
+  ]);
+  expect(errors).toEqual([]);
 });
 
 test("a delayed Wompi frame keeps one stable loader and only the quiet escape hatch", async ({ page }) => {

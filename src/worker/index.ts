@@ -1,6 +1,7 @@
 import { getEmisorConfig, getMhCertificateXml, isMockMode, requireSecret } from "./config";
 import { buildAdvancedCdeDocument, buildDirectCdeDocument, buildInvalidacionEvent, cdeDocumentSummary, webhookDonorComplemento, type DirectCdeInput, type InvalidationInput } from "./domain/dteBuilder";
 import { certificateExpiry, signMhDocument } from "./domain/signer";
+import { N1CO_SIGNATURE_HEADER, N1coPayloadError, n1coWebhookFromOrder, parseN1coWebhookEvent, verifyN1coSignature } from "./domain/n1co";
 import { ambienteFromWompi, isApprovedDonation, normalizeWompiWebhook, verifyWompiHash, WompiPayloadError, wompiHashHeader, wompiWebhookFromPaymentLink } from "./domain/wompi";
 import { ALERT_EMAIL_SETTING_KEY, normalizeAlertRecipients, sendOperationalAlert } from "./services/alerts";
 import { AuthError, AuthService, BootstrapUnavailableError, InvalidLoginStepUpChallengeError, LOGIN_STEP_UP_TTL_MINUTES, PASSWORD_RESET_TTL_MINUTES, PasswordPolicyError, PasswordResetError, requireRole, type AuthUser, type Role, UserNotFoundError } from "./services/auth";
@@ -124,6 +125,7 @@ import { BackupArchiveTooLargeError, BACKUP_MONTH_DOWNLOAD_MAX_BYTES, collectBac
 import { zipStored } from "./utils/zip";
 import { previousElSalvadorMonth, retentionManifestKey, runRetentionExport } from "./services/retention";
 import { WompiApiService } from "./services/wompiApi";
+import { isN1coAvailable, N1coApiService } from "./services/n1coApi";
 import {
   loadWompiNotificationSettings,
   normalizeWompiNotificationSettings,
@@ -156,7 +158,7 @@ import {
   Repository,
   UserMutationConflictError
 } from "./storage/repository";
-import type { Ambiente, DteDocumentRecord, Env, IssuanceMessage, MhResponse, WompiWebhook } from "./types";
+import type { Ambiente, DonationIntentRecord, DteDocumentRecord, Env, IssuanceMessage, MhResponse, WompiWebhook } from "./types";
 import { addHours, cdeInvalidationDeadline, isWithinDeadline, nowIso } from "./utils/dates";
 import { base64UrlFromBytes, sha256Hex, timingSafeEqual, utf8Bytes } from "./utils/encoding";
 import { isRecord, normalizeUuidV4 } from "./utils/guards";
@@ -179,6 +181,10 @@ const RETENTION_EXPORT_CRON = "0 9 1 * *";
 const CERT_EXPIRY_ALERT_THRESHOLD_DAYS = [30, 14, 3];
 const WOMPI_RECONCILIATION_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 const WOMPI_RECONCILIATION_RECHECK_MS = 10 * 60 * 1000;
+// n1co retries a webhook for only ~6 s. The cron re-checks unpaid n1co intents on
+// the Wompi cadence; a donor polling the thank-you page may trigger at most one
+// order lookup per intent per this interval.
+const N1CO_STATUS_POLL_RECHECK_MS = 20 * 1000;
 // Auth throttling uses atomic claim ledgers for aggregate login attempts and
 // password-reset requests. Account-specific login failures remain keyed on
 // (email, caller IP), so a third party cannot lock out a victim's email by spamming
@@ -210,6 +216,7 @@ const PUBLIC_JSON_BODY_LIMIT_BYTES = 16 * 1024;
 const AUTHENTICATED_JSON_BODY_LIMIT_BYTES = 256 * 1024;
 const EMAIL_TEMPLATE_SAVE_MAX_ATTEMPTS = 3;
 const WOMPI_WEBHOOK_BODY_LIMIT_BYTES = 64 * 1024;
+const N1CO_WEBHOOK_BODY_LIMIT_BYTES = 64 * 1024;
 const STRIPE_WEBHOOK_BODY_LIMIT_BYTES = 256 * 1024;
 const INVALIDATION_REQUEST_KEYS = new Set(["tipoAnulacion", "motivoAnulacion", "codigoGeneracionR"]);
 const FISCAL_CORRECTION_REQUEST_KEYS = new Set(["correctionRequestId", "receptor"]);
@@ -554,6 +561,9 @@ async function handleFetch(request: Request, env: Env, ctx?: ExecutionContext): 
     if (url.pathname === "/webhooks/stripe") {
       return await handleStripeWebhook(request, env, ctx);
     }
+    if (url.pathname === "/webhooks/n1co") {
+      return await handleN1coWebhook(request, env);
+    }
     const documentRedirect = redirectToCanonicalDocument(env, url);
     if (documentRedirect) {
       return documentRedirect;
@@ -801,6 +811,11 @@ async function handleScheduled(event: ScheduledEvent, env: Env): Promise<void> {
     logWorkerError(env, "wompi_payment_link_reconciliation_failed", error);
   }
   try {
+    await reconcileMissingN1coCallbacks(env, repo, event.scheduledTime ?? Date.now());
+  } catch (error) {
+    logWorkerError(env, "n1co_order_reconciliation_failed", error);
+  }
+  try {
     // Process a bounded page per tick: snapshot the capped set of expiring intents,
     // then expire exactly that page by id, so public intent creation cannot force one
     // cron invocation to snapshot or deactivate an unbounded row set. The remainder
@@ -1017,6 +1032,10 @@ async function handleWompiWebhook(request: Request, env: Env): Promise<Response>
     }
     throw error;
   }
+  if (payload.Proveedor) {
+    // Only this Worker writes the provider marker, from an authenticated n1co lookup.
+    return jsonResponse({ error: "invalid_wompi_payload", message: "El webhook Wompi no puede declarar otro proveedor" }, { status: 400 });
+  }
   // The webhook is an inbound Cloudflare request too — capture Wompi's IP/context so
   // WOMPI_RECEIVED/WOMPI_DUPLICATE audits carry the same actor context as UI actions.
   const repo = new Repository(env.DB, auditContextFrom(request));
@@ -1034,6 +1053,138 @@ async function handleWompiWebhook(request: Request, env: Env): Promise<Response>
     inserted: ingested.inserted,
     queued: ingested.queued
   }, { status: ingested.inserted ? 202 : 200 });
+}
+
+// n1co's webhook is only a signal. The event body names an order; the paid state,
+// amount, and buyer come from an authenticated lookup of the order code this Worker
+// stored when the donor chose n1co.
+async function handleN1coWebhook(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") {
+    return methodNotAllowed();
+  }
+  const secret = env.N1CO_WEBHOOK_SECRET?.trim();
+  if (!secret) {
+    return jsonResponse({ error: "n1co_webhook_unavailable" }, { status: 503 });
+  }
+  const rawBody = await readBodyText(request, N1CO_WEBHOOK_BODY_LIMIT_BYTES);
+  if (!(await verifyN1coSignature(rawBody, request.headers.get(N1CO_SIGNATURE_HEADER), secret))) {
+    return jsonResponse({ error: "invalid_n1co_signature" }, { status: 401 });
+  }
+  let event;
+  try {
+    event = parseN1coWebhookEvent(JSON.parse(rawBody));
+  } catch (error) {
+    if (error instanceof SyntaxError || error instanceof N1coPayloadError) {
+      return jsonResponse({ error: "invalid_n1co_payload" }, { status: 400 });
+    }
+    throw error;
+  }
+  // Other n1co products (coupons, storefront) and links this Worker did not mint
+  // are acknowledged so n1co stops retrying them.
+  if (event.orderType !== "FASTLINK_CHARGE" || !event.orderReference?.startsWith("di_")) {
+    return jsonResponse({ ok: true, ignored: true });
+  }
+  const repo = new Repository(env.DB, auditContextFrom(request));
+  const intent = await repo.getDonationIntent(event.orderReference);
+  // The order's Created event arrives before the switch stores its id; anything
+  // that does not name the intent's own n1co order is not ours to act on.
+  if (!intent || intent.payment_provider !== "N1CO" || intent.n1co_order_id !== event.orderId) {
+    return jsonResponse({ ok: true, ignored: true });
+  }
+  try {
+    const outcome = await syncN1coOrder(env, repo, new N1coApiService(env), intent, "webhook");
+    return jsonResponse({ ok: true, outcome });
+  } catch (error) {
+    // A 5xx asks n1co for its few quick retries; the cron recovers after that.
+    logWorkerError(env, "n1co_webhook_sync_failed", error);
+    return jsonResponse({ error: "n1co_sync_failed" }, { status: 500 });
+  }
+}
+
+type N1coSyncOutcome = "skipped" | "unpaid" | "rejected" | "ingested";
+
+// Looks the intent's n1co order up once (callers that lose the per-intent claim
+// skip the network call) and, when it is paid, feeds the canonical payload into
+// the same ingestion the Wompi webhook uses: control-number reservation, paid
+// marker, environment quarantine, and CDE issuance are all shared.
+async function syncN1coOrder(
+  env: Env,
+  repo: Repository,
+  n1co: N1coApiService,
+  intent: DonationIntentRecord,
+  source: "webhook" | "reconciliation" | "status_poll",
+  recheckMs = 0
+): Promise<N1coSyncOutcome> {
+  const orderId = intent.n1co_order_id;
+  const orderCode = intent.n1co_order_code;
+  if (intent.payment_provider !== "N1CO" || !orderId || !orderCode || intent.paid_at) {
+    return "skipped";
+  }
+  const checkedAt = nowIso();
+  const claimed = await repo.claimN1coCheck(
+    intent.id,
+    checkedAt,
+    new Date(Date.parse(checkedAt) - recheckMs).toISOString()
+  );
+  if (!claimed) {
+    return "skipped";
+  }
+  const order = await n1co.getOrder(orderCode);
+  let payload: WompiWebhook | null;
+  try {
+    if (!n1coWebhookFromOrder(intent, order, { observedAt: checkedAt, production: n1co.production })) {
+      return "unpaid";
+    }
+    const observedAt = await repo.observeN1coPaid(intent.id, orderId, checkedAt);
+    if (!observedAt) {
+      return "skipped";
+    }
+    payload = n1coWebhookFromOrder(intent, order, { observedAt, production: n1co.production });
+  } catch (error) {
+    if (!(error instanceof N1coPayloadError)) {
+      throw error;
+    }
+    await repo.createAuditIfAbsent({
+      action: "N1CO_ORDER_REJECTED",
+      entityType: "donation_intent",
+      entityId: intent.id,
+      summary: "La orden n1co no superó la correlación estricta con la intención",
+      metadata: { n1coOrderId: orderId, reason: error.message }
+    });
+    return "rejected";
+  }
+  if (!payload) {
+    return "unpaid";
+  }
+  await ingestTrustedWompiPayload(
+    env,
+    repo,
+    payload,
+    JSON.stringify(payload),
+    { "x-n1co-event-source": source },
+    {
+      insertedAction: source === "webhook" ? "N1CO_RECEIVED" : "N1CO_RECONCILED",
+      duplicateAction: source === "webhook" ? "N1CO_DUPLICATE" : undefined,
+      auditMetadata: { source, n1coOrderId: orderId }
+    }
+  );
+  return "ingested";
+}
+
+async function reconcileMissingN1coCallbacks(env: Env, repo: Repository, scheduledTime: number): Promise<void> {
+  if (isMockMode(env) || !isN1coAvailable(env)) {
+    return;
+  }
+  const createdAfter = new Date(scheduledTime - WOMPI_RECONCILIATION_LOOKBACK_MS).toISOString();
+  const checkedBefore = new Date(scheduledTime - WOMPI_RECONCILIATION_RECHECK_MS).toISOString();
+  const n1co = new N1coApiService(env);
+  for (const intent of await repo.listIntentsForN1coReconciliation(createdAfter, checkedBefore)) {
+    try {
+      await syncN1coOrder(env, repo, n1co, intent, "reconciliation", WOMPI_RECONCILIATION_RECHECK_MS);
+    } catch (error) {
+      logWorkerError(env, "n1co_order_reconciliation_failed", error);
+    }
+  }
 }
 
 async function handleStripeWebhook(
@@ -1327,7 +1478,21 @@ async function markIntentPaidFromWebhook(env: Env, repo: Repository, payload: Wo
       return;
     }
     const binding = await resolveDonationIntentBinding(repo, payload);
-    if (binding.kind !== "bound" || binding.intent.wompi_id_enlace === null) {
+    if (binding.kind !== "bound") {
+      return;
+    }
+    if (payload.Proveedor === "N1CO") {
+      if (binding.intent.n1co_order_id) {
+        await repo.markN1coIntentPaid(
+          binding.intent.id,
+          binding.intent.n1co_order_id,
+          payload.Cliente?.Celular?.trim() || null,
+          nowIso()
+        );
+      }
+      return;
+    }
+    if (binding.intent.wompi_id_enlace === null) {
       return;
     }
     // Wompi's sheet is now the only source for phone and address, so persist both here
@@ -1485,7 +1650,7 @@ async function handleCreateDonationIntent(ctx: ApiRouteContext): Promise<Respons
     const created = draft
       ? await createDraftDonationIntent(ctx.env, ctx.repo, input as ReturnType<typeof validateDraftIntentInput>, clientIp, providerClaim.id)
       : await createDonationIntent(ctx.env, ctx.repo, input as ReturnType<typeof validateIntentInput>, clientIp, providerClaim.id);
-    return jsonResponse(created, { status: 201 });
+    return jsonResponse(draft ? created : { ...created, n1coAvailable: isN1coAvailable(ctx.env) }, { status: 201 });
   } catch (error) {
     // The repository deletes only an unattached claim. Once the PENDING parent
     // exists, readiness/provider failures retain their durable admission proof.
@@ -2274,7 +2439,7 @@ async function handleDonationIntentDatos(ctx: ApiRouteContext): Promise<Response
       ctx.request.headers.get("X-Donation-Datos-Token") ?? "",
       data
     );
-    return jsonResponse(completed);
+    return jsonResponse({ ...completed, n1coAvailable: isN1coAvailable(ctx.env) });
   } catch (error) {
     if (error instanceof IntentDatosError) {
       return jsonResponse({ error: error.code, message: error.message }, { status: error.httpStatus });
@@ -2283,11 +2448,114 @@ async function handleDonationIntentDatos(ctx: ApiRouteContext): Promise<Response
   }
 }
 
+// The donor chose n1co on Paso 3. Order matters: the n1co link is minted first (a
+// failure leaves the donor on Wompi with nothing changed), then the Wompi link is
+// deactivated, then a Wompi payment that landed in between keeps the intent on
+// Wompi, and only then does the one-way CAS move the intent to n1co. A payment
+// through the abandoned provider after that is quarantined by the binding resolver.
+async function handleDonationIntentN1co(ctx: ApiRouteContext): Promise<Response> {
+  const rejected = rejectUnsafePublicJsonMutation(ctx.request, ctx.url);
+  if (rejected) return rejected;
+  assertDeploymentCanCollectPayments(ctx.env);
+  if (!isN1coAvailable(ctx.env)) {
+    return jsonResponse(
+      { error: "n1co_unavailable", message: "La entrega con n1co no está disponible en este momento." },
+      { status: 503 }
+    );
+  }
+  const clientIp = clientIpFrom(ctx.request);
+  const rateLimitClaimId = await ctx.repo.claimDonationDatosRateLimit(
+    await rateLimitKey(clientIp),
+    nowIso(),
+    intentThrottleSinceIso(),
+    intentThrottleExpiresIso(),
+    INTENT_THROTTLE_LIMIT
+  );
+  if (!rateLimitClaimId) {
+    return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
+  }
+  const intent = await ctx.repo.getDonationIntent(ctx.params[0]);
+  if (!intent) {
+    return jsonResponse({ error: "intent_not_found" }, { status: 404 });
+  }
+  const unavailable = () => jsonResponse(
+    { error: "intent_n1co_unavailable", message: "Esta entrega ya no puede continuar con n1co. Inicie una nueva entrega." },
+    { status: 409 }
+  );
+  // Idempotent for a double click or a browser back-and-forward.
+  if (intent.payment_provider === "N1CO") {
+    return intent.paid_at == null && intent.status === "LINK_CREATED" && intent.n1co_payment_link_url
+      ? jsonResponse({ paymentLinkUrl: intent.n1co_payment_link_url })
+      : unavailable();
+  }
+  if (
+    intent.status !== "LINK_CREATED"
+    || intent.paid_at != null
+    || !intent.donor_document
+    || intent.wompi_id_enlace === null
+    || Date.parse(intent.expires_at) <= Date.now()
+  ) {
+    return unavailable();
+  }
+
+  let link;
+  try {
+    link = await new N1coApiService(ctx.env).createCheckoutLink(intent, requireSecret(ctx.env, "APP_ORIGIN"));
+  } catch (error) {
+    logWorkerError(ctx.env, "n1co_link_create_failed", error);
+    return jsonResponse(
+      { error: "n1co_link_failed", message: "No se pudo preparar su entrega con n1co. Puede continuar con Wompi." },
+      { status: 502 }
+    );
+  }
+  const wompi = new WompiApiService(ctx.env);
+  try {
+    await wompi.deactivatePaymentLink(intent);
+    if (!isMockMode(ctx.env)) {
+      const paid = wompiWebhookFromPaymentLink(intent, await wompi.getPaymentLink(intent.wompi_id_enlace));
+      if (paid) {
+        return jsonResponse({ error: "intent_already_paid", message: "Su entrega con Wompi ya fue recibida." }, { status: 409 });
+      }
+    }
+  } catch (error) {
+    logWorkerError(ctx.env, "n1co_switch_wompi_deactivation_failed", error);
+    return jsonResponse(
+      { error: "n1co_link_failed", message: "No se pudo preparar su entrega con n1co. Puede continuar con Wompi." },
+      { status: 502 }
+    );
+  }
+  const switched = await ctx.repo.switchIntentToN1co(intent.id, link, nowIso());
+  if (!switched) {
+    return unavailable();
+  }
+  await ctx.repo.createAudit({
+    action: "DONATION_INTENT_N1CO_SELECTED",
+    entityType: "donation_intent",
+    entityId: intent.id,
+    summary: `El donante eligió n1co para la intención ${intent.id}`,
+    metadata: { n1coOrderId: link.orderId, wompiPaymentLinkId: intent.wompi_id_enlace }
+  });
+  return jsonResponse({ paymentLinkUrl: link.paymentLinkUrl });
+}
+
 async function handleDonationIntentStatus(ctx: ApiRouteContext): Promise<Response> {
   const intent = await ctx.repo.getDonationIntent(ctx.params[0]);
   if (!intent) {
     // Enumeration-safe: unknown ids get the same shape a foreign id would.
     return jsonResponse({ error: "intent_not_found" }, { status: 404 });
+  }
+  // A donor returning from n1co should not depend on n1co's few-second webhook
+  // retries: an unpaid n1co intent is looked up at most once per recheck interval.
+  if (intent.payment_provider === "N1CO" && intent.paid_at == null && !isMockMode(ctx.env)) {
+    try {
+      await syncN1coOrder(ctx.env, ctx.repo, new N1coApiService(ctx.env), intent, "status_poll", N1CO_STATUS_POLL_RECHECK_MS);
+      const refreshed = await ctx.repo.getDonationIntent(intent.id);
+      if (refreshed) {
+        return jsonResponse({ status: refreshed.status, paid: refreshed.paid_at != null });
+      }
+    } catch (error) {
+      logWorkerError(ctx.env, "n1co_status_sync_failed", error);
+    }
   }
   // status stays for backward compatibility (COMPLETED = CDE accepted by MH). paid
   // reflects the payment marker (paid_at), so the donor's wizard can show "thanks" the
@@ -3558,6 +3826,7 @@ const publicRoutes: Array<Route<ApiRouteContext>> = [
   { method: "POST", pattern: "/api/donations/intent", handler: handleCreateDonationIntent },
   { method: "POST", pattern: /^\/api\/donations\/intent\/([^/]+)\/datos$/, handler: handleDonationIntentDatos },
   { method: "GET", pattern: /^\/api\/donations\/intent\/([^/]+)\/status$/, handler: handleDonationIntentStatus },
+  { method: "POST", pattern: /^\/api\/donations\/intent\/([^/]+)\/n1co$/, handler: handleDonationIntentN1co },
   { method: "POST", pattern: "/api/donations/stripe/checkout", handler: handleCreateStripeCheckout },
   { method: "GET", pattern: /^\/api\/donations\/stripe\/session\/([^/]+)$/, handler: handleStripeCheckoutStatus },
   { method: "POST", pattern: "/api/donations/stripe/portal", handler: handleStripePortal }
