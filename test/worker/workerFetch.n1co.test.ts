@@ -471,6 +471,132 @@ describe("n1co secondary provider", () => {
     });
   });
 
+  describe("gifts above Wompi's merchant cap", () => {
+    const createRequest = (amount: string) => new Request("https://donar.example.org/api/donations/intent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "cf-connecting-ip": "203.0.113.7" },
+      body: JSON.stringify({
+        amount,
+        giftType: "DIEZMO",
+        donorDocumentType: "13",
+        donorDocument: "10000001-9",
+        departamento: "06",
+        municipio: "23",
+        distrito: "14"
+      })
+    });
+    const onlyRow = () => h.database.prepare("SELECT * FROM donation_intents").get() as Record<string, unknown>;
+
+    it("goes straight to n1co without minting a Wompi link, then receipts the paid order", async () => {
+      const fetchSpy = stubFetch(n1coCreate);
+
+      const response = await worker.fetch(createRequest("1500.00"), await realModeEnv(h));
+
+      expect(response.status).toBe(201);
+      const created = await response.json() as Record<string, unknown>;
+      expect(created).toMatchObject({
+        urlEnlace: null,
+        urlEnlaceLargo: null,
+        n1coAvailable: true,
+        paymentProvider: "N1CO"
+      });
+      expect(fetchSpy.mock.calls.map(([url]) => String(url))).toEqual([
+        "https://api-pay-sandbox.n1co.shop/api/paymentlink/checkout"
+      ]);
+      const row = onlyRow();
+      expect(row).toMatchObject({
+        id: created.intentId,
+        status: "LINK_CREATED",
+        amount_cents: 150000,
+        payment_provider: "N1CO",
+        n1co_order_id: ORDER.orderId,
+        n1co_order_code: ORDER.orderCode,
+        n1co_payment_link_url: ORDER.paymentLinkUrl,
+        wompi_id_enlace: null,
+        wompi_url_enlace: null
+      });
+
+      // The dock's switch call hands back the same link without another mint.
+      fetchSpy.mockClear();
+      const chosen = await worker.fetch(switchRequest(String(created.intentId)), await realModeEnv(h));
+      await expect(chosen.json()).resolves.toEqual({ paymentLinkUrl: ORDER.paymentLinkUrl });
+      expect(fetchSpy).not.toHaveBeenCalled();
+
+      fetchSpy.mockRestore();
+      const intentId = String(created.intentId);
+      stubFetch(n1coOrder(paidOrder({ orderReference: intentId, total: 1500 })));
+      const delivered = await worker.fetch(
+        await webhookRequest(successEvent({ orderReference: intentId })),
+        await realModeEnv(h)
+      );
+      expect(delivered.status).toBe(200);
+      expect(h.queued).toHaveLength(1);
+      expect(onlyRow().paid_at).not.toBeNull();
+    });
+
+    it("keeps a gift at the cap on Wompi", async () => {
+      const fetchSpy = stubFetch(
+        wompiToken,
+        (url, init) => url === "https://api.wompi.sv/EnlacePago" && init?.method === "POST"
+          ? json({ idEnlace: 987654, urlEnlace: "https://s.wompi.sv/abc", urlEnlaceLargo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=abc" })
+          : undefined,
+        (url) => url.startsWith("https://api.wompi.sv/") ? json({}) : undefined
+      );
+
+      const response = await worker.fetch(createRequest("1000.00"), await realModeEnv(h));
+
+      expect(response.status).toBe(201);
+      await expect(response.json()).resolves.toMatchObject({ urlEnlace: "https://s.wompi.sv/abc", paymentProvider: "WOMPI" });
+      expect(onlyRow()).toMatchObject({ payment_provider: "WOMPI", wompi_id_enlace: 987654, n1co_order_id: null });
+      expect(fetchSpy.mock.calls.map(([url]) => String(url))).not.toContain(
+        "https://api-pay-sandbox.n1co.shop/api/paymentlink/checkout"
+      );
+    });
+
+    it("refuses a gift above the cap when n1co is not configured", async () => {
+      const fetchSpy = stubFetch();
+
+      const response = await worker.fetch(
+        createRequest("1000.01"),
+        await realModeEnv(h, { N1CO_CHECKOUT_SECRET_KEY: undefined })
+      );
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({
+        error: "invalid_amount",
+        message: "El monto debe estar entre $1.00 y $1,000.00."
+      });
+      expect(h.database.prepare("SELECT COUNT(*) AS n FROM donation_intents").get()).toEqual({ n: 0 });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it("accepts up to n1co's $20,000 and no more", async () => {
+      stubFetch(n1coCreate);
+
+      expect((await worker.fetch(createRequest("20000.00"), await realModeEnv(h))).status).toBe(201);
+      const over = await worker.fetch(createRequest("20000.01"), await realModeEnv(h));
+      expect(over.status).toBe(400);
+      await expect(over.json()).resolves.toEqual({
+        error: "invalid_amount",
+        message: "El monto debe estar entre $1.00 y $20,000.00."
+      });
+    });
+
+    it("keeps the Wompi-only draft create within the cap", async () => {
+      const response = await worker.fetch(new Request("https://donar.example.org/api/donations/intent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "cf-connecting-ip": "203.0.113.7" },
+        body: JSON.stringify({ amount: "1500.00", giftType: "DIEZMO" })
+      }), h.env());
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({
+        error: "invalid_amount",
+        message: "El monto debe estar entre $1.00 y $1,000.00."
+      });
+    });
+  });
+
   it("advertises n1co on the datos response only when it is configured", async () => {
     const datos = async (values: Partial<Env>) => {
       h.database.exec("DELETE FROM donation_intents");

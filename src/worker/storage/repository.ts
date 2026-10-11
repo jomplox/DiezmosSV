@@ -61,6 +61,7 @@ import {
   INTENT_RECONCILIATION_SWEEP_LIMIT as DONATION_INTENT_RECONCILIATION_SWEEP_LIMIT,
   applyIntentDatosWithCapability as applyIntentDatosWithCapabilityRepository,
   attachIntentLink as attachIntentLinkRepository,
+  attachIntentN1coLink as attachIntentN1coLinkRepository,
   completeIntentForPostAcceptOwner as completeIntentForPostAcceptOwnerRepository,
   createDonationIntent as createDonationIntentRepository,
   expireDonationIntentsByIds as expireDonationIntentsByIdsRepository,
@@ -1003,6 +1004,14 @@ export class Repository {
 
   async attachIntentLink(id: string, link: WompiPaymentLink): Promise<void> {
     return attachIntentLinkRepository(this.db, id, link);
+  }
+
+  async attachIntentN1coLink(
+    id: string,
+    link: { orderId: number; orderCode: string; paymentLinkUrl: string },
+    now: string
+  ): Promise<boolean> {
+    return attachIntentN1coLinkRepository(this.db, id, link, now);
   }
 
   async applyIntentDatosWithCapability(

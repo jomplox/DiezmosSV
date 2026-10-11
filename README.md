@@ -714,6 +714,14 @@ same CDE: n1co never issues a DTE of its own.
 The option is offered only when the Worker has both `N1CO_CHECKOUT_SECRET_KEY` and
 `N1CO_WEBHOOK_SECRET` (or runs with `MOCK_EXTERNAL_SERVICES = "true"`). Omit both to hide it.
 
+**Gifts above Wompi's limit.** Wompi's merchant limit is $1,000.00 per transaction
+(`WOMPI_MAX_AMOUNT_CENTS` in `src/worker/services/donations.ts`); n1co allows up to $20,000.00, the SV
+maximum. A full create above $1,000.00 mints no Wompi link at all: the intent is born on n1co and
+Paso 3 shows only the n1co option, under "Para entregas mayores a $1,000.00, complete su entrega de
+forma segura con n1co." Without n1co configured, such an amount is refused at intake with
+`400 invalid_amount` ($1.00–$1,000.00). The draft create always mints Wompi, so it keeps the $1,000.00
+limit.
+
 **Switching an intent.** `POST /api/donations/intent/{id}/n1co` mints an n1co CheckoutLink for the
 exact intent amount (`orderReference` = the intent id; success returns to `/donar/gracias`, cancel to
 `/donar?ruta=sv`; the link expires with the intent, within 5–60 minutes). Only then does it

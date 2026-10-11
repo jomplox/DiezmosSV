@@ -518,9 +518,9 @@ describe("donation intents", () => {
     expect(db.donationIntents).toHaveLength(0);
   });
 
-  it("rejects an amount above the five-thousand-dollar maximum", async () => {
+  it("rejects an amount above the twenty-thousand-dollar maximum", async () => {
     const db = new InMemoryD1();
-    const response = await worker.fetch(intentRequest(validIntentBody({ amount: "5000.01" })), env(db));
+    const response = await worker.fetch(intentRequest(validIntentBody({ amount: "20000.01" })), env(db));
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({ error: "invalid_amount" });
@@ -732,6 +732,7 @@ describe("donation intents", () => {
         intentId: payload.intentId,
         urlEnlace: "https://s.wompi.sv/1234568xY-",
         urlEnlaceLargo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=synthetic-link",
+        paymentProvider: "WOMPI",
         // No n1co secrets in this environment, so the alternative is not offered.
         n1coAvailable: false
       });
@@ -1300,7 +1301,7 @@ describe("donation intents", () => {
       expect(response.status).toBe(400);
       await expect(response.json()).resolves.toEqual({
         error: "invalid_amount",
-        message: "El monto debe estar entre $1.00 y $5,000.00."
+        message: "El monto debe estar entre $1.00 y $20,000.00."
       });
       expect(db.donationIntents).toHaveLength(0);
     });
@@ -1449,6 +1450,7 @@ describe("donation intents", () => {
         intentId: "di_draft_1",
         urlEnlace: "https://mock.wompi.sv/enlace/di_draft_1",
         urlEnlaceLargo: "https://mock.wompi.sv/enlace-largo/di_draft_1",
+        paymentProvider: "WOMPI",
         n1coAvailable: true
       });
       // No outbound HTTP: datos is D1-only.

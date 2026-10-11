@@ -742,6 +742,14 @@ pestaña. Ambos carriles terminan en el mismo CDE: n1co nunca emite un DTE propi
 La opción solo se ofrece cuando el Worker tiene `N1CO_CHECKOUT_SECRET_KEY` y `N1CO_WEBHOOK_SECRET`
 (o corre con `MOCK_EXTERNAL_SERVICES = "true"`). Omita ambos para ocultarla.
 
+**Entregas sobre el límite de Wompi.** El límite comercial de Wompi es de $1,000.00 por transacción
+(`WOMPI_MAX_AMOUNT_CENTS` en `src/worker/services/donations.ts`); n1co permite hasta $20,000.00, el
+máximo de la puerta SV. Una creación completa por más de $1,000.00 no genera ningún enlace de Wompi: el
+intento nace en n1co y el Paso 3 muestra solo la opción n1co, bajo "Para entregas mayores a $1,000.00,
+complete su entrega de forma segura con n1co." Sin n1co configurado, ese monto se rechaza al ingresar
+con `400 invalid_amount` ($1.00–$1,000.00). La creación en borrador siempre genera Wompi, por lo que
+mantiene el límite de $1,000.00.
+
 **Cambio de un intento.** `POST /api/donations/intent/{id}/n1co` genera un CheckoutLink de n1co por el
 monto exacto del intento (`orderReference` = el id del intento; el éxito regresa a `/donar/gracias` y la
 cancelación a `/donar?ruta=sv`; el enlace vence con el intento, entre 5 y 60 minutos). Solo entonces
