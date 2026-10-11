@@ -422,9 +422,9 @@ export async function switchIntentToN1co(
     .prepare(
       `UPDATE donation_intents
           SET payment_provider = 'N1CO',
-              n1co_order_id = ?,
-              n1co_order_code = ?,
-              n1co_payment_link_url = ?,
+              n1co_order_id = COALESCE(n1co_order_id, ?),
+              n1co_order_code = COALESCE(n1co_order_code, ?),
+              n1co_payment_link_url = COALESCE(n1co_payment_link_url, ?),
               updated_at = ?
         WHERE id = ?
           AND payment_provider = 'WOMPI'
@@ -436,6 +436,33 @@ export async function switchIntentToN1co(
     )
     .bind(link.orderId, link.orderCode, link.paymentLinkUrl, now, id, now)
     .first<DonationIntentRecord>();
+}
+
+// Stores the n1co order prepared behind a Wompi intent. The intent stays on Wompi:
+// nothing reads this order until switchIntentToN1co makes it the provider, and the
+// switch keeps whichever identity reached the row first.
+export async function prepareIntentN1coLink(
+  db: D1Database,
+  id: string,
+  link: { orderId: number; orderCode: string; paymentLinkUrl: string },
+  now: string
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `UPDATE donation_intents
+          SET n1co_order_id = ?,
+              n1co_order_code = ?,
+              n1co_payment_link_url = ?,
+              updated_at = ?
+        WHERE id = ?
+          AND payment_provider = 'WOMPI'
+          AND paid_at IS NULL
+          AND n1co_order_id IS NULL
+        RETURNING id`
+    )
+    .bind(link.orderId, link.orderCode, link.paymentLinkUrl, now, id)
+    .first<{ id: string }>();
+  return row !== null;
 }
 
 // An intent above Wompi's tope is born on n1co: a fresh PENDING row that never had

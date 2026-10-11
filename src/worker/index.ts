@@ -24,6 +24,8 @@ import {
   clientIpFrom,
   createDonationIntent,
   createDraftDonationIntent,
+  createN1coCheckoutLink,
+  prepareN1coLink,
   IntentDatosError,
   IntentLinkError,
   intentProviderFor,
@@ -1656,6 +1658,15 @@ async function handleCreateDonationIntent(ctx: ApiRouteContext): Promise<Respons
     const created = draft
       ? await createDraftDonationIntent(ctx.env, ctx.repo, input as ReturnType<typeof validateDraftIntentInput>, clientIp, providerClaim.id)
       : await createDonationIntent(ctx.env, ctx.repo, input as ReturnType<typeof validateIntentInput>, clientIp, providerClaim.id);
+    // A Wompi intent gets its n1co order prepared in the background, like the Wompi
+    // premint, so choosing n1co on Paso 3 does not wait for n1co's mint.
+    if ((!("paymentProvider" in created) || created.paymentProvider === "WOMPI") && isN1coAvailable(ctx.env)) {
+      const preparation = prepareN1coLink(ctx.env, ctx.repo, created.intentId).catch((error: unknown) => {
+        logWorkerError(ctx.env, "n1co_link_prepare_failed", error);
+      });
+      if (ctx.executionContext) ctx.executionContext.waitUntil(preparation);
+      else await preparation;
+    }
     return jsonResponse(draft ? created : { ...created, n1coAvailable: isN1coAvailable(ctx.env) }, { status: 201 });
   } catch (error) {
     // The repository deletes only an unattached claim. Once the PENDING parent
@@ -2508,9 +2519,12 @@ async function handleDonationIntentN1co(ctx: ApiRouteContext): Promise<Response>
     return unavailable();
   }
 
+  // The order prepared at create time is reused; without one, it is minted now.
   let link;
   try {
-    link = await new N1coApiService(ctx.env).createCheckoutLink(intent, requireSecret(ctx.env, "APP_ORIGIN"));
+    link = intent.n1co_order_id != null && intent.n1co_order_code && intent.n1co_payment_link_url
+      ? { orderId: intent.n1co_order_id, orderCode: intent.n1co_order_code, paymentLinkUrl: intent.n1co_payment_link_url }
+      : await createN1coCheckoutLink(ctx.env, ctx.repo, intent);
   } catch (error) {
     logWorkerError(ctx.env, "n1co_link_create_failed", error);
     return jsonResponse(
@@ -2534,8 +2548,10 @@ async function handleDonationIntentN1co(ctx: ApiRouteContext): Promise<Response>
       { status: 502 }
     );
   }
+  // The switch keeps an order a racing preparation stored first, so the row, not the
+  // local mint, names the link the donor is sent to.
   const switched = await ctx.repo.switchIntentToN1co(intent.id, link, nowIso());
-  if (!switched) {
+  if (!switched?.n1co_payment_link_url) {
     return unavailable();
   }
   await ctx.repo.createAudit({
@@ -2543,9 +2559,9 @@ async function handleDonationIntentN1co(ctx: ApiRouteContext): Promise<Response>
     entityType: "donation_intent",
     entityId: intent.id,
     summary: `El donante eligió n1co para la intención ${intent.id}`,
-    metadata: { n1coOrderId: link.orderId, wompiPaymentLinkId: intent.wompi_id_enlace }
+    metadata: { n1coOrderId: switched.n1co_order_id ?? null, wompiPaymentLinkId: intent.wompi_id_enlace }
   });
-  return jsonResponse({ paymentLinkUrl: link.paymentLinkUrl });
+  return jsonResponse({ paymentLinkUrl: switched.n1co_payment_link_url });
 }
 
 async function handleDonationIntentStatus(ctx: ApiRouteContext): Promise<Response> {

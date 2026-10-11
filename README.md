@@ -722,6 +722,15 @@ forma segura con n1co." Without n1co configured, such an amount is refused at in
 `400 invalid_amount` ($1.00–$1,000.00). The draft create always mints Wompi, so it keeps the $1,000.00
 limit.
 
+**Prepared n1co order.** Each Wompi intent also gets its n1co order minted in the background
+(`prepareN1coLink`, run through `waitUntil`), the way the Wompi link is preminted, so choosing n1co
+only deactivates Wompi and switches the provider. The prepared order is stored on the row but never
+reaches the donor: the webhook, the payment binding and reconciliation ignore it until the switch, and
+it expires with the intent. If preparation fails, the switch mints on demand; if both race, the switch
+keeps the order already stored. The cost is one unpaid n1co order per SV gift in n1co's dashboard. n1co's
+API takes no buyer fields, so the donor's name, email and phone cannot be prefilled; the gift travels as
+one line item named "Diezmo" or "Ofrenda", with the donor logo as its image when one is uploaded.
+
 **Switching an intent.** `POST /api/donations/intent/{id}/n1co` mints an n1co CheckoutLink for the
 exact intent amount (`orderReference` = the intent id; success returns to `/donar/gracias`, cancel to
 `/donar?ruta=sv`; the link expires with the intent, within 5–60 minutes). Only then does it
