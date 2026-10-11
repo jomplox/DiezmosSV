@@ -4184,6 +4184,30 @@ pre {
   transform: none;
 }
 
+/* Beside the wide Wompi form, the n1co card gets more presence than the phone dock. */
+@media (min-width: 520px) {
+  .donar-provider-choice-n1co {
+    width: min(100%, 520px);
+    min-height: 64px;
+    grid-template-columns: 42px 1fr auto;
+    gap: 14px;
+    padding: 10px 18px;
+  }
+
+  .donar-provider-choice-n1co img {
+    width: 42px;
+    height: 42px;
+  }
+
+  .donar-provider-choice-n1co .donar-provider-choice-copy strong {
+    font-size: 16px;
+  }
+
+  .donar-provider-choice-n1co .donar-provider-choice-copy small {
+    font-size: 12px;
+  }
+}
+
 .donar-provider-stripe-mark {
   display: grid;
   place-items: center;
