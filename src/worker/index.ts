@@ -26,6 +26,7 @@ import {
   createDraftDonationIntent,
   IntentDatosError,
   IntentLinkError,
+  intentProviderFor,
   intentThrottleSinceIso,
   IntentValidationError,
   INTENT_THROTTLE_LIMIT,
@@ -1621,6 +1622,9 @@ async function handleCreateDonationIntent(ctx: ApiRouteContext): Promise<Respons
   let input;
   try {
     input = draft ? validateDraftIntentInput(body) : validateIntentInput(body);
+    if (!draft) {
+      intentProviderFor(input.amountCents, isN1coAvailable(ctx.env));
+    }
   } catch (error) {
     if (error instanceof IntentValidationError) {
       return jsonResponse({ error: error.code, message: error.message }, { status: 400 });
@@ -1629,6 +1633,8 @@ async function handleCreateDonationIntent(ctx: ApiRouteContext): Promise<Respons
   }
   const claimNow = nowIso();
   const clientKeys = await providerCreationClientKeys(clientIp);
+  // One SV-door budget whichever provider mints the link (the claims table knows
+  // WOMPI and STRIPE only).
   const providerClaim = await ctx.repo.claimProviderCreationBudget({
     provider: "WOMPI",
     ...clientKeys,
@@ -1657,6 +1663,10 @@ async function handleCreateDonationIntent(ctx: ApiRouteContext): Promise<Respons
     await ctx.repo.releaseUnusedProviderCreationClaim(providerClaim.id);
     if (error instanceof IntentLinkError) {
       // Intent stays PENDING and expires harmlessly on the cron sweep.
+      if (error.provider === "N1CO") {
+        logWorkerError(ctx.env, "n1co_link_create_failed", error.cause ?? error);
+        return jsonResponse({ error: "n1co_link_failed", message: "No se pudo preparar su entrega con n1co. Intente de nuevo en unos minutos." }, { status: 502 });
+      }
       logWorkerError(ctx.env, "wompi_link_create_failed", error.cause ?? error);
       return jsonResponse({ error: "wompi_link_failed", message: "No se pudo preparar su entrega con Wompi. Intente de nuevo en unos minutos." }, { status: 502 });
     }

@@ -259,8 +259,10 @@ type DonarStep = 1 | 2 | 3;
 
 interface DonarIntent {
   intentId: string;
-  urlEnlace: string;
-  urlEnlaceLargo: string;
+  // Null when the gift is above Wompi's tope and the intent was born on n1co.
+  urlEnlace: string | null;
+  urlEnlaceLargo: string | null;
+  paymentProvider?: "WOMPI" | "N1CO";
   // The server offers n1co only when it can both mint the link and verify its webhook.
   n1coAvailable?: boolean;
 }
@@ -1544,6 +1546,12 @@ export function DonarPage() {
 
             {stage === "widget" && intent && (
               <div className="donar-handoff">
+                {/* Above Wompi's tope the server mints only an n1co link: no Wompi form
+                    is shown that would decline the gift, and the dock is the way on. */}
+                {intent.paymentProvider === "N1CO" ? (
+                  <p className="donar-intro">Para entregas mayores a $1,000.00, complete su entrega de forma segura con n1co.</p>
+                ) : (
+                <>
                 <p className="donar-intro">Complete su entrega de forma segura con Wompi. Al finalizar, verá aquí la confirmación.</p>
                 {/* The iframe stays mounted for the WHOLE widget stage. Wompi posts
                     { message: "close" } both when the donor backs out and when it hands
@@ -1566,14 +1574,16 @@ export function DonarPage() {
                 )}
                 <iframe
                   className="donar-hosted-surface donar-embed"
-                  src={widgetUrlFrom(intent.urlEnlaceLargo)}
+                  src={widgetUrlFrom(intent.urlEnlaceLargo ?? "")}
                   title="Entrega segura con Wompi"
                   style={embedHeight ? { height: embedHeight } : undefined}
                   onLoad={() => setHandoff((current) => (current === "verifying" ? current : "ready"))}
                 />
-                <a className="link-button donar-wompi-hint" href={intent.urlEnlace}>
+                <a className="link-button donar-wompi-hint" href={intent.urlEnlace ?? undefined}>
                   ¿Problemas con el formulario? Continúe aquí
                 </a>
+                </>
+                )}
                 {n1coError && <p className="auth-notice" role="alert">{n1coError}</p>}
                 {/* Second-class alternative for donors already in the n1co ecosystem,
                     shaped like the U.S. Givebutter dock. Wompi stays the default form. */}

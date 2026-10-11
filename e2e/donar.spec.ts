@@ -791,6 +791,66 @@ test("offers n1co as a quiet alternative beneath the default Wompi form", async 
   expect(errors).toEqual([]);
 });
 
+test("hands a gift above Wompi's tope to n1co alone", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.route("https://pay-sandbox.n1co.shop/**", (route) => route.fulfill({
+    contentType: "text/html",
+    body: "<html><body>mock n1co hosted flow</body></html>"
+  }));
+  // Stubbed like the dock spec above; the server side is covered by workerFetch.n1co.
+  const intentBodies: { amount?: string }[] = [];
+  await page.route("**/api/donations/intent", (route) => {
+    intentBodies.push(route.request().postDataJSON());
+    return route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        intentId: "di_e2e_n1co_only",
+        urlEnlace: null,
+        urlEnlaceLargo: null,
+        paymentProvider: "N1CO",
+        n1coAvailable: true
+      })
+    });
+  });
+  await page.route("**/api/donations/intent/di_e2e_n1co_only/status", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({ status: "LINK_CREATED", paid: false })
+  }));
+  await page.route("**/api/donations/intent/di_e2e_n1co_only/n1co", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({ paymentLinkUrl: "https://pay-sandbox.n1co.shop/mock-e2e-only" })
+  }));
+
+  await page.goto("/donar?ruta=sv");
+  await page.getByLabel("Monto").fill("1500");
+  await page.getByRole("button", { name: "Continuar", exact: true }).click();
+  await page.getByLabel("Número de documento").fill(DONOR.dui);
+  await page.getByLabel("Departamento").selectOption({ label: "San Salvador" });
+  await page.getByLabel("Municipio").selectOption({ index: 1 });
+  await page.getByLabel("Distrito").selectOption({ index: 1 });
+  await page.getByRole("button", { name: "Continuar con su diezmo" }).click();
+
+  await expect(page.getByText("Para entregas mayores a $1,000.00, complete su entrega de forma segura con n1co.")).toBeVisible();
+  await expect(page.locator("iframe.donar-embed")).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "¿Problemas con el formulario? Continúe aquí" })).toHaveCount(0);
+  await expect(page.locator('.donar-widget-loading[role="status"]')).toHaveCount(0);
+  const choice = page.getByRole("button", { name: /^Diezmar con n1co/ });
+  await expect(choice).toBeVisible();
+  for (const [width, height] of [[671, 944], [320, 700]]) {
+    await page.setViewportSize({ width, height });
+    await expect(choice).toBeInViewport();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
+  }
+  await page.screenshot({ path: testInfo.outputPath("sv-n1co-only-mobile.png"), animations: "disabled" });
+
+  await choice.click();
+  await page.waitForURL("https://pay-sandbox.n1co.shop/mock-e2e-only");
+  expect(intentBodies.map((body) => body.amount)).toEqual(["1500"]);
+  expect(errors).toEqual([]);
+});
+
 test("a delayed Wompi frame keeps one stable loader and only the quiet escape hatch", async ({ page }) => {
   const wompiDelay = await delayRoute(page, "https://mock.wompi.sv/**", {
     status: 200,

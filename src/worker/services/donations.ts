@@ -7,17 +7,22 @@ import {
 } from "../../shared/catalogs";
 import { formatDui, isValidDui } from "../../shared/dui";
 import { formatNit, isValidNitFormat } from "../../shared/nit";
-import type { DonationGiftType, DonationIntentDocumentType, DonationIntentRecord, Env } from "../types";
+import { requireSecret } from "../config";
+import type { DonationGiftType, DonationIntentDocumentType, DonationPaymentProvider, DonationIntentRecord, Env } from "../types";
 import { addHours, nowIso } from "../utils/dates";
 import { base64UrlFromBytes, sha256Hex, utf8Bytes } from "../utils/encoding";
 import { newId } from "../utils/ids";
 import { Repository } from "../storage/repository";
+import { N1coApiError, N1coApiService } from "./n1coApi";
 import { WompiApiError, WompiApiService } from "./wompiApi";
 
 // Public donor-checkout limits. Amounts arrive as dollars (string or number) and
 // are stored as integer cents; the DTE side already rounds the same way.
 const MIN_AMOUNT_CENTS = 100; // $1.00
-const MAX_AMOUNT_CENTS = 500_000; // $5,000.00
+const MAX_AMOUNT_CENTS = 2_000_000; // $20,000.00, n1co's merchant limit
+// Wompi's merchant tope (account config, not an API limit). A larger SV gift goes
+// straight to n1co; without n1co it is refused at intake, never left to fail on Wompi.
+export const WOMPI_MAX_AMOUNT_CENTS = 100_000; // $1,000.00
 const MAX_FREE_DOCUMENT = 20;
 const MIN_IDENTITY_DOCUMENT = 5; // pasaporte (03) / carnet de residente (02)
 const MAX_IDENTITY_DOCUMENT = 20;
@@ -121,9 +126,25 @@ function parseAmountCents(value: unknown): number {
   }
   const cents = Math.round(amount * 100);
   if (cents < MIN_AMOUNT_CENTS || cents > MAX_AMOUNT_CENTS) {
-    throw new IntentValidationError("invalid_amount", "El monto debe estar entre $1.00 y $5,000.00.");
+    throw amountRangeError(MAX_AMOUNT_CENTS);
   }
   return cents;
+}
+
+function amountRangeError(maxCents: number): IntentValidationError {
+  const max = (maxCents / 100).toLocaleString("en-US", { minimumFractionDigits: 2 });
+  return new IntentValidationError("invalid_amount", `El monto debe estar entre $1.00 y $${max}.`);
+}
+
+// Which provider receives a full create: Wompi up to its tope, n1co above it.
+export function intentProviderFor(amountCents: number, n1coAvailable: boolean): DonationPaymentProvider {
+  if (amountCents <= WOMPI_MAX_AMOUNT_CENTS) {
+    return "WOMPI";
+  }
+  if (!n1coAvailable) {
+    throw amountRangeError(WOMPI_MAX_AMOUNT_CENTS);
+  }
+  return "N1CO";
 }
 
 function requireString(value: unknown): string {
@@ -146,9 +167,14 @@ function parseGiftType(value: unknown): DonationGiftType | null {
 // A draft body (background link mint on Paso 1→2): only amount + optional gift type.
 // The donor data is attached later by /datos, so it is neither present nor validated
 // here. Amount validation and the gift-type rule are IDENTICAL to the full create.
+// A draft always mints a Wompi link, so it stays within Wompi's tope.
 export function validateDraftIntentInput(body: Record<string, unknown>): ValidatedDraftIntentInput {
+  const amountCents = parseAmountCents(body.amount);
+  if (amountCents > WOMPI_MAX_AMOUNT_CENTS) {
+    throw amountRangeError(WOMPI_MAX_AMOUNT_CENTS);
+  }
   return {
-    amountCents: parseAmountCents(body.amount),
+    amountCents,
     giftType: parseGiftType(body.giftType)
   };
 }
@@ -374,8 +400,10 @@ export function clientIpFrom(request: Request): string {
 
 export interface CreatedIntent {
   intentId: string;
-  urlEnlace: string;
-  urlEnlaceLargo: string;
+  // Null for an n1co intent: no Wompi link is minted above Wompi's tope.
+  urlEnlace: string | null;
+  urlEnlaceLargo: string | null;
+  paymentProvider: DonationPaymentProvider;
 }
 
 export interface CreatedDraftIntent {
@@ -383,13 +411,16 @@ export interface CreatedDraftIntent {
   datosToken: string;
 }
 
-// Signals that the Wompi API rejected link creation; the route maps this to a 502
+// Signals that the provider rejected link creation; the route maps this to a 502
 // and leaves the intent PENDING (it expires harmlessly on the cron sweep).
 export class IntentLinkError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
+  constructor(message: string, options?: ErrorOptions & { provider?: DonationPaymentProvider }) {
     super(message, options);
     this.name = "IntentLinkError";
+    this.provider = options?.provider ?? "WOMPI";
   }
+
+  readonly provider: DonationPaymentProvider;
 }
 
 // The default document type for a DRAFT intent. donor_document_type stays NOT NULL
@@ -428,8 +459,41 @@ async function mintLinkForIntent(env: Env, repo: Repository, intent: DonationInt
   return {
     intentId: intent.id,
     urlEnlace: link.urlEnlace,
-    urlEnlaceLargo: link.urlEnlaceLargo
+    urlEnlaceLargo: link.urlEnlaceLargo,
+    paymentProvider: "WOMPI"
   };
+}
+
+// Above Wompi's tope the intent is born on n1co: its checkout link is minted and
+// attached directly, and no Wompi link ever exists for a late payment to reach.
+async function mintN1coLinkForIntent(env: Env, repo: Repository, intent: DonationIntentRecord): Promise<CreatedIntent> {
+  let link;
+  try {
+    link = await new N1coApiService(env).createCheckoutLink(intent, requireSecret(env, "APP_ORIGIN"));
+  } catch (error) {
+    if (error instanceof N1coApiError) {
+      throw new IntentLinkError(error.message, { cause: error, provider: "N1CO" });
+    }
+    throw error;
+  }
+
+  if (!(await repo.attachIntentN1coLink(intent.id, link, nowIso()))) {
+    throw new Error(`Donation intent ${intent.id} could not take its n1co link`);
+  }
+  await repo.createAudit({
+    action: "DONATION_INTENT_CREATED",
+    entityType: "donation_intent",
+    entityId: intent.id,
+    summary: `Intención de donación por ${(intent.amount_cents / 100).toFixed(2)} USD`,
+    metadata: {
+      amountCents: intent.amount_cents,
+      donorDocumentType: intent.donor_document_type,
+      paymentProvider: "N1CO",
+      n1coOrderId: link.orderId
+    }
+  });
+
+  return { intentId: intent.id, urlEnlace: null, urlEnlaceLargo: null, paymentProvider: "N1CO" };
 }
 
 // Orchestrates one full intent: persist PENDING with the donor's fiscal data, mint the
@@ -465,7 +529,9 @@ export async function createDonationIntent(
     providerCreationClaimId
   });
 
-  return mintLinkForIntent(env, repo, intent);
+  return input.amountCents > WOMPI_MAX_AMOUNT_CENTS
+    ? mintN1coLinkForIntent(env, repo, intent)
+    : mintLinkForIntent(env, repo, intent);
 }
 
 // Orchestrates a DRAFT intent: persist PENDING with amount + gift type only (donor
@@ -550,6 +616,7 @@ export async function applyIntentDatos(
   return {
     intentId: completed.id,
     urlEnlace: completed.urlEnlace,
-    urlEnlaceLargo: completed.urlEnlaceLargo
+    urlEnlaceLargo: completed.urlEnlaceLargo,
+    paymentProvider: "WOMPI"
   };
 }

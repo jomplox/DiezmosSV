@@ -438,6 +438,34 @@ export async function switchIntentToN1co(
     .first<DonationIntentRecord>();
 }
 
+// An intent above Wompi's tope is born on n1co: a fresh PENDING row that never had
+// a Wompi link takes its n1co order identity and becomes LINK_CREATED in one step.
+export async function attachIntentN1coLink(
+  db: D1Database,
+  id: string,
+  link: { orderId: number; orderCode: string; paymentLinkUrl: string },
+  now: string
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `UPDATE donation_intents
+          SET payment_provider = 'N1CO',
+              n1co_order_id = ?,
+              n1co_order_code = ?,
+              n1co_payment_link_url = ?,
+              status = 'LINK_CREATED',
+              updated_at = ?
+        WHERE id = ?
+          AND status = 'PENDING'
+          AND payment_provider = 'WOMPI'
+          AND wompi_id_enlace IS NULL
+        RETURNING id`
+    )
+    .bind(link.orderId, link.orderCode, link.paymentLinkUrl, now, id)
+    .first<{ id: string }>();
+  return row !== null;
+}
+
 export async function markN1coIntentPaid(
   db: D1Database,
   id: string,

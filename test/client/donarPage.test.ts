@@ -880,7 +880,7 @@ describe("donar wizard source contract", () => {
     // it directly keeps the donor inside the wizard: no popup, no overlay.
     expect(donarSource).toContain("<iframe");
     expect(donarSource).toContain('className="donar-hosted-surface donar-embed"');
-    expect(donarSource).toContain("src={widgetUrlFrom(intent.urlEnlaceLargo)}");
+    expect(donarSource).toContain("src={widgetUrlFrom(intent.urlEnlaceLargo ?? \"\")}");
     expect(stylesSource).toContain(".donar-embed");
   });
 
@@ -1259,6 +1259,23 @@ describe("donar n1co alternative", () => {
       svEntrega.indexOf('className="donar-hosted-surface donar-embed"')
     );
     expect(donarSource.match(/className="donar-hosted-surface donar-embed"/g) ?? []).toHaveLength(1);
+  });
+
+  it("hands a gift above Wompi's tope to n1co alone, with no Wompi form to fail on", () => {
+    expect(donarSource).toMatch(/interface DonarIntent \{[^}]*urlEnlace: string \| null;[^}]*urlEnlaceLargo: string \| null;/);
+    expect(donarSource).toMatch(/interface DonarIntent \{[^}]*paymentProvider\?: "WOMPI" \| "N1CO";/);
+    const n1coOnly = svEntrega.slice(svEntrega.indexOf('intent.paymentProvider === "N1CO" ? ('));
+    expect(n1coOnly.length).toBeLessThan(svEntrega.length);
+    const n1coBranch = n1coOnly.slice(0, n1coOnly.indexOf(") : ("));
+    expect(n1coBranch).toContain("Para entregas mayores a $1,000.00, complete su entrega de forma segura con n1co.");
+    expect(n1coBranch).not.toContain("<iframe");
+    expect(n1coBranch).not.toContain("donar-wompi-hint");
+    // The Wompi form lives only in the other branch, and the dock follows both.
+    const wompiBranch = n1coOnly.slice(n1coOnly.indexOf(") : ("));
+    expect(wompiBranch.indexOf('className="donar-hosted-surface donar-embed"')).toBeGreaterThan(-1);
+    expect(wompiBranch.indexOf("intent.n1coAvailable && (")).toBeGreaterThan(
+      wompiBranch.indexOf('className="donar-hosted-surface donar-embed"')
+    );
   });
 
   it("names the gift and the n1co account in the dock, with the bundled n1co mark", () => {
