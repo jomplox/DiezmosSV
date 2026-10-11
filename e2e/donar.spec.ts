@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page, type Route } from "@playwright/test";
+import { devices, expect, test, type Locator, type Page, type Route } from "@playwright/test";
 import {
   DONAR_VERIFYING_NOTICE_DELAY_MS,
   GIVEBUTTER_RENDER_TIMEOUT_MS
@@ -711,7 +711,8 @@ test("offers n1co as a quiet alternative beneath the default Wompi form", async 
     contentType: "text/html",
     body: "<html><body>mock wompi hosted flow</body></html>"
   }));
-  await page.route("https://pay-sandbox.n1co.shop/**", (route) => route.fulfill({
+  // Context-wide: n1co's page opens in a tab of its own, out of reach of page routes.
+  await page.context().route("https://pay-sandbox.n1co.shop/**", (route) => route.fulfill({
     contentType: "text/html",
     body: "<html><body>mock n1co hosted flow</body></html>"
   }));
@@ -726,9 +727,10 @@ test("offers n1co as a quiet alternative beneath the default Wompi form", async 
       n1coAvailable: true
     })
   }));
+  let paid = false;
   await page.route("**/api/donations/intent/di_e2e_n1co/status", (route) => route.fulfill({
     contentType: "application/json",
-    body: JSON.stringify({ status: "LINK_CREATED", paid: false })
+    body: JSON.stringify({ status: "LINK_CREATED", paid })
   }));
   const switchRequests: { method: string; contentType: string | null }[] = [];
   let switchFails = true;
@@ -787,11 +789,26 @@ test("offers n1co as a quiet alternative beneath the default Wompi form", async 
   await expect(embed).toBeVisible();
   await expect(choice).toBeEnabled();
 
-  // Choosing n1co leaves in the same tab for n1co's hosted page.
+  // On desktop, n1co opens in its own tab (with no handle back to ours) while this
+  // page waits, then moves to thanks on its own once the entrega is received.
   switchFails = false;
+  const opened = page.context().waitForEvent("page");
   await choice.click();
-  await page.waitForURL("https://pay-sandbox.n1co.shop/mock-e2e");
-  await expect(page.getByText("mock n1co hosted flow")).toBeVisible();
+  const n1coTab = await opened;
+  await n1coTab.waitForURL("https://pay-sandbox.n1co.shop/mock-e2e");
+  await expect(n1coTab.getByText("mock n1co hosted flow")).toBeVisible();
+  expect(await n1coTab.evaluate(() => window.opener)).toBeNull();
+  expect(new URL(page.url()).pathname).toBe("/");
+  await expect(page.getByRole("status")).toHaveText(
+    "Complete su entrega en la pestaña de n1co. Al finalizar, verá aquí la confirmación."
+  );
+  await expect(embed).toHaveCount(0);
+  await expect(choice).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "¿No ve la pestaña de n1co? Ábrala aquí" }))
+    .toHaveAttribute("href", "https://pay-sandbox.n1co.shop/mock-e2e");
+  await page.screenshot({ path: testInfo.outputPath("sv-n1co-waiting.png"), animations: "disabled" });
+  paid = true;
+  await expect(page.locator(".donar-thanks")).toBeVisible({ timeout: 15_000 });
   expect(switchRequests).toEqual([
     { method: "POST", contentType: "application/json" },
     { method: "POST", contentType: "application/json" }
@@ -799,7 +816,48 @@ test("offers n1co as a quiet alternative beneath the default Wompi form", async 
   expect(errors).toEqual([]);
 });
 
-test("hands a gift above Wompi's tope to n1co alone", async ({ page }, testInfo) => {
+test("opens Wompi's escape link in a new tab on desktop and waits for the entrega", async ({ page }) => {
+  await page.route("https://mock.wompi.sv/**", (route) => route.fulfill({
+    contentType: "text/html",
+    body: "<html><body>mock wompi hosted flow</body></html>"
+  }));
+  await page.route("**/api/donations/intent", (route) => route.fulfill({
+    status: 201,
+    contentType: "application/json",
+    body: JSON.stringify({
+      intentId: "di_e2e_wompi_tab",
+      urlEnlace: "https://mock.wompi.sv/e2e-tab",
+      urlEnlaceLargo: "https://mock.wompi.sv/e2e-tab/largo",
+      paymentProvider: "WOMPI",
+      n1coAvailable: true
+    })
+  }));
+  let paid = false;
+  await page.route("**/api/donations/intent/di_e2e_wompi_tab/status", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({ status: "LINK_CREATED", paid })
+  }));
+  await enterWompiHandoff(page);
+
+  const opened = page.context().waitForEvent("page");
+  await page.getByRole("link", { name: "¿Problemas con el formulario? Continúe aquí" }).click();
+  const wompiTab = await opened;
+  await expect(wompiTab.getByText("mock wompi hosted flow")).toBeVisible();
+  expect(new URL(page.url()).pathname).toBe("/");
+  await expect(page.getByRole("status")).toHaveText(
+    "Complete su entrega en la pestaña de Wompi. Al finalizar, verá aquí la confirmación."
+  );
+  await expect(page.locator("iframe.donar-embed")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^Diezmar con n1co/ })).toHaveCount(0);
+  paid = true;
+  await expect(page.locator(".donar-thanks")).toBeVisible({ timeout: 15_000 });
+});
+
+test.describe("on a phone", () => {
+  const { defaultBrowserType: _browser, ...phone } = devices["Pixel 7"];
+  test.use(phone);
+
+test("hands a gift above Wompi's tope to n1co alone, in the same tab", async ({ page }, testInfo) => {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.route("https://pay-sandbox.n1co.shop/**", (route) => route.fulfill({
@@ -846,17 +904,17 @@ test("hands a gift above Wompi's tope to n1co alone", async ({ page }, testInfo)
   await expect(page.locator('.donar-widget-loading[role="status"]')).toHaveCount(0);
   const choice = page.getByRole("button", { name: /^Diezmar con n1co/ });
   await expect(choice).toBeVisible();
-  for (const [width, height] of [[671, 944], [320, 700]]) {
-    await page.setViewportSize({ width, height });
-    await expect(choice).toBeInViewport();
-    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
-  }
+  await expect(choice).toBeInViewport();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(page.viewportSize()!.width);
   await page.screenshot({ path: testInfo.outputPath("sv-n1co-only-mobile.png"), animations: "disabled" });
 
+  // A touch device leaves in this tab: no second tab to lose.
   await choice.click();
   await page.waitForURL("https://pay-sandbox.n1co.shop/mock-e2e-only");
+  expect(page.context().pages()).toHaveLength(1);
   expect(intentBodies.map((body) => body.amount)).toEqual(["1500"]);
   expect(errors).toEqual([]);
+});
 });
 
 test("a delayed Wompi frame keeps one stable loader and only the quiet escape hatch", async ({ page }) => {

@@ -1252,7 +1252,7 @@ describe("donar n1co alternative", () => {
 
   it("offers the dock only when the server advertises n1co, below the default Wompi form", () => {
     expect(donarSource).toMatch(/interface DonarIntent \{[^}]*n1coAvailable\?: boolean;/);
-    expect(svEntrega).toContain("intent.n1coAvailable && (");
+    expect(svEntrega).toContain("intent.n1coAvailable && !providerTab && (");
     // Wompi's iframe renders first and unconditionally; the dock never replaces it.
     expect(svEntrega.indexOf('className="donar-hosted-surface donar-embed"')).toBeGreaterThan(-1);
     expect(svEntrega.indexOf("donar-provider-dock")).toBeGreaterThan(
@@ -1273,7 +1273,7 @@ describe("donar n1co alternative", () => {
     // The Wompi form lives only in the other branch, and the dock follows both.
     const wompiBranch = n1coOnly.slice(n1coOnly.indexOf(") : ("));
     expect(wompiBranch.indexOf('className="donar-hosted-surface donar-embed"')).toBeGreaterThan(-1);
-    expect(wompiBranch.indexOf("intent.n1coAvailable && (")).toBeGreaterThan(
+    expect(wompiBranch.indexOf("intent.n1coAvailable && !providerTab && (")).toBeGreaterThan(
       wompiBranch.indexOf('className="donar-hosted-surface donar-embed"')
     );
   });
@@ -1287,13 +1287,45 @@ describe("donar n1co alternative", () => {
     expect(stylesSource).toMatch(/\.donar-provider-choice-n1co img\s*\{[^}]*background:\s*#000000;/);
   });
 
-  it("switches the intent server-side, then leaves in the same tab for n1co's hosted page", () => {
+  it("switches the intent server-side, then opens n1co in a new tab on desktop and the same tab on phones", () => {
     const chooser = donarSource.slice(donarSource.indexOf("async function chooseN1co"));
     expect(chooser).toContain("`${DONAR_INTENT_PATH}/${encodeURIComponent(intent.intentId)}/n1co`");
     expect(chooser).toContain('method: "POST"');
+    expect(donarSource).toContain('const DONAR_PROVIDER_TAB_QUERY = "(hover: hover) and (pointer: fine)";');
+    expect(donarSource).toContain("useState(() => window.matchMedia(DONAR_PROVIDER_TAB_QUERY).matches)");
+    // The tab opens inside the click, before the request, so popup blockers allow it.
+    const opened = chooser.indexOf('opensProviderTab ? window.open("", "_blank") : null');
+    expect(opened).toBeGreaterThan(-1);
+    expect(opened).toBeLessThan(chooser.indexOf("await donarApi"));
+    // n1co's page never gets a handle back to ours.
+    expect(chooser.indexOf("tab.opener = null")).toBeGreaterThan(-1);
+    expect(chooser.indexOf("tab.opener = null")).toBeLessThan(chooser.indexOf("tab.location.href = paymentLinkUrl"));
+    expect(chooser).toContain('setProviderTab({ name: "n1co", url: paymentLinkUrl })');
+    // Phones, or a blocked popup, leave in the same tab.
     expect(chooser).toContain("window.location.assign(paymentLinkUrl)");
-    expect(n1coDock).not.toContain('target="_blank"');
-    expect(donarSource).not.toContain("window.open(");
+    expect(chooser.slice(chooser.indexOf("} catch (err) {") + 1)).toMatch(/^[^}]*tab\?\.close\(\)/);
+    expect(donarSource.match(/window\.open\(/g) ?? []).toHaveLength(1);
+  });
+
+  it("opens Wompi's escape link in a new tab on desktop and waits here, like n1co", () => {
+    const hint = svEntrega.slice(svEntrega.lastIndexOf("<a", svEntrega.indexOf("¿Problemas con el formulario? Continúe aquí")));
+    expect(hint).toMatch(/^<a\s+className="link-button donar-wompi-hint"\s+href=\{intent\.urlEnlace \?\? undefined\}/);
+    expect(hint).toContain('target={opensProviderTab ? "_blank" : undefined}');
+    expect(hint).toContain('rel={opensProviderTab ? "noopener noreferrer" : undefined}');
+    expect(hint).toContain('setProviderTab({ name: "Wompi", url: intent.urlEnlace })');
+  });
+
+  it("waits on our page while the donor completes the entrega in the provider's tab", () => {
+    const waiting = svEntrega.slice(svEntrega.indexOf("providerTab ? ("));
+    expect(waiting.length).toBeLessThan(svEntrega.length);
+    const panel = waiting.slice(0, waiting.indexOf(") : "));
+    expect(panel).toContain('role="status"');
+    expect(panel).toContain("donar-spinner");
+    expect(panel).toContain("Complete su entrega en la pestaña de {providerTab.name}. Al finalizar, verá aquí la confirmación.");
+    expect(panel).toContain('href={providerTab.url} target="_blank" rel="noopener noreferrer"');
+    expect(panel).toContain("¿No ve la pestaña de {providerTab.name}? Ábrala aquí");
+    expect(panel).not.toContain("<iframe");
+    expect(panel).not.toContain("donar-provider-dock");
   });
 
   it("treats an entrega Wompi already received as verifying, never as a second gift", () => {

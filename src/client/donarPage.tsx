@@ -257,6 +257,10 @@ const emptyDonationForm: DonationFormInput = {
 type DonarStage = "form" | "widget" | "thanks" | "closed";
 type DonarStep = 1 | 2 | 3;
 
+// A desktop pointer gets the provider's page in a new tab (the PayPal pattern);
+// touch devices stay in one tab, where a second tab is easy to lose.
+const DONAR_PROVIDER_TAB_QUERY = "(hover: hover) and (pointer: fine)";
+
 interface DonarIntent {
   intentId: string;
   // Null when the gift is above Wompi's tope and the intent was born on n1co.
@@ -484,6 +488,9 @@ export function DonarPage() {
   // and whether this page already left for n1co's hosted page (bfcache restore).
   const [n1coRedirecting, setN1coRedirecting] = useState(false);
   const [n1coError, setN1coError] = useState("");
+  // Set once a provider's page is open in its own tab: this page waits for the entrega.
+  const [providerTab, setProviderTab] = useState<{ name: "Wompi" | "n1co"; url: string } | null>(null);
+  const [opensProviderTab] = useState(() => window.matchMedia(DONAR_PROVIDER_TAB_QUERY).matches);
   const n1coLeftRef = useRef(false);
   // Explicit focus targets: the hero amount input after a quick-fill and the
   // summary's Editar control on an embedded handoff step.
@@ -882,6 +889,7 @@ export function DonarPage() {
       });
       setHandoff("loading");
       setN1coError("");
+      setProviderTab(null);
       setIntent(created);
       setStage("widget");
       setStep(3);
@@ -893,22 +901,38 @@ export function DonarPage() {
   }
 
   // The donor picked n1co over the default Wompi form. The server mints the n1co link
-  // and retires the Wompi one before answering, so leaving in the same tab can never
-  // leave two live ways to give for one intent.
+  // and retires the Wompi one before answering, so there are never two live ways to
+  // give for one intent. On desktop n1co opens in its own tab while this page waits
+  // and polls; on phones (or when the popup is blocked) the donor leaves in this tab.
   async function chooseN1co() {
     if (!intent || n1coRedirecting) {
       return;
     }
     setN1coError("");
     setN1coRedirecting(true);
+    // Opened inside the click, before the request, so popup blockers allow it.
+    const tab = opensProviderTab ? window.open("", "_blank") : null;
+    if (tab) {
+      tab.document.title = "n1co";
+      tab.document.body.textContent = "Preparando su entrega con n1co…";
+    }
     try {
       const { paymentLinkUrl } = await donarApi<{ paymentLinkUrl: string }>(
         `${DONAR_INTENT_PATH}/${encodeURIComponent(intent.intentId)}/n1co`,
         { method: "POST", body: {} }
       );
+      if (tab && !tab.closed) {
+        // n1co's page never gets a handle back to ours.
+        tab.opener = null;
+        tab.location.href = paymentLinkUrl;
+        setN1coRedirecting(false);
+        setProviderTab({ name: "n1co", url: paymentLinkUrl });
+        return;
+      }
       n1coLeftRef.current = true;
       window.location.assign(paymentLinkUrl);
     } catch (err) {
+      tab?.close();
       setN1coRedirecting(false);
       if (err instanceof DonarApiError && err.code === "intent_already_paid") {
         // Wompi already received this entrega: confirm it instead of offering a second.
@@ -974,6 +998,7 @@ export function DonarPage() {
     setFieldErrors({});
     if (step === 3) {
       setN1coError("");
+      setProviderTab(null);
       setIntent(null);
       setStage("form");
       setStep(2);
@@ -1548,7 +1573,17 @@ export function DonarPage() {
               <div className="donar-handoff">
                 {/* Above Wompi's tope the server mints only an n1co link: no Wompi form
                     is shown that would decline the gift, and the dock is the way on. */}
-                {intent.paymentProvider === "N1CO" ? (
+                {providerTab ? (
+                  <>
+                    <div className="donar-widget-loading" role="status">
+                      <span className="donar-spinner" aria-hidden="true" />
+                      Complete su entrega en la pestaña de {providerTab.name}. Al finalizar, verá aquí la confirmación.
+                    </div>
+                    <a className="link-button donar-wompi-hint" href={providerTab.url} target="_blank" rel="noopener noreferrer">
+                      ¿No ve la pestaña de {providerTab.name}? Ábrala aquí
+                    </a>
+                  </>
+                ) : intent.paymentProvider === "N1CO" ? (
                   <p className="donar-intro">Para entregas mayores a $1,000.00, complete su entrega de forma segura con n1co.</p>
                 ) : (
                 <>
@@ -1579,7 +1614,17 @@ export function DonarPage() {
                   style={embedHeight ? { height: embedHeight } : undefined}
                   onLoad={() => setHandoff((current) => (current === "verifying" ? current : "ready"))}
                 />
-                <a className="link-button donar-wompi-hint" href={intent.urlEnlace ?? undefined}>
+                <a
+                  className="link-button donar-wompi-hint"
+                  href={intent.urlEnlace ?? undefined}
+                  target={opensProviderTab ? "_blank" : undefined}
+                  rel={opensProviderTab ? "noopener noreferrer" : undefined}
+                  onClick={() => {
+                    if (opensProviderTab && intent.urlEnlace) {
+                      setProviderTab({ name: "Wompi", url: intent.urlEnlace });
+                    }
+                  }}
+                >
                   ¿Problemas con el formulario? Continúe aquí
                 </a>
                 </>
@@ -1587,7 +1632,7 @@ export function DonarPage() {
                 {n1coError && <p className="auth-notice" role="alert">{n1coError}</p>}
                 {/* Second-class alternative for donors already in the n1co ecosystem,
                     shaped like the U.S. Givebutter dock. Wompi stays the default form. */}
-                {intent.n1coAvailable && (
+                {intent.n1coAvailable && !providerTab && (
                   <div className="donar-provider-dock">
                     <button
                       type="button"
