@@ -756,6 +756,13 @@ test("offers n1co as a quiet alternative beneath the default Wompi form", async 
   await expect(choice).toContainText("(Con su cuenta n1co)");
   await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas" })).toBeVisible();
   expect((await choice.boundingBox())!.y).toBeGreaterThan((await embed.boundingBox())!.y);
+  // On desktop the n1co card is roomier than the phone dock, with a 42px mark.
+  const desktopChoice = (await choice.boundingBox())!;
+  const column = await choice.evaluate((element) => element.parentElement!.getBoundingClientRect().width);
+  expect(desktopChoice.width).toBeCloseTo(Math.min(520, column), 0);
+  expect(desktopChoice.width).toBeGreaterThan(440);
+  expect(desktopChoice.height).toBeGreaterThanOrEqual(64);
+  expect((await choice.locator("img").boundingBox())!.width).toBeCloseTo(42, 0);
   await page.screenshot({ path: testInfo.outputPath("sv-n1co-desktop.png"), fullPage: true, animations: "disabled" });
 
   // On mobile the dock stays in flow under the Wompi escape hatch: it never covers
@@ -768,6 +775,7 @@ test("offers n1co as a quiet alternative beneath the default Wompi form", async 
     const hint = (await page.getByRole("link", { name: "¿Problemas con el formulario? Continúe aquí" }).boundingBox())!;
     expect(hint.y + hint.height).toBeLessThanOrEqual(dockTop + 1);
     await expect(choice).toBeInViewport();
+    expect((await choice.locator("img").boundingBox())!.width).toBeCloseTo(30, 0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
     expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBeLessThanOrEqual(height + 1);
   }
