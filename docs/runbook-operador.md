@@ -86,28 +86,27 @@ mismo flujo automático.
    Hacienda, envía el comprobante por correo.
 5. La página del donante muestra automáticamente la confirmación.
 
-**Qué significa cada estado de una donación en línea** (los verá en la sección **Exportar**):
+**Dónde ver las donaciones:** en la sección **Donaciones** (rol Administrador o superior) verá
+todas las donaciones en línea recibidas, de El Salvador y de Estados Unidos, de la más reciente a la
+más antigua. Cada fila lleva la marca del país que la recibió:
 
-| Estado | Significado |
+| País | Comprobante que muestra |
 |---|---|
-| **Pendiente** | Datos recibidos; se está generando el enlace de pago. |
-| **Enlace creado** | El enlace de pago ya existe; se espera que el donante pague. |
-| **Completada** | El pago se recibió y el CDE fue aceptado por Hacienda. Muestra su **Número de control**. |
-| **Vencida** | El donante nunca pagó y el enlace expiró. No requiere ninguna acción. |
+| 🇸🇻 **El Salvador** (Wompi) | El estado del CDE y su **Número de control**. Si dice **Comprobante pendiente**, el pago ya se recibió y el CDE se está emitiendo. |
+| 🇺🇸 **EE. UU.** (Stripe) | El estado del correo de agradecimiento y, si aplica, el reembolso. Estas donaciones no llevan CDE. |
 
-En la sección **Exportar** (rol Administrador o superior) verá la tarjeta **Donaciones en línea**
-con las últimas donaciones recibidas por este medio: estado, monto, donante, fecha y, para las
-**Completadas**, el número de control del CDE emitido. La columna **donante** se toma del nombre que
-quedó en el CDE emitido (el que el donante escribió en Wompi), por lo que solo aparece en las
-donaciones **Completadas**; en los demás estados verá «—». Cuando abra un CDE que provino de este
-formulario, en su detalle aparecerá la etiqueta **«Datos del donante verificados en el formulario
-de donación»**, que le indica que el documento y la dirección fueron capturados y validados por el
-propio donante en el formulario, no tomados del aviso de pago.
+Puede buscar por nombre, correo o número de control, filtrar por país y por fechas (en hora de El
+Salvador), y usar **Cargar más** para ver donaciones anteriores. Los intentos que el donante nunca
+pagó no aparecen: no son donaciones. Los CDE emitidos a mano (por ejemplo, con el **CDE rápido**) no
+son donaciones en línea y se consultan en **Documentos**.
+
+Cuando abra un CDE que provino del formulario, en su detalle aparecerá la etiqueta **«Datos del
+donante verificados en el formulario de donación»**, que le indica que el documento y la dirección
+fueron capturados y validados por el propio donante en el formulario, no tomados del aviso de pago.
 
 **El enlace de pago fijo sigue funcionando.** Si un donante paga por el enlace estático de siempre
 (sin pasar por /donar), el comprobante se emite igual, tomando los datos disponibles del aviso de
-pago de Wompi. Esas donaciones no aparecen en la lista de **Donaciones en línea** porque no pasaron
-por el formulario.
+pago de Wompi. Esas donaciones también aparecen en la sección **Donaciones**, con su CDE.
 
 **Donantes en Estados Unidos (NO reciben CDE — es intencional).** La puerta **EE. UU.** y el caso
 «Resido en el extranjero» + **Estados Unidos** usan Stripe en la cuenta 501(c)(3) estadounidense

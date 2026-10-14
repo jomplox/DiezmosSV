@@ -933,15 +933,11 @@ always comes from Wompi: if the webhook amount differs from the intent amount, t
 `DONATION_INTENT_AMOUNT_MISMATCH` audit entry and still correlates, using the webhook's amount on the
 CDE. A `COMPLETED` intent never correlates twice.
 
-**Admin visibility** — the **Exportar** view lists the last 50 online donations (status,
-tipo, amount, donor, date, and the emitted `numero de control` for completed ones). The
-query is a strict column allowlist: donor document, donor email, client IP, and the
-Wompi payment-link URLs are never sent to the browser, because nothing renders them.
-The **donor** column is joined from the
-emitted CDE's `donor_name` (which came from the webhook), so it is shown only for **COMPLETED**
-intents — every other status renders "—", since the intent itself carries no name. A CDE produced from
-a completed intent shows a **"Datos del donante verificados en el formulario de donación"** badge in
-its detail panel.
+**Admin visibility** — the **Donaciones** view lists every gift received through either door
+(see the panel section below), including static-payment-link gifts, which appear by their CDE. Only
+paid intents appear there; pending and expired ones are abandoned attempts, not gifts. Hand-issued
+CDEs stay in Documentos only. A CDE produced from a completed intent shows a **"Datos del donante
+verificados en el formulario de donación"** badge in its detail panel.
 
 Draft `/datos` completion uses a separate one-time 256-bit capability returned only to the in-memory
 wizard. D1 stores its SHA-256 hash and clears it atomically on the first valid write; the public intent
@@ -965,8 +961,17 @@ The React admin panel handles documents, donors, failures, the read-only conting
 history, the audit log, donation analytics, user management, exports, per-document
 actions (resend, retry, fiscal correction, invalidation), and — for owners — a
 **Configuración** workspace. No CLI-only operations. The Spanish navigation reads:
-Documentos, Donantes, Fallos, Contingencia, Auditoría, Analítica, Usuarios, Exportar,
+Documentos, Donaciones, Donantes, Fallos, Contingencia, Auditoría, Analítica, Usuarios, Exportar,
 Configuración.
+
+- **Donaciones** is one ledger of every online gift, from both doors, newest first. Each
+  row is flagged 🇸🇻 **El Salvador** (Wompi; its receipt is the CDE, shown with status and
+  `numero de control`, or *Comprobante pendiente* while issuance runs) or 🇺🇸 **EE. UU.**
+  (Stripe; its receipt is the acknowledgment email, shown with its delivery state and any
+  refund). The lane is the entity that received the gift, not the card's country. The two
+  lanes stay in their own tables; `GET /api/donations` merges them only at read time.
+  Search by name, email or control number, filter by country and by El Salvador calendar
+  day, and page with **Cargar más** (keyset cursor). **ADMIN** and above.
 
 - **Donantes** turns accepted CDEs into a donor register. Donors are keyed by fiscal
   document (type + normalized number), falling back to lowercased email, then to the
@@ -991,7 +996,7 @@ Configuración.
 - **Exportar** keeps two legal reporting lanes: **El Salvador — CDE** retains F960 and its accepted-CDE
   dossier, while **EE. UU. — Stripe** previews/sends the distinct **Constancia anual de donaciones —
   EE. UU.** from settled Stripe gifts. It is not a Salvadoran fiscal document. The remaining suite includes
-  the last 50 online donations, **Contactos para CRM** (aggregate
+  **Contactos para CRM** (aggregate
   donor contact export for CRM import), and **Respaldos mensuales** (browse and verify the monthly
   R2 legal snapshots, download a month as a ZIP up to 32 MiB).
 - **Configuración** is organized in sections: Ambiente, MH, Wompi, **Stripe EE. UU.**, **Notificaciones de
@@ -1003,12 +1008,12 @@ Configuración.
 
 | Role | Capabilities |
 |---|---|
-| `VIEWER` (Consulta) | Read documents, online-donation intents, pre-CDE issuance failures, the contingency history, the audit log, and Analítica. |
+| `VIEWER` (Consulta) | Read documents, pre-CDE issuance failures, the contingency history, the audit log, and Analítica. |
 | `OPERATOR` (Operador) | Also: quick CDE, resend email, retry failures (CDE and pre-CDE), **fiscal corrections and reissue**, and initiate invalidation. |
-| `ADMIN` (Administrador) | Also: manage users and roles, the **Donantes** explorer and its CSV export, and the **Exportar** suite — F960, annual certificates, CRM contacts, monthly backups. |
+| `ADMIN` (Administrador) | Also: manage users and roles, the **Donaciones** ledger, the **Donantes** explorer and its CSV export, and the **Exportar** suite — F960, annual certificates, CRM contacts, monthly backups. |
 | `OWNER` (Propietario) | Also: the **Configuración** workspace — credentials, Stripe EE. UU. staged-secret controls, emission environment, email templates, Wompi notification settings, branding (Marca), alert address, and on-demand retention export. Only an owner may grant the owner role or modify another owner. |
 
-> Navigation is filtered by role for **Donantes**, **Exportar** (ADMIN) and
+> Navigation is filtered by role for **Donaciones**, **Donantes**, **Exportar** (ADMIN) and
 > **Configuración** (OWNER). **Usuarios** is always visible but its body is
 > ADMIN-gated: a viewer or operator opening it sees an explanatory panel, not the
 > user list.

@@ -1,7 +1,6 @@
 import {
   ChevronLeft,
   ChevronRight,
-  Cloud,
   Download,
   FileSpreadsheet,
   ShieldCheck,
@@ -12,14 +11,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   BackupMonth,
   BackupVerifyResult,
-  DonationIntentListItem,
   EmissionEnvironmentState,
   StripeAnnualStatementPreview,
   StripeAnnualStatementPreviewDonor
 } from "./types";
 import { openNativeDatePicker } from "./datePicker";
-import { donationIntentStatusLabel, environmentLabel } from "./displayText";
-import { formatCents } from "../shared/money";
+import { environmentLabel } from "./displayText";
 import {
   addMonths,
   type AnnualCertificatePreview,
@@ -678,68 +675,6 @@ export function ContactsExportPanel({
       <p className="hint">
         Se exportan los contactos del ambiente activo{environment ? ` (${environmentLabel(environment)})` : ""}.
       </p>
-    </section>
-  );
-}
-
-// Admin "Tipo" column label: Diezmo / Ofrenda / — for legacy and US-path intents.
-function donationGiftTypeLabel(giftType: DonationIntentListItem["gift_type"]): string {
-  if (giftType === "DIEZMO") {
-    return "Diezmo";
-  }
-  if (giftType === "OFRENDA") {
-    return "Ofrenda";
-  }
-  return "—";
-}
-
-export function OnlineDonationsPanel({ intents }: { intents: DonationIntentListItem[] }) {
-  const pagination = usePaginatedRows(intents, `${intents[0]?.id ?? ""}:${intents.length}`);
-  return (
-    <section className="single-panel export-panel">
-      <div className="panel-head">
-        <div>
-          <h2>Donaciones en línea</h2>
-          <p>Últimas donaciones recibidas desde el formulario público de donación.</p>
-        </div>
-        <Cloud size={20} />
-      </div>
-      <div className="table-scroll export-table online-donations-table">
-        <table>
-          <thead>
-            <tr>
-              <th>Estado</th>
-              <th>Tipo</th>
-              <th className="numeric">Monto</th>
-              <th>Donante</th>
-              <th className="numeric">Fecha</th>
-              <th>Número de control</th>
-            </tr>
-          </thead>
-          <tbody>
-            {pagination.visibleRows.map((intent) => (
-              <tr key={intent.id}>
-                <td>
-                  <span className={`status ${intent.status.toLowerCase()}`}>
-                    {donationIntentStatusLabel(intent.status).toUpperCase()}
-                  </span>
-                </td>
-                <td>{donationGiftTypeLabel(intent.gift_type)}</td>
-                <td className="numeric">{formatCents(intent.amount_cents)}</td>
-                <td>{intent.document_donor_name ?? "—"}</td>
-                <td className="numeric">{formatDateTime(intent.created_at)}</td>
-                <td className="mono">{intent.numero_control ?? "—"}</td>
-              </tr>
-            ))}
-            {intents.length === 0 && (
-              <tr>
-                <td colSpan={6}>Sin donaciones en línea todavía.</td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-      <ExportTablePagination label="donaciones en línea" page={pagination.page} totalPages={pagination.totalPages} totalRows={intents.length} onPageChange={pagination.setPage} />
     </section>
   );
 }
