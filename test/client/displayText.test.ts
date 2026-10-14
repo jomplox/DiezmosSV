@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { auditActionLabel, auditActorLabel, auditLocationLabel, auditProtocolLabel, catalogOptionLabel, documentDisplayStatus, donationIntentStatusLabel, entityLabel, environmentLabel, parseAuditContext, roleLabel, statusLabel, userFacingErrorMessage } from "../../src/client/displayText";
+import { auditActionLabel, auditActorLabel, auditLocationLabel, auditProtocolLabel, catalogOptionLabel, documentDisplayStatus, entityLabel, environmentLabel, parseAuditContext, roleLabel, statusLabel, userFacingErrorMessage } from "../../src/client/displayText";
 
 describe("client display text", () => {
   it("labels every branding and donation-intent audit action in Spanish", () => {
@@ -112,13 +112,6 @@ describe("client display text", () => {
     expect(auditActionLabel("CONTINGENCY_DTE_REJECTED")).toBe("CDE histórico rechazado");
     expect(auditActionLabel("CONTINGENCY_OPENED")).toBe("Periodo histórico abierto");
     expect(auditActionLabel("CONTINGENCY_OPEN_REUSED")).toBe("Periodo histórico reutilizado");
-  });
-
-  it("localizes donation-intent status values in Spanish", () => {
-    expect(donationIntentStatusLabel("PENDING")).toBe("Pendiente");
-    expect(donationIntentStatusLabel("LINK_CREATED")).toBe("Enlace creado");
-    expect(donationIntentStatusLabel("COMPLETED")).toBe("Completada");
-    expect(donationIntentStatusLabel("EXPIRED")).toBe("Vencida");
   });
 
   it("normalizes catalog option capitalization without changing acronyms", () => {

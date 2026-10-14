@@ -5,7 +5,8 @@ import { describe, expect, it } from "vitest";
 const appSource =
   readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8") +
   readFileSync(resolve(import.meta.dirname, "../../src/client/exportsPanel.tsx"), "utf8") +
-  readFileSync(resolve(import.meta.dirname, "../../src/client/documentsView.tsx"), "utf8");
+  readFileSync(resolve(import.meta.dirname, "../../src/client/documentsView.tsx"), "utf8") +
+  readFileSync(resolve(import.meta.dirname, "../../src/client/donationsView.tsx"), "utf8");
 const stylesSource = readFileSync(resolve(import.meta.dirname, "../../src/client/styles.css"), "utf8");
 
 describe("visual consistency pack", () => {

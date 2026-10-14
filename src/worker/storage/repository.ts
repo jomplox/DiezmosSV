@@ -1,4 +1,4 @@
-import type { Ambiente, ContingencyBatchLineRecord, ContingencyBatchRecord, DonationIntentListItem, DonationIntentRecord, DteDocumentRecord, FiscalCorrectionRecord, WompiDocumentIdentifiers, WompiEventRecord, WompiIssuanceFailureItem, WompiIssuanceRetrySnapshot, WompiPaymentLink, WompiWebhook } from "../types";
+import type { Ambiente, ContingencyBatchLineRecord, ContingencyBatchRecord, DonationIntentRecord, DteDocumentRecord, FiscalCorrectionRecord, WompiDocumentIdentifiers, WompiEventRecord, WompiIssuanceFailureItem, WompiIssuanceRetrySnapshot, WompiPaymentLink, WompiWebhook } from "../types";
 import type { AuditRequestContext } from "../services/requestContext";
 import type { ContactSourceRow } from "../services/contacts";
 import {
@@ -70,7 +70,6 @@ import {
   hasAuditAction as hasAuditActionRepository,
   listIntentsForWompiReconciliation as listIntentsForWompiReconciliationRepository,
   listIntentsExpiringBefore as listIntentsExpiringBeforeRepository,
-  listRecentDonationIntents as listRecentDonationIntentsRepository,
   markIntentCompleted as markIntentCompletedRepository,
   markIntentPaid as markIntentPaidRepository,
   touchIntentWompiReconciliationCheck as touchIntentWompiReconciliationCheckRepository,
@@ -195,6 +194,11 @@ import {
   type DonorExplorerFilters,
   type DonorExplorerPage
 } from "./repository/donors";
+import {
+  listDonations as listDonationsRepository,
+  type DonationLedgerFilters,
+  type DonationLedgerPage
+} from "./repository/donationsLedger";
 import {
   claimCorrectedWompiEventIssuance as claimCorrectedWompiEventIssuanceRepository,
   claimInitialWompiIssuanceAttempt as claimInitialWompiIssuanceAttemptRepository,
@@ -1119,12 +1123,6 @@ export class Repository {
     return expireDonationIntentsByIdsRepository(this.db, ids, updatedAt);
   }
 
-  async listRecentDonationIntents(
-    limit = 50
-  ): Promise<DonationIntentListItem[]> {
-    return listRecentDonationIntentsRepository(this.db, limit);
-  }
-
   async getCompletedIntentForDocument(documentId: string): Promise<{ id: string } | null> {
     return getCompletedIntentForDocumentRepository(this.db, documentId);
   }
@@ -1220,6 +1218,10 @@ export class Repository {
 
   async listDonors(filters: DonorExplorerFilters): Promise<DonorExplorerPage> {
     return listDonorsRepository(this.db, filters);
+  }
+
+  async listDonations(filters: DonationLedgerFilters): Promise<DonationLedgerPage> {
+    return listDonationsRepository(this.db, filters);
   }
 
   // Earliest issued document's created_at, used by the backups panel to bound the

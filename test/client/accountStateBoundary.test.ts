@@ -20,7 +20,6 @@ describe("authenticated account state boundary", () => {
       "setCredentials(null)",
       "setEmailTemplates(null)",
       "setAdvancedDteOpen(false)",
-      "setDonationIntents([])",
       "setBackups([])",
       "setAnalytics(null)",
       "setStripeStatementPreview(null)"

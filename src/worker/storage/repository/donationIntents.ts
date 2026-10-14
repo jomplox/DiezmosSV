@@ -1,7 +1,6 @@
 import type {
   DonationGiftType,
   DonationIntentDocumentType,
-  DonationIntentListItem,
   DonationIntentRecord,
   WompiPaymentLink
 } from "../../types";
@@ -348,40 +347,6 @@ export async function expireDonationIntentsByIds(
     .prepare(`UPDATE donation_intents SET status = 'EXPIRED', updated_at = ? WHERE status IN ('PENDING','LINK_CREATED') AND paid_at IS NULL AND id IN (${placeholders})`)
     .bind(updatedAt, ...ids)
     .run();
-}
-
-// Newest-first listing for the admin "Donaciones en línea" panel (Task 5). The
-// LEFT JOIN exposes the emitted CDE's numero_control AND its donor_name for
-// COMPLETED intents (which carry document_id) and leaves both null for every other
-// status. The donante shown in the panel comes from the document (lifted from the
-// webhook), since the intent no longer stores name/email.
-export async function listRecentDonationIntents(
-  db: D1Database,
-  limit = 50
-): Promise<DonationIntentListItem[]> {
-  // Least privilege: allowlist only the columns the admin "Donaciones en línea" panel
-  // renders (status, tipo, amount, donante-from-document, numero de control, fecha).
-  // A prior `SELECT donation_intents.*` shipped donor PII (donor_document, donor_email),
-  // the client IP, and the Wompi payment-link URLs to the browser even though nothing
-  // renders them.
-  const rows = await db
-    .prepare(
-      `SELECT donation_intents.id,
-                donation_intents.status,
-                donation_intents.amount_cents,
-                donation_intents.document_id,
-                donation_intents.gift_type,
-                donation_intents.created_at,
-                dte_documents.numero_control AS numero_control,
-                dte_documents.donor_name AS document_donor_name
-         FROM donation_intents
-         LEFT JOIN dte_documents ON dte_documents.id = donation_intents.document_id
-         ORDER BY donation_intents.created_at DESC, donation_intents.id DESC
-         LIMIT ?`
-    )
-    .bind(Math.min(Math.max(Math.trunc(limit), 1), 100))
-    .all<DonationIntentListItem>();
-  return rows.results ?? [];
 }
 
 // Single indexed lookup (idx_donation_intents_document_id, migration 0009) for the
