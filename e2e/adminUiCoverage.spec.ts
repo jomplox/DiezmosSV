@@ -151,8 +151,8 @@ async function installOwnerAdmin(page: Page, handleApi?: AdminUiHandler): Promis
       });
       return;
     }
-    if (url.pathname === "/api/donations/intents") {
-      await fulfillJson(route, { intents: [] });
+    if (url.pathname === "/api/donations") {
+      await fulfillJson(route, { donations: [], hasMore: false, nextCursor: null, limit: 50 });
       return;
     }
     if (url.pathname === "/api/admin/backups") {
@@ -253,6 +253,10 @@ test("covers every owner navigation surface with accessible filters and no app r
   await expect(page.getByRole("heading", { name: "CDE rápido" })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Buscar código, donante o correo" })).toBeVisible();
   await expect(page.getByRole("combobox", { name: "Estado del documento" })).toBeVisible();
+
+  await openView(page, "Donaciones");
+  await expect(page.getByRole("heading", { name: "Buscar donaciones" })).toBeVisible();
+  await expect(page.getByText("No hay donaciones que coincidan con los filtros.")).toBeVisible();
 
   await openView(page, "Donantes");
   await expect(page.getByRole("heading", { name: "Buscar donantes" })).toBeVisible();
@@ -534,20 +538,6 @@ test("paginates every long preview table in Exportar without changing its data s
       netTotalLabel: `$${number}.00`
     };
   });
-  const intents = Array.from({ length: 23 }, (_, index) => {
-    const number = index + 1;
-    return {
-      id: `intent-${number}`,
-      status: "COMPLETED",
-      amount_cents: number * 100,
-      document_id: `document-${number}`,
-      gift_type: number % 2 === 0 ? "OFRENDA" : "DIEZMO",
-      created_at: `2026-08-${String(number).padStart(2, "0")}T12:00:00.000Z`,
-      numero_control: `DTE-${number}`,
-      document_donor_name: `Donante en línea ${number}`
-    };
-  });
-
   await installOwnerAdmin(page, async (route, url) => {
     if (url.pathname === "/api/exports/f960") {
       await fulfillJson(route, { rows, rowCount: rows.length, amountTotal: "276.00" });
@@ -568,10 +558,6 @@ test("paginates every long preview table in Exportar without changing its data s
       });
       return true;
     }
-    if (url.pathname === "/api/donations/intents") {
-      await fulfillJson(route, { intents });
-      return true;
-    }
     return false;
   });
 
@@ -580,13 +566,11 @@ test("paginates every long preview table in Exportar without changing its data s
   const f960 = page.locator("section.export-panel").filter({ has: page.getByRole("heading", { name: "F960", exact: true }) });
   const sv = page.locator("section.export-panel").filter({ has: page.getByRole("heading", { name: "El Salvador — CDE", exact: true }) });
   const us = page.locator("section.export-panel").filter({ has: page.getByRole("heading", { name: "EE. UU. — Stripe", exact: true }) });
-  const online = page.locator("section.export-panel").filter({ has: page.getByRole("heading", { name: "Donaciones en línea", exact: true }) });
 
   for (const [panel, label] of [
     [f960, "F960"],
     [sv, "constancias de El Salvador"],
-    [us, "constancias de EE. UU."],
-    [online, "donaciones en línea"]
+    [us, "constancias de EE. UU."]
   ] as const) {
     await expect(panel.locator("tbody tr")).toHaveCount(10);
     await expect(panel.getByRole("navigation", { name: `Paginación de ${label}` })).toContainText("Página 1 de 3");
@@ -596,6 +580,88 @@ test("paginates every long preview table in Exportar without changing its data s
   await f960Pagination.getByRole("button", { name: "Siguiente" }).click();
   await expect(f960.locator("tbody tr").first()).toContainText("F960 Donante 11");
   await expect(f960Pagination).toContainText("Página 2 de 3");
+});
+
+test("lists both lanes in Donaciones, filters server-side, and loads older gifts by cursor", async ({ page }) => {
+  const requests: URLSearchParams[] = [];
+  const ledgerRow = (overrides: Record<string, unknown>) => ({
+    lane: "SV",
+    receivedAt: "2026-09-28T16:00:44.000Z",
+    amountCents: 2_500,
+    refundedAmountCents: 0,
+    frequency: "ONCE",
+    giftType: "DIEZMO",
+    donorName: null,
+    donorEmail: null,
+    documentId: null,
+    numeroControl: null,
+    documentStatus: null,
+    giftStatus: null,
+    acknowledgmentStatus: null,
+    ...overrides
+  });
+  await installOwnerAdmin(page, async (route, url) => {
+    if (url.pathname !== "/api/donations") return false;
+    requests.push(url.searchParams);
+    if (url.searchParams.get("cursor") === "page-2") {
+      await fulfillJson(route, {
+        donations: [ledgerRow({ id: "di_older", donorName: "Donante Antiguo", receivedAt: "2026-01-05T16:00:00.000Z" })],
+        hasMore: false,
+        nextCursor: null,
+        limit: 50
+      });
+      return true;
+    }
+    await fulfillJson(route, {
+      donations: [
+        ledgerRow({
+          id: "stripe_gift_ana",
+          lane: "US",
+          amountCents: 22_500,
+          donorName: "Ana C Delgado",
+          donorEmail: "ana@example.org",
+          giftStatus: "PAID",
+          acknowledgmentStatus: "SENT"
+        }),
+        ledgerRow({
+          id: "di_beto",
+          donorName: "Beto Ruiz",
+          documentId: "doc_beto",
+          numeroControl: "DTE-15-M001P004-000000000000042",
+          documentStatus: "ACCEPTED"
+        })
+      ],
+      hasMore: true,
+      nextCursor: "page-2",
+      limit: 50
+    });
+    return true;
+  });
+
+  await openView(page, "Donaciones");
+  const table = page.getByRole("table", { name: "Donaciones" });
+  const ana = table.getByRole("row").filter({ hasText: "Ana C Delgado" });
+  await expect(ana).toContainText("EE. UU.");
+  await expect(ana).toContainText("$225.00");
+  await expect(ana).toContainText("Agradecimiento enviado");
+  const beto = table.getByRole("row").filter({ hasText: "Beto Ruiz" });
+  await expect(beto).toContainText("El Salvador");
+  await expect(beto).toContainText("DTE-15-M001P004-000000000000042");
+
+  await page.getByRole("button", { name: "Cargar más" }).click();
+  await expect(table.getByRole("row").filter({ hasText: "Donante Antiguo" })).toBeVisible();
+  await expect(table.getByRole("row").filter({ hasText: "Ana C Delgado" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Cargar más" })).toHaveCount(0);
+
+  await page.getByLabel("Buscar").fill("delgado");
+  await page.getByLabel("País").selectOption("US");
+  await page.getByLabel("Desde").fill("2026-09-01");
+  await page.getByRole("button", { name: "Actualizar" }).click();
+  await expect.poll(() => requests.at(-1)?.get("q")).toBe("delgado");
+  const last = requests.at(-1)!;
+  expect(last.get("lane")).toBe("US");
+  expect(last.get("from")).toBe("2026-09-01");
+  expect(last.get("cursor")).toBeNull();
 });
 
 test("does not dispatch user creation until name and a valid email are present", async ({ page }) => {

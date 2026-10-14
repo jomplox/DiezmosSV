@@ -982,14 +982,12 @@ verdad sobre el monto siempre viene de Wompi: si el monto del webhook difiere de
 tubería registra una entrada de auditoría `DONATION_INTENT_AMOUNT_MISMATCH` y correlaciona de todos
 modos, usando el monto del webhook en el CDE. Un intento `COMPLETED` nunca correlaciona dos veces.
 
-**Visibilidad en el panel** — la vista **Exportar** lista las últimas 50 donaciones en línea (estado,
-tipo, monto, donante, fecha y el `numero de control` emitido para las completadas). La consulta usa
-una lista blanca estricta de columnas: el documento del donante, su correo, la IP del cliente y las URL
-de los enlaces de pago de Wompi nunca se envían al navegador, porque nada los renderiza. La columna
-**donante** se une desde el `donor_name` del CDE emitido (que vino del webhook), así que solo se
-muestra para los intentos **COMPLETED** — cualquier otro estado renderiza "—", ya que el intento en sí
-no lleva nombre. Un CDE producido a partir de un intento completado muestra la insignia **"Datos del
-donante verificados en el formulario de donación"** en su panel de detalle.
+**Visibilidad en el panel** — la vista **Donaciones** lista cada donación recibida por cualquiera de
+las dos puertas (vea la sección del panel más abajo), incluidas las del enlace de pago estático, que
+aparecen por su CDE. Solo aparecen los intentos pagados; los pendientes y vencidos son intentos
+abandonados, no donaciones. Los CDE emitidos a mano quedan solo en Documentos. Un CDE producido a partir de un intento completado
+muestra la insignia **"Datos del donante verificados en el formulario de donación"** en su panel de
+detalle.
 
 La finalización del borrador en `/datos` usa una capacidad de un solo uso de 256 bits, aparte,
 devuelta únicamente al asistente en memoria. D1 guarda su hash SHA-256 y lo borra atómicamente en la
@@ -1015,8 +1013,17 @@ El panel de administración de React cubre documentos, donantes, fallos, el hist
 solo lectura, la bitácora de auditoría, la analítica de donaciones, la gestión de usuarios, las
 exportaciones, las acciones por documento (reenviar, reintentar, corrección fiscal, invalidación) y
 —para los owners— un espacio de trabajo **Configuración**. Ninguna operación queda solo en CLI. La
-navegación en español dice: Documentos, Donantes, Fallos, Contingencia, Auditoría, Analítica, Usuarios,
-Exportar, Configuración.
+navegación en español dice: Documentos, Donaciones, Donantes, Fallos, Contingencia, Auditoría, Analítica,
+Usuarios, Exportar, Configuración.
+
+- **Donaciones** es un solo registro de cada donación en línea, de ambas puertas, de la más reciente a
+  la más antigua. Cada fila lleva la marca 🇸🇻 **El Salvador** (Wompi; su comprobante es el CDE, con su
+  estado y `numero de control`, o *Comprobante pendiente* mientras se emite) o 🇺🇸 **EE. UU.** (Stripe;
+  su comprobante es el correo de agradecimiento, con su estado de envío y cualquier reembolso). El país
+  indica la entidad que recibió la donación, no el país de la tarjeta. Los dos carriles siguen en sus
+  propias tablas; `GET /api/donations` los une solo al leer. Busque por nombre, correo o número de
+  control, filtre por país y por día calendario de El Salvador, y pagine con **Cargar más** (cursor
+  keyset). **ADMIN** en adelante.
 
 - **Donantes** convierte los CDE aceptados en un registro de donantes. Los donantes se identifican por
   documento fiscal (tipo + número normalizado), con respaldo en el correo en minúsculas y luego en el
@@ -1042,7 +1049,7 @@ Exportar, Configuración.
 - **Exportar** mantiene dos carriles legales: **El Salvador — CDE** conserva F960 y su dossier de CDE
   aceptados, mientras **EE. UU. — Stripe** previsualiza/envía la distinta **Constancia anual de
   donaciones — EE. UU.** desde entregas Stripe liquidadas. No es un documento fiscal salvadoreño. La
-  suite restante incluye las últimas 50 donaciones en línea, **Contactos para CRM** (exportación agregada de contactos de donantes para importar a un
+  suite restante incluye **Contactos para CRM** (exportación agregada de contactos de donantes para importar a un
   CRM) y **Respaldos mensuales** (explorar y verificar las instantáneas legales mensuales en R2,
   descargar un mes como ZIP de hasta 32 MiB).
 - **Configuración** está organizada en secciones: Ambiente, MH, Wompi, **Stripe EE. UU.**, **Notificaciones de Wompi**
@@ -1054,12 +1061,12 @@ Exportar, Configuración.
 
 | Rol | Capacidades |
 |---|---|
-| `VIEWER` (Consulta) | Leer documentos, intentos de donación en línea, fallos de emisión previos al CDE, el historial de contingencia, la bitácora de auditoría y Analítica. |
+| `VIEWER` (Consulta) | Leer documentos, fallos de emisión previos al CDE, el historial de contingencia, la bitácora de auditoría y Analítica. |
 | `OPERATOR` (Operador) | Además: CDE rápido, reenviar correo, reintentar fallos (de CDE y previos al CDE), **correcciones fiscales y reemisión**, e iniciar una invalidación. |
-| `ADMIN` (Administrador) | Además: gestionar usuarios y roles, el explorador **Donantes** y su exportación CSV, y la suite **Exportar** — F960, constancias anuales, contactos para CRM, respaldos mensuales. |
+| `ADMIN` (Administrador) | Además: gestionar usuarios y roles, el registro **Donaciones**, el explorador **Donantes** y su exportación CSV, y la suite **Exportar** — F960, constancias anuales, contactos para CRM, respaldos mensuales. |
 | `OWNER` (Propietario) | Además: el espacio de trabajo **Configuración** — credenciales, controles Stripe EE. UU. de secreto preparado, ambiente de emisión, plantillas de correo, ajustes de notificación de Wompi, marca (Marca), dirección de alertas y exportación de retención bajo demanda. Solo un owner puede otorgar el rol de owner o modificar a otro owner. |
 
-> La navegación se filtra por rol para **Donantes** y **Exportar** (ADMIN) y para **Configuración**
+> La navegación se filtra por rol para **Donaciones**, **Donantes** y **Exportar** (ADMIN) y para **Configuración**
 > (OWNER). **Usuarios** siempre está visible, pero su contenido está restringido a ADMIN: un usuario
 > de consulta o un operador que la abra ve un panel explicativo, no la lista de usuarios.
 

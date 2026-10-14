@@ -11,6 +11,7 @@ import {
   FileSpreadsheet,
   FileText,
   FlaskConical,
+  HandCoins,
   LineChart,
   Braces,
   KeyRound,
@@ -30,7 +31,7 @@ import {
   Users
 } from "lucide-react";
 import { Fragment, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
-import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, DocumentListPage, DonationIntentListItem, DteDocument, EmailSenderState, EmailTemplateScope, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, FiscalCorrectionData, FiscalCorrectionProtectedContext, FiscalReconciliationState, ReceiptEmailDeliveryState, StripeAcknowledgmentReconciliationItem, StripeAnnualStatementPreview, StripeAnnualStatementPreviewDonor, StripeAnnualStatementSendResult, StripeSettingsState, User, WompiIssuanceFailureItem, WompiNotificationSettings } from "./types";
+import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, DocumentListPage, DonationLedgerPage, DteDocument, EmailSenderState, EmailTemplateScope, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, FiscalCorrectionData, FiscalCorrectionProtectedContext, FiscalReconciliationState, ReceiptEmailDeliveryState, StripeAcknowledgmentReconciliationItem, StripeAnnualStatementPreview, StripeAnnualStatementPreviewDonor, StripeAnnualStatementSendResult, StripeSettingsState, User, WompiIssuanceFailureItem, WompiNotificationSettings } from "./types";
 import {
   resolveAuthBootstrapStatus,
   shouldShowBootstrapMode,
@@ -62,6 +63,7 @@ import { AnalyticsView } from "./analyticsView";
 import { analyticsRangePresets, type AnalyticsRangePreset, type GiftTypeFilter } from "./analytics";
 import { DonorsView } from "./donorsView";
 import type { DonorExplorerPage } from "./donors";
+import { DonationsView } from "./donationsView";
 import type { AnalyticsResponse } from "./types";
 import { auditActionLabel, auditActorLabel, auditLocationLabel, auditProtocolLabel, AUDIT_CONTEXT_LABELS, auditSummaryLabel, catalogOptionLabel, documentDisplayStatus, entityLabel, environmentLabel, parseAuditContext, roleLabel, statusLabel, userFacingErrorMessage } from "./displayText";
 import {
@@ -118,7 +120,6 @@ import {
   type ContactsPeriod,
   contactsPeriodRange,
   ExportPanel,
-  OnlineDonationsPanel,
   StripeAnnualStatementPanel,
   stripeStatementPreviewPath
 } from "./exportsPanel";
@@ -132,7 +133,7 @@ import {
 } from "./documentsView";
 
 type Role = "VIEWER" | "OPERATOR" | "ADMIN" | "OWNER";
-type View = "documents" | "donors" | "failures" | "contingency" | "audit" | "analytics" | "users" | "exports" | "credentials";
+type View = "documents" | "donations" | "donors" | "failures" | "contingency" | "audit" | "analytics" | "users" | "exports" | "credentials";
 export type FiscalCorrectionTarget =
   | { kind: "WOMPI_EVENT"; id: string }
   | { kind: "DTE_DOCUMENT"; id: string };
@@ -216,6 +217,7 @@ export function shouldRetainResendRequestIdAfterFailure(
 
 const navItems: Array<{ id: View; label: string; icon: typeof FileText; minRole?: Role }> = [
   { id: "documents", label: "Documentos", icon: FileText },
+  { id: "donations", label: "Donaciones", icon: HandCoins, minRole: "ADMIN" },
   { id: "donors", label: "Donantes", icon: ContactRound, minRole: "ADMIN" },
   { id: "failures", label: "Fallos", icon: AlertTriangle },
   { id: "contingency", label: "Contingencia", icon: Unplug },
@@ -457,7 +459,6 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   const [contactsTo, setContactsTo] = useState(todayDateValue);
   const [contactsGiftType, setContactsGiftType] = useState<"todos" | "DIEZMO" | "OFRENDA">("todos");
   const [contactsColumns, setContactsColumns] = useState<Set<string>>(() => new Set(CONTACT_EXPORT_COLUMNS.map((column) => column.key)));
-  const [donationIntents, setDonationIntents] = useState<DonationIntentListItem[]>([]);
   const [backups, setBackups] = useState<BackupMonth[]>([]);
   const [backupVerifyByMonth, setBackupVerifyByMonth] = useState<Record<string, BackupVerifyResult>>({});
   const [donorVerifiedDocId, setDonorVerifiedDocId] = useState<string | null>(null);
@@ -1041,14 +1042,12 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
         f960Preview,
         certificateResult,
         stripeStatementResult,
-        donationIntentResult,
         backupsResult,
         environmentResult
       ] = await Promise.all([
         accountApi<F960Preview>(`/api/exports/f960?${params}`),
         certificateResultPromise,
         stripeStatementResultPromise,
-        accountApi<{ intents: DonationIntentListItem[] }>("/api/donations/intents"),
         accountApi<BackupsGrid>("/api/admin/backups"),
         accountApi<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment")
       ]);
@@ -1077,7 +1076,6 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
         if (stripeStatementRequest && stripeStatementResult?.status === "fulfilled") {
           commitStripeStatementPreview(stripeStatementRequest, stripeStatementResult.value, false);
         }
-        setDonationIntents(donationIntentResult.intents);
         setBackups(backupsResult.months);
         setEmissionEnvironment(environmentResult.emissionEnvironment);
       });
@@ -1225,7 +1223,6 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     setContactsTo(todayDateValue());
     setContactsGiftType("todos");
     setContactsColumns(new Set(CONTACT_EXPORT_COLUMNS.map((column) => column.key)));
-    setDonationIntents([]);
     setBackups([]);
     setBackupVerifyByMonth({});
     setDonorVerifiedDocId(null);
@@ -3114,6 +3111,13 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
           />
         )}
 
+        {view === "donations" && can(user, "ADMIN") && (
+          <DonationsView
+            loadPage={(params) => accountApi<DonationLedgerPage>(`/api/donations?${params.toString()}`)}
+            onError={handleApiFailure}
+          />
+        )}
+
         {view === "donors" && can(user, "ADMIN") && (
           emissionEnvironment ? (
             <DonorsView
@@ -3234,7 +3238,6 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
               onDownloadAll={downloadAllBackup}
               onExport={exportBackupMonth}
             />
-            <OnlineDonationsPanel intents={donationIntents} />
           </>
         )}
 
@@ -4390,6 +4393,7 @@ function delay(ms: number): Promise<void> {
 
 const VIEW_SUBTITLES: Record<View, string> = {
   documents: "Emita, envíe por correo y administre los comprobantes de donación (CDE).",
+  donations: "Todas las donaciones en línea recibidas, de El Salvador (Wompi) y EE. UU. (Stripe).",
   donors: "Explore donantes, sus datos de contacto y su historial de entregas.",
   failures: "CDE con errores, rechazos o pagos sin comprobante que requieren su atención.",
   contingency: "El CDE no usa contingencia; cuando Hacienda no responde, queda en trámite y se reintenta automáticamente.",

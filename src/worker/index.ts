@@ -161,6 +161,7 @@ import {
   Repository,
   UserMutationConflictError
 } from "./storage/repository";
+import { isLedgerDay, parseLedgerCursor } from "./storage/repository/donationsLedger";
 import type { Ambiente, DonationIntentRecord, DteDocumentRecord, Env, IssuanceMessage, MhResponse, WompiWebhook } from "./types";
 import { addHours, cdeInvalidationDeadline, isWithinDeadline, nowIso } from "./utils/dates";
 import { base64UrlFromBytes, sha256Hex, timingSafeEqual, utf8Bytes } from "./utils/encoding";
@@ -2966,9 +2967,6 @@ async function handleDocumentList(ctx: ApiRouteContext): Promise<Response> {
   }));
 }
 
-async function handleDonationIntentList(ctx: ApiRouteContext): Promise<Response> {
-  return jsonResponse({ intents: await ctx.repo.listRecentDonationIntents(50) });
-}
 
 type DonorFilterValues = Omit<
   Parameters<Repository["listDonors"]>[0],
@@ -3063,6 +3061,38 @@ async function handleDonorList(ctx: ApiRouteContext): Promise<Response> {
     ...parsed.filters,
     limit,
     offset
+  }));
+}
+
+async function handleDonationList(ctx: ApiRouteContext): Promise<Response> {
+  const params = ctx.url.searchParams;
+  const lane = params.get("lane");
+  const q = params.get("q")?.trim() ?? "";
+  const from = params.get("from");
+  const to = params.get("to");
+  const cursor = params.get("cursor");
+  const limit = parseNonNegativeIntegerParam(params, "limit", 50);
+  const invalid =
+    (lane !== null && lane !== "SV" && lane !== "US")
+    || q.length > 200
+    || (from !== null && !isLedgerDay(from))
+    || (to !== null && !isLedgerDay(to))
+    || (from !== null && to !== null && from > to)
+    || (cursor !== null && !parseLedgerCursor(cursor))
+    || limit === null || limit < 1 || limit > 100;
+  if (invalid) {
+    return jsonResponse(
+      { error: "invalid_donation_filters", message: "Revise los filtros de donaciones." },
+      { status: 400 }
+    );
+  }
+  return jsonResponse(await ctx.repo.listDonations({
+    lane: lane === "SV" || lane === "US" ? lane : undefined,
+    q: q || undefined,
+    from: from ?? undefined,
+    to: to ?? undefined,
+    cursor,
+    limit
   }));
 }
 
@@ -3925,7 +3955,7 @@ const settingsRoutes: Array<Route<ApiRouteContext>> = [
 
 const documentListRoutes: Array<Route<ApiRouteContext>> = [
   { method: "GET", pattern: "/api/documents", role: "VIEWER", handler: handleDocumentList },
-  { method: "GET", pattern: "/api/donations/intents", role: "VIEWER", handler: handleDonationIntentList },
+  { method: "GET", pattern: "/api/donations", role: "ADMIN", handler: handleDonationList },
   { method: "GET", pattern: "/api/donors", role: "ADMIN", handler: handleDonorList }
 ];
 

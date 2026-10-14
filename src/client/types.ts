@@ -64,21 +64,31 @@ export interface FiscalReconciliationState {
   failureMessage: string | null;
 }
 
-type DonationIntentStatus = "PENDING" | "LINK_CREATED" | "COMPLETED" | "EXPIRED";
-
-export interface DonationIntentListItem {
+// One row of the admin "Donaciones" ledger: a gift received through either door.
+// SV rows carry their CDE; US rows carry the Stripe gift's refund state and its
+// acknowledgment delivery.
+export interface DonationLedgerRow {
   id: string;
-  status: DonationIntentStatus;
-  amount_cents: number;
-  // The donante shown in the panel comes from the emitted CDE's donor_name (joined via
-  // document_id for COMPLETED intents); the intent itself no longer stores name/email.
-  document_donor_name: string | null;
-  document_id: string | null;
-  numero_control: string | null;
-  // Diezmo vs Ofrenda (SV flow); null for legacy and US-path intents. Drives the
-  // admin "Tipo" column.
-  gift_type: "DIEZMO" | "OFRENDA" | null;
-  created_at: string;
+  lane: "SV" | "US";
+  receivedAt: string;
+  amountCents: number;
+  refundedAmountCents: number;
+  frequency: "ONCE" | "MONTHLY";
+  giftType: "DIEZMO" | "OFRENDA" | null;
+  donorName: string | null;
+  donorEmail: string | null;
+  documentId: string | null;
+  numeroControl: string | null;
+  documentStatus: string | null;
+  giftStatus: "PAID" | "PARTIALLY_REFUNDED" | "REFUNDED" | null;
+  acknowledgmentStatus: "PENDING" | "PROCESSING" | "SENT" | "FAILED" | "REVIEW" | "SUPPRESSED" | null;
+}
+
+export interface DonationLedgerPage {
+  donations: DonationLedgerRow[];
+  hasMore: boolean;
+  nextCursor: string | null;
+  limit: number;
 }
 
 export interface DocumentListPage {

@@ -94,20 +94,6 @@ function bundleDocument(label: "Old" | "New") {
   };
 }
 
-function bundleIntent(label: "Old" | "New") {
-  const isNew = label === "New";
-  return {
-    id: `${label.toLowerCase()}-bundle-intent`,
-    status: "COMPLETED",
-    amount_cents: isNew ? 222 : 111,
-    document_donor_name: `${label} bundle intent`,
-    document_id: `${label.toLowerCase()}-bundle-document`,
-    numero_control: isNew ? "DTE-15-M001P001-000000000000222" : "DTE-15-M001P001-000000000000111",
-    gift_type: "DIEZMO",
-    created_at: "2026-08-08T12:00:00.000Z"
-  };
-}
-
 function bundleBackup(label: "Old" | "New") {
   const isNew = label === "New";
   return {
@@ -176,10 +162,6 @@ async function installAdminApp(page: Page, handleCertificate: CertificateHandler
     }
     if (url.pathname === "/api/exports/f960") {
       await fulfillJson(route, { rows: [], rowCount: 0, amountTotal: "0.00" });
-      return;
-    }
-    if (url.pathname === "/api/donations/intents") {
-      await fulfillJson(route, { intents: [] });
       return;
     }
     if (url.pathname === "/api/admin/backups") {
@@ -1182,7 +1164,6 @@ test("coalesces a settled-equality search with an immediate year refresh", async
   const refreshBundlePaths = [
     "/api/documents",
     "/api/exports/f960",
-    "/api/donations/intents",
     "/api/admin/backups",
     "/api/settings/emission-environment"
   ];
@@ -1254,7 +1235,6 @@ test("retries the settled year refresh after its current bundle fails", async ({
   const refreshBundlePaths = [
     "/api/documents",
     "/api/exports/f960",
-    "/api/donations/intents",
     "/api/admin/backups",
     "/api/settings/emission-environment"
   ];
@@ -1318,7 +1298,6 @@ test("discards a queued identical follower when its pending leader succeeds", as
   const refreshBundlePaths = [
     "/api/documents",
     "/api/exports/f960",
-    "/api/donations/intents",
     "/api/admin/backups",
     "/api/settings/emission-environment"
   ];
@@ -1481,11 +1460,6 @@ test("keeps every newer export bundle value when an older certificate finishes l
       });
       return true;
     }
-    if (url.pathname === "/api/donations/intents") {
-      const label = nextBundleLabel(url.pathname);
-      await fulfillJson(route, { intents: [bundleIntent(label)] });
-      return true;
-    }
     if (url.pathname === "/api/admin/backups") {
       const label = nextBundleLabel(url.pathname);
       await fulfillJson(route, { months: [bundleBackup(label)] });
@@ -1519,7 +1493,6 @@ test("keeps every newer export bundle value when an older certificate finishes l
   const f960Panel = page.getByRole("heading", { name: "F960" }).locator("xpath=ancestor::section[1]");
   await expect(f960Panel.locator(".export-summary")).toContainText("222");
   await expect(f960Panel.locator(".export-summary")).toContainText("$2.22");
-  await expect(page.getByText("New bundle intent")).toBeVisible();
   await expect(page.getByText("2025-02", { exact: true })).toBeVisible();
   await expect(page.getByText("Se exportan los contactos del ambiente activo (Producción).", { exact: true })).toBeVisible();
 
@@ -1533,8 +1506,6 @@ test("keeps every newer export bundle value when an older certificate finishes l
     expect(await page.getByText("Old bundle certificate").count()).toBe(0);
     await expect(f960Panel.locator(".export-summary")).toContainText("222");
     await expect(f960Panel.locator(".export-summary")).toContainText("$2.22");
-    await expect(page.getByText("New bundle intent")).toBeVisible();
-    expect(await page.getByText("Old bundle intent").count()).toBe(0);
     await expect(page.getByText("2025-02", { exact: true })).toBeVisible();
     expect(await page.getByText("2025-01", { exact: true }).count()).toBe(0);
     await expect(page.getByText("Se exportan los contactos del ambiente activo (Producción).", { exact: true })).toBeVisible();
