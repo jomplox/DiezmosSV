@@ -261,6 +261,20 @@ type DonarStep = 1 | 2 | 3;
 // touch devices stay in one tab, where a second tab is easy to lose.
 const DONAR_PROVIDER_TAB_QUERY = "(hover: hover) and (pointer: fine)";
 
+// n1co's checkout is embedded on Paso 3, and its cancelUrl brings the donor back to
+// this page inside that same frame. Only a frame of our own page counts: reading a
+// cross-origin parent's location throws.
+function framedBySelf(): boolean {
+  if (window.parent === window) {
+    return false;
+  }
+  try {
+    return window.parent.location.origin === window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
 interface DonarIntent {
   intentId: string;
   // Null when the gift is above Wompi's tope and the intent was born on n1co.
@@ -485,13 +499,14 @@ export function DonarPage() {
   // content height; mobile CSS caps the frame and keeps Wompi's own scrolling available.
   const [embedHeight, setEmbedHeight] = useState<number | null>(null);
   // n1co alternative on Paso 3: the switch request in flight, its donor-facing failure,
-  // and whether this page already left for n1co's hosted page (bfcache restore).
+  // and the n1co page embedded in place of the Wompi form once the switch succeeds.
   const [n1coRedirecting, setN1coRedirecting] = useState(false);
   const [n1coError, setN1coError] = useState("");
+  const [n1coEmbedUrl, setN1coEmbedUrl] = useState<string | null>(null);
+  const [n1coFrameLoaded, setN1coFrameLoaded] = useState(false);
   // Set once a provider's page is open in its own tab: this page waits for the entrega.
   const [providerTab, setProviderTab] = useState<{ name: "Wompi" | "n1co"; url: string } | null>(null);
   const [opensProviderTab] = useState(() => window.matchMedia(DONAR_PROVIDER_TAB_QUERY).matches);
-  const n1coLeftRef = useRef(false);
   // Explicit focus targets: the hero amount input after a quick-fill and the
   // summary's Editar control on an embedded handoff step.
   const heroInputRef = useRef<HTMLInputElement | null>(null);
@@ -826,24 +841,22 @@ export function DonarPage() {
     };
   }, [stage, intent, verifyingWompiClose]);
 
-  // Back from n1co's hosted page, the browser may restore this page as it was left:
-  // "preparando" on an intent whose Wompi link the switch deactivated. Return the
-  // donor to Paso 2 so the next entry creates a fresh intent.
+  // Backing out of n1co's embedded page lands this page inside that frame: reload it
+  // at the top so the donor starts over on one page, not one nested in another.
   useEffect(() => {
-    function onPageShow(event: PageTransitionEvent) {
-      if (!event.persisted || !n1coLeftRef.current) {
-        return;
-      }
-      n1coLeftRef.current = false;
-      setN1coRedirecting(false);
-      setN1coError("");
-      setIntent(null);
-      setStage("form");
-      setStep(2);
+    if (framedBySelf()) {
+      window.top!.location.replace(window.location.href);
     }
-    window.addEventListener("pageshow", onPageShow);
-    return () => window.removeEventListener("pageshow", onPageShow);
   }, []);
+
+  // A gift above Wompi's tope has no Wompi form: n1co's page is the only way on, so it
+  // is embedded unprompted. A failure leaves the dock to retry.
+  useEffect(() => {
+    if (stage !== "widget" || intent?.paymentProvider !== "N1CO" || n1coEmbedUrl || n1coRedirecting || n1coError) {
+      return;
+    }
+    void chooseN1co();
+  }, [stage, intent, n1coEmbedUrl, n1coRedirecting, n1coError]);
 
   // Paso 1 → Paso 2. The SV and U.S. doors both gate on amount; U.S. gift type
   // is always an explicit state choice and travels in the Stripe request.
@@ -889,6 +902,7 @@ export function DonarPage() {
       });
       setHandoff("loading");
       setN1coError("");
+      setN1coEmbedUrl(null);
       setProviderTab(null);
       setIntent(created);
       setStage("widget");
@@ -902,44 +916,30 @@ export function DonarPage() {
 
   // The donor picked n1co over the default Wompi form. The server mints the n1co link
   // and retires the Wompi one before answering, so there are never two live ways to
-  // give for one intent. On desktop n1co opens in its own tab while this page waits
-  // and polls; on phones (or when the popup is blocked) the donor leaves in this tab.
+  // give for one intent. n1co's page then loads in the Wompi form's place, and the
+  // status poll moves this page to thanks once the entrega is received.
   async function chooseN1co() {
     if (!intent || n1coRedirecting) {
       return;
     }
     setN1coError("");
     setN1coRedirecting(true);
-    // Opened inside the click, before the request, so popup blockers allow it.
-    const tab = opensProviderTab ? window.open("", "_blank") : null;
-    if (tab) {
-      tab.document.title = "n1co";
-      tab.document.body.textContent = "Preparando su entrega con n1co…";
-    }
     try {
       const { paymentLinkUrl } = await donarApi<{ paymentLinkUrl: string }>(
         `${DONAR_INTENT_PATH}/${encodeURIComponent(intent.intentId)}/n1co`,
         { method: "POST", body: {} }
       );
-      if (tab && !tab.closed) {
-        // n1co's page never gets a handle back to ours.
-        tab.opener = null;
-        tab.location.href = paymentLinkUrl;
-        setN1coRedirecting(false);
-        setProviderTab({ name: "n1co", url: paymentLinkUrl });
-        return;
-      }
-      n1coLeftRef.current = true;
-      window.location.assign(paymentLinkUrl);
+      setN1coFrameLoaded(false);
+      setN1coEmbedUrl(paymentLinkUrl);
     } catch (err) {
-      tab?.close();
-      setN1coRedirecting(false);
       if (err instanceof DonarApiError && err.code === "intent_already_paid") {
         // Wompi already received this entrega: confirm it instead of offering a second.
         setHandoff("verifying");
         return;
       }
       setN1coError(userFacingErrorMessage(err instanceof Error ? err.message : String(err)));
+    } finally {
+      setN1coRedirecting(false);
     }
   }
 
@@ -998,6 +998,7 @@ export function DonarPage() {
     setFieldErrors({});
     if (step === 3) {
       setN1coError("");
+      setN1coEmbedUrl(null);
       setProviderTab(null);
       setIntent(null);
       setStage("form");
@@ -1583,6 +1584,33 @@ export function DonarPage() {
                       ¿No ve la pestaña de {providerTab.name}? Ábrala aquí
                     </a>
                   </>
+                ) : n1coEmbedUrl ? (
+                  <>
+                    <p className="donar-intro">
+                      {intent.paymentProvider === "N1CO"
+                        ? "Para entregas mayores a $1,000.00, complete su entrega de forma segura con n1co."
+                        : "Complete su entrega de forma segura con n1co. Al finalizar, verá aquí la confirmación."}
+                    </p>
+                    {!n1coFrameLoaded && (
+                      <div className="donar-widget-loading" role="status">
+                        <span className="donar-spinner" aria-hidden="true" />
+                        Preparando su entrega con n1co…
+                      </div>
+                    )}
+                    <iframe
+                      className="donar-hosted-surface donar-embed donar-n1co-embed"
+                      src={n1coEmbedUrl}
+                      title="Entrega segura con n1co"
+                      onLoad={() => setN1coFrameLoaded(true)}
+                    />
+                    <a
+                      className="link-button donar-wompi-hint"
+                      href={n1coEmbedUrl} target="_blank" rel="noopener noreferrer"
+                      onClick={() => setProviderTab({ name: "n1co", url: n1coEmbedUrl })}
+                    >
+                      ¿Problemas con el formulario? Continúe aquí
+                    </a>
+                  </>
                 ) : intent.paymentProvider === "N1CO" ? (
                   <p className="donar-intro">Para entregas mayores a $1,000.00, complete su entrega de forma segura con n1co.</p>
                 ) : (
@@ -1632,7 +1660,7 @@ export function DonarPage() {
                 {n1coError && <p className="auth-notice" role="alert">{n1coError}</p>}
                 {/* Second-class alternative for donors already in the n1co ecosystem,
                     shaped like the U.S. Givebutter dock. Wompi stays the default form. */}
-                {intent.n1coAvailable && !providerTab && (
+                {intent.n1coAvailable && !providerTab && !n1coEmbedUrl && (
                   <div className="donar-provider-dock">
                     <button
                       type="button"

@@ -41,12 +41,18 @@ test("legacy query links remain usable but only the initial navigation carries t
 });
 
 test("the real Worker serves document anti-framing and referrer headers", async ({ request }) => {
-  const response = await request.get("/");
+  const response = await request.get("/admin");
 
   expect(response.ok()).toBe(true);
   expect(response.headers()["content-security-policy"]).toContain("frame-ancestors 'none'");
   expect(response.headers()["x-frame-options"]).toBe("DENY");
   expect(response.headers()["referrer-policy"]).toBe("no-referrer");
+
+  // The donor pages n1co's embedded checkout returns to may be framed by this site only.
+  const donor = await request.get("/");
+  expect(donor.headers()["content-security-policy"]).toContain("frame-ancestors 'self'");
+  expect(donor.headers()["x-frame-options"]).toBe("SAMEORIGIN");
+  expect(donor.headers()["referrer-policy"]).toBe("no-referrer");
 });
 
 test("a different origin cannot embed the application document", async ({ page }) => {

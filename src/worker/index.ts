@@ -487,19 +487,23 @@ function rejectUnsafePublicJsonMutation(request: Request, url: URL): Response | 
   return jsonResponse({ error: "cross_site_request", message: "Solicitud de origen no permitido." }, { status: 403 });
 }
 
-function documentResponseWithSecurityHeaders(response: Response): Response {
+// The donor pages may be framed by this site only: n1co's checkout, embedded on
+// Paso 3, navigates its frame back to the thank-you page (or the donor page on
+// cancel). Every other document refuses framing outright.
+function documentResponseWithSecurityHeaders(response: Response, pathname: string): Response {
   const contentType = response.headers.get("Content-Type")?.toLowerCase() ?? "";
   if (!contentType.includes("text/html")) {
     return response;
   }
+  const sameOriginFrames = DONOR_DOCUMENT_PATHS.has(pathname);
   const headers = new Headers(response.headers);
   const directives = (headers.get("Content-Security-Policy") ?? "")
     .split(";")
     .map((directive) => directive.trim())
     .filter((directive) => directive && !/^frame-ancestors(?:\s|$)/i.test(directive));
-  directives.push("frame-ancestors 'none'");
+  directives.push(sameOriginFrames ? "frame-ancestors 'self'" : "frame-ancestors 'none'");
   headers.set("Content-Security-Policy", directives.join("; "));
-  headers.set("X-Frame-Options", "DENY");
+  headers.set("X-Frame-Options", sameOriginFrames ? "SAMEORIGIN" : "DENY");
   headers.set("Referrer-Policy", "no-referrer");
   return new Response(response.body, {
     status: response.status,
@@ -572,7 +576,7 @@ async function handleFetch(request: Request, env: Env, ctx?: ExecutionContext): 
     if (documentRedirect) {
       return documentRedirect;
     }
-    return documentResponseWithSecurityHeaders(await env.ASSETS.fetch(request));
+    return documentResponseWithSecurityHeaders(await env.ASSETS.fetch(request), url.pathname);
   } catch (error) {
     if (error instanceof RequestBodyTooLargeError) {
       return jsonResponse({ error: "request_body_too_large", message: "La solicitud es demasiado grande." }, { status: 413 });
