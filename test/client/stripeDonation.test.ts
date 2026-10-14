@@ -208,11 +208,8 @@ describe("Stripe donor page source contract", () => {
     expect(donarSource).toContain("stripeAttemptRef.current");
     expect(donarSource).toContain("giftType: stripeGiftType");
     expect(donarSource).toContain("<StripeDonationForm");
-    // Stripe stays embedded. The only same-tab hand-off is the SV n1co alternative.
-    expect(donarSource.match(/window\.location\.assign\(/g) ?? []).toHaveLength(1);
-    expect(donarSource).toContain("window.location.assign(paymentLinkUrl)");
-    expect(donarSource.indexOf("window.location.assign(")).toBeGreaterThan(donarSource.indexOf("async function chooseN1co"));
-    expect(donarSource.indexOf("window.location.assign(")).toBeLessThan(donarSource.indexOf("function stripeFingerprint"));
+    // Stripe stays embedded, as does every SV provider: the donor page never hands off same-tab.
+    expect(donarSource.match(/window\.location\.assign\(/g) ?? []).toHaveLength(0);
   });
 
   it("delegates the entire form to Stripe Embedded Checkout without pinning payment methods", () => {

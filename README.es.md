@@ -736,8 +736,8 @@ se desactiva con `MOCK_EXTERNAL_SERVICES = "true"`.
 
 En la puerta SV, el Paso 3 mantiene el formulario embebido de Wompi como opción predeterminada. Debajo,
 los donantes que ya usan n1co ven una pequeña opción **Diezmar con n1co / Ofrendar con n1co** (con la
-forma de la opción Givebutter de EE. UU.) que los lleva a la página alojada de n1co en la misma
-pestaña. Ambos carriles terminan en el mismo CDE: n1co nunca emite un DTE propio.
+forma de la opción Givebutter de EE. UU.) que carga la página alojada de n1co en lugar de Wompi en el
+Paso 3. Ambos carriles terminan en el mismo CDE: n1co nunca emite un DTE propio.
 
 La opción solo se ofrece cuando el Worker tiene `N1CO_CHECKOUT_SECRET_KEY` y `N1CO_WEBHOOK_SECRET`
 (o corre con `MOCK_EXTERNAL_SERVICES = "true"`). Omita ambos para ocultarla.
@@ -759,6 +759,17 @@ compiten, el cambio conserva la orden ya guardada. El costo es una orden n1co si
 entrega SV en el panel de n1co. La API de n1co no acepta datos del comprador, así que el nombre, correo
 y teléfono del donante no se pueden prellenar; la entrega viaja como una línea llamada "Diezmo" u
 "Ofrenda", con el logo del donante como imagen cuando hay uno cargado.
+
+**Embebido en el Paso 3.** La página alojada de n1co no impone restricciones de enmarcado, así que se
+carga en un iframe en el Paso 3 igual que el formulario de Wompi, con el mismo enlace "¿Problemas con
+el formulario? Continúe aquí" para abrirla en una pestaña nueva. n1co termina navegando su propio
+marco hacia la URL de éxito o de cancelación, por lo que las páginas del donante (`/` y
+`/donar/gracias`) responden con `frame-ancestors 'self'` y `X-Frame-Options: SAMEORIGIN`; todo otro
+documento sigue rechazando el enmarcado por completo. Dentro del marco, la página de agradecimiento
+avisa a la página principal de una entrega verificada, y la página del donante se recarga a sí misma en
+el nivel superior para que el sitio nunca quede anidado dentro de sí mismo. El sondeo de estado del
+Paso 3 suele mostrar el agradecimiento antes de que la página de éxito de n1co termine su cuenta
+regresiva.
 
 **Cambio de un intento.** `POST /api/donations/intent/{id}/n1co` genera un CheckoutLink de n1co por el
 monto exacto del intento (`orderReference` = el id del intento; el éxito regresa a `/donar/gracias` y la

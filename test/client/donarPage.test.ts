@@ -1242,7 +1242,7 @@ describe("Stripe donar page source contract", () => {
 
 // n1co is a second-class alternative on the SV door: Wompi's embedded form stays the
 // default on Paso 3, and donors already in the n1co ecosystem get a small dock (same
-// shape as the U.S. Givebutter dock) that hands them to n1co's hosted page.
+// shape as the U.S. Givebutter dock) that loads n1co's hosted page in its place.
 describe("donar n1co alternative", () => {
   const svEntrega = donarSource.slice(
     donarSource.indexOf("{/* Paso 3 — Entrega (SV door)"),
@@ -1252,7 +1252,7 @@ describe("donar n1co alternative", () => {
 
   it("offers the dock only when the server advertises n1co, below the default Wompi form", () => {
     expect(donarSource).toMatch(/interface DonarIntent \{[^}]*n1coAvailable\?: boolean;/);
-    expect(svEntrega).toContain("intent.n1coAvailable && !providerTab && (");
+    expect(svEntrega).toContain("intent.n1coAvailable && !providerTab && !n1coEmbedUrl && (");
     // Wompi's iframe renders first and unconditionally; the dock never replaces it.
     expect(svEntrega.indexOf('className="donar-hosted-surface donar-embed"')).toBeGreaterThan(-1);
     expect(svEntrega.indexOf("donar-provider-dock")).toBeGreaterThan(
@@ -1262,6 +1262,9 @@ describe("donar n1co alternative", () => {
   });
 
   it("hands a gift above Wompi's tope to n1co alone, with no Wompi form to fail on", () => {
+    // n1co's page is embedded unprompted: there is no other way on for this gift.
+    const autoEmbed = donarSource.slice(donarSource.indexOf('intent?.paymentProvider !== "N1CO"') - 200);
+    expect(autoEmbed.slice(0, 600)).toContain("void chooseN1co()");
     expect(donarSource).toMatch(/interface DonarIntent \{[^}]*urlEnlace: string \| null;[^}]*urlEnlaceLargo: string \| null;/);
     expect(donarSource).toMatch(/interface DonarIntent \{[^}]*paymentProvider\?: "WOMPI" \| "N1CO";/);
     const n1coOnly = svEntrega.slice(svEntrega.indexOf('intent.paymentProvider === "N1CO" ? ('));
@@ -1273,7 +1276,7 @@ describe("donar n1co alternative", () => {
     // The Wompi form lives only in the other branch, and the dock follows both.
     const wompiBranch = n1coOnly.slice(n1coOnly.indexOf(") : ("));
     expect(wompiBranch.indexOf('className="donar-hosted-surface donar-embed"')).toBeGreaterThan(-1);
-    expect(wompiBranch.indexOf("intent.n1coAvailable && !providerTab && (")).toBeGreaterThan(
+    expect(wompiBranch.indexOf("intent.n1coAvailable && !providerTab && !n1coEmbedUrl && (")).toBeGreaterThan(
       wompiBranch.indexOf('className="donar-hosted-surface donar-embed"')
     );
   });
@@ -1287,28 +1290,39 @@ describe("donar n1co alternative", () => {
     expect(stylesSource).toMatch(/\.donar-provider-choice-n1co img\s*\{[^}]*background:\s*#000000;/);
   });
 
-  it("switches the intent server-side, then opens n1co in a new tab on desktop and the same tab on phones", () => {
+  it("switches the intent server-side, then embeds n1co's page in place of the Wompi form", () => {
     const chooser = donarSource.slice(donarSource.indexOf("async function chooseN1co"));
     expect(chooser).toContain("`${DONAR_INTENT_PATH}/${encodeURIComponent(intent.intentId)}/n1co`");
     expect(chooser).toContain('method: "POST"');
-    expect(donarSource).toContain('const DONAR_PROVIDER_TAB_QUERY = "(hover: hover) and (pointer: fine)";');
-    expect(donarSource).toContain("useState(() => window.matchMedia(DONAR_PROVIDER_TAB_QUERY).matches)");
-    // The tab opens inside the click, before the request, so popup blockers allow it.
-    const opened = chooser.indexOf('opensProviderTab ? window.open("", "_blank") : null');
-    expect(opened).toBeGreaterThan(-1);
-    expect(opened).toBeLessThan(chooser.indexOf("await donarApi"));
-    // n1co's page never gets a handle back to ours.
-    expect(chooser.indexOf("tab.opener = null")).toBeGreaterThan(-1);
-    expect(chooser.indexOf("tab.opener = null")).toBeLessThan(chooser.indexOf("tab.location.href = paymentLinkUrl"));
-    expect(chooser).toContain('setProviderTab({ name: "n1co", url: paymentLinkUrl })');
-    // Phones, or a blocked popup, leave in the same tab.
-    expect(chooser).toContain("window.location.assign(paymentLinkUrl)");
-    expect(chooser.slice(chooser.indexOf("} catch (err) {") + 1)).toMatch(/^[^}]*tab\?\.close\(\)/);
-    expect(donarSource.match(/window\.open\(/g) ?? []).toHaveLength(1);
+    expect(chooser.slice(0, chooser.indexOf("} catch (err) {"))).toContain("setN1coEmbedUrl(paymentLinkUrl)");
+    // The donor never leaves this page for n1co, and no tab is opened on their behalf.
+    expect(donarSource.match(/window\.open\(/g) ?? []).toHaveLength(0);
+    expect(donarSource).not.toContain("window.location.assign(paymentLinkUrl)");
+
+    const embedded = svEntrega.slice(svEntrega.indexOf("n1coEmbedUrl ? ("));
+    expect(embedded.length).toBeLessThan(svEntrega.length);
+    const branch = embedded.slice(0, embedded.indexOf(") : "));
+    expect(branch).toContain("<iframe");
+    expect(branch).toContain('className="donar-hosted-surface donar-embed donar-n1co-embed"');
+    expect(branch).toContain("src={n1coEmbedUrl}");
+    expect(branch).toContain('title="Entrega segura con n1co"');
+    // Its escape hatch opens n1co in its own tab, and this page then waits for it.
+    expect(branch).toContain('href={n1coEmbedUrl} target="_blank" rel="noopener noreferrer"');
+    expect(branch).toContain('setProviderTab({ name: "n1co", url: n1coEmbedUrl })');
+    expect(branch).toContain("¿Problemas con el formulario? Continúe aquí");
+  });
+
+  it("breaks out to the top when n1co's frame returns the donor to this page", () => {
+    // n1co's cancelUrl loads the donor page inside the very frame that embedded n1co.
+    const breakout = donarSource.slice(donarSource.indexOf("function framedBySelf"));
+    expect(breakout.length).toBeLessThan(donarSource.length);
+    expect(breakout.slice(0, 600)).toContain("window.parent.location.origin === window.location.origin");
+    expect(donarSource).toContain("window.top!.location.replace(window.location.href)");
   });
 
   it("opens Wompi's escape link in a new tab on desktop and waits here, like n1co", () => {
-    const hint = svEntrega.slice(svEntrega.lastIndexOf("<a", svEntrega.indexOf("¿Problemas con el formulario? Continúe aquí")));
+    // The Wompi form's hatch is the last one; n1co's embed carries its own above it.
+    const hint = svEntrega.slice(svEntrega.lastIndexOf("<a", svEntrega.lastIndexOf("¿Problemas con el formulario? Continúe aquí")));
     expect(hint).toMatch(/^<a\s+className="link-button donar-wompi-hint"\s+href=\{intent\.urlEnlace \?\? undefined\}/);
     expect(hint).toContain('target={opensProviderTab ? "_blank" : undefined}');
     expect(hint).toContain('rel={opensProviderTab ? "noopener noreferrer" : undefined}');
@@ -1338,12 +1352,6 @@ describe("donar n1co alternative", () => {
     expect(n1coDock).toContain("disabled={n1coRedirecting}");
     expect(n1coDock).toContain('"Preparando su entrega con n1co…"');
     expect(svEntrega).toContain("{n1coError && <p className=\"auth-notice\" role=\"alert\">{n1coError}</p>}");
-  });
-
-  it("resets a page restored from the back-forward cache after leaving for n1co", () => {
-    const effect = donarSource.slice(donarSource.indexOf('window.addEventListener("pageshow"') - 400);
-    expect(effect).toContain("event.persisted");
-    expect(effect).toContain("n1coLeftRef.current");
   });
 
   it("keeps the mobile dock in flow so it never covers the Wompi form", () => {

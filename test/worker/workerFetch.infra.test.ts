@@ -470,6 +470,34 @@ describe("static document security policy", () => {
     expect(csp).not.toContain("legacy.example");
   });
 
+  it("lets only the pages n1co returns to load inside this site's own frames", async () => {
+    // n1co's checkout is embedded on Paso 3; when it finishes or is cancelled it
+    // navigates its frame back to /donar/gracias or /donar (served at /). Those
+    // pages must load there, framed by our own page and nobody else's. Every other
+    // page stays DENY.
+    const documentHeaders = async (path: string) => {
+      const response = await worker.fetch(
+        new Request(`https://example.org${path}`),
+        env(new InMemoryD1(), {
+          ASSETS: {
+            fetch: () => Promise.resolve(new Response("<!doctype html>", { headers: { "Content-Type": "text/html" } }))
+          } as unknown as Fetcher
+        })
+      );
+      return {
+        frameAncestors: (response.headers.get("Content-Security-Policy") ?? "").match(/frame-ancestors [^;]+/)?.[0],
+        xFrameOptions: response.headers.get("X-Frame-Options")
+      };
+    };
+
+    for (const path of ["/", "/donar/gracias"]) {
+      await expect(documentHeaders(path), path).resolves.toEqual({ frameAncestors: "frame-ancestors 'self'", xFrameOptions: "SAMEORIGIN" });
+    }
+    for (const path of ["/admin", "/admin/documentos", "/donar/stripe/resultado"]) {
+      await expect(documentHeaders(path), path).resolves.toEqual({ frameAncestors: "frame-ancestors 'none'", xFrameOptions: "DENY" });
+    }
+  });
+
   it("leaves non-document asset responses unchanged", async () => {
     const db = new InMemoryD1();
     const assetResponse = new Response("console.log('ok')", {

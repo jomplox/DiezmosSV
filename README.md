@@ -708,7 +708,7 @@ sweep is disabled under `MOCK_EXTERNAL_SERVICES = "true"`.
 
 On the SV door, Paso 3 keeps Wompi's embedded form as the default. Below it, donors who already
 use n1co see a small **Diezmar con n1co / Ofrendar con n1co** option (shaped like the U.S.
-Givebutter option) that hands them to n1co's hosted page in the same tab. Both lanes end in the
+Givebutter option) that loads n1co's hosted page in Wompi's place on Paso 3. Both lanes end in the
 same CDE: n1co never issues a DTE of its own.
 
 The option is offered only when the Worker has both `N1CO_CHECKOUT_SECRET_KEY` and
@@ -730,6 +730,15 @@ it expires with the intent. If preparation fails, the switch mints on demand; if
 keeps the order already stored. The cost is one unpaid n1co order per SV gift in n1co's dashboard. n1co's
 API takes no buyer fields, so the donor's name, email and phone cannot be prefilled; the gift travels as
 one line item named "Diezmo" or "Ofrenda", with the donor logo as its image when one is uploaded.
+
+**Embedded on Paso 3.** n1co's hosted page sends no framing restrictions, so it loads in an iframe on
+Paso 3 the way Wompi's form does, with the same "¿Problemas con el formulario? Continúe aquí" link
+opening it in a new tab. n1co ends by navigating its own frame to the success or cancel URL, so the
+donor pages (`/` and `/donar/gracias`) answer with `frame-ancestors 'self'` and
+`X-Frame-Options: SAMEORIGIN`; every other document still refuses framing outright. Inside the frame,
+the thank-you page reports a verified gift to the parent page, and the donor page reloads itself at
+the top so the site never nests inside itself. The Paso 3 status poll usually shows the thank-you
+before n1co's own success page finishes its countdown.
 
 **Switching an intent.** `POST /api/donations/intent/{id}/n1co` mints an n1co CheckoutLink for the
 exact intent amount (`orderReference` = the intent id; success returns to `/donar/gracias`, cancel to

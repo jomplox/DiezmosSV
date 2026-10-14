@@ -711,7 +711,7 @@ test("offers n1co as a quiet alternative beneath the default Wompi form", async 
     contentType: "text/html",
     body: "<html><body>mock wompi hosted flow</body></html>"
   }));
-  // Context-wide: n1co's page opens in a tab of its own, out of reach of page routes.
+  // Context-wide: n1co's escape link opens a tab of its own, out of reach of page routes.
   await page.context().route("https://pay-sandbox.n1co.shop/**", (route) => route.fulfill({
     contentType: "text/html",
     body: "<html><body>mock n1co hosted flow</body></html>"
@@ -789,11 +789,22 @@ test("offers n1co as a quiet alternative beneath the default Wompi form", async 
   await expect(embed).toBeVisible();
   await expect(choice).toBeEnabled();
 
-  // On desktop, n1co opens in its own tab (with no handle back to ours) while this
-  // page waits, then moves to thanks on its own once the entrega is received.
+  // n1co's page then takes the Wompi form's place, right here on Paso 3.
   switchFails = false;
-  const opened = page.context().waitForEvent("page");
   await choice.click();
+  const n1coEmbed = page.locator("iframe.donar-n1co-embed");
+  await expect(n1coEmbed).toHaveAttribute("src", "https://pay-sandbox.n1co.shop/mock-e2e");
+  await expect(page.frameLocator("iframe.donar-n1co-embed").getByText("mock n1co hosted flow")).toBeVisible();
+  await expect(page.locator('iframe[title="Entrega segura con Wompi"]')).toHaveCount(0);
+  await expect(choice).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas" })).toBeVisible();
+  expect(page.context().pages()).toHaveLength(1);
+  await page.screenshot({ path: testInfo.outputPath("sv-n1co-embedded.png"), animations: "disabled" });
+
+  // Its escape hatch opens n1co in a tab of its own (no handle back to ours), while
+  // this page waits and moves to thanks once the entrega is received.
+  const opened = page.context().waitForEvent("page");
+  await page.getByRole("link", { name: "¿Problemas con el formulario? Continúe aquí" }).click();
   const n1coTab = await opened;
   await n1coTab.waitForURL("https://pay-sandbox.n1co.shop/mock-e2e");
   await expect(n1coTab.getByText("mock n1co hosted flow")).toBeVisible();
@@ -802,8 +813,7 @@ test("offers n1co as a quiet alternative beneath the default Wompi form", async 
   await expect(page.getByRole("status")).toHaveText(
     "Complete su entrega en la pestaña de n1co. Al finalizar, verá aquí la confirmación."
   );
-  await expect(embed).toHaveCount(0);
-  await expect(choice).toHaveCount(0);
+  await expect(n1coEmbed).toHaveCount(0);
   await expect(page.getByRole("link", { name: "¿No ve la pestaña de n1co? Ábrala aquí" }))
     .toHaveAttribute("href", "https://pay-sandbox.n1co.shop/mock-e2e");
   await page.screenshot({ path: testInfo.outputPath("sv-n1co-waiting.png"), animations: "disabled" });
@@ -857,7 +867,7 @@ test.describe("on a phone", () => {
   const { defaultBrowserType: _browser, ...phone } = devices["Pixel 7"];
   test.use(phone);
 
-test("hands a gift above Wompi's tope to n1co alone, in the same tab", async ({ page }, testInfo) => {
+test("hands a gift above Wompi's tope to n1co alone, embedded on Paso 3", async ({ page }, testInfo) => {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.route("https://pay-sandbox.n1co.shop/**", (route) => route.fulfill({
@@ -898,19 +908,25 @@ test("hands a gift above Wompi's tope to n1co alone, in the same tab", async ({ 
   await page.getByLabel("Distrito").selectOption({ index: 1 });
   await page.getByRole("button", { name: "Continuar con su diezmo" }).click();
 
+  // No Wompi form to decline the gift: n1co's page loads in its place, unprompted.
   await expect(page.getByText("Para entregas mayores a $1,000.00, complete su entrega de forma segura con n1co.")).toBeVisible();
-  await expect(page.locator("iframe.donar-embed")).toHaveCount(0);
-  await expect(page.getByRole("link", { name: "¿Problemas con el formulario? Continúe aquí" })).toHaveCount(0);
-  await expect(page.locator('.donar-widget-loading[role="status"]')).toHaveCount(0);
-  const choice = page.getByRole("button", { name: /^Diezmar con n1co/ });
-  await expect(choice).toBeVisible();
-  await expect(choice).toBeInViewport();
+  await expect(page.locator('iframe[title="Entrega segura con Wompi"]')).toHaveCount(0);
+  const n1coEmbed = page.locator("iframe.donar-n1co-embed");
+  await expect(n1coEmbed).toHaveAttribute("src", "https://pay-sandbox.n1co.shop/mock-e2e-only");
+  const n1coFrame = page.frameLocator("iframe.donar-n1co-embed");
+  await expect(n1coFrame.getByText("mock n1co hosted flow")).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Diezmar con n1co/ })).toHaveCount(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(page.viewportSize()!.width);
   await page.screenshot({ path: testInfo.outputPath("sv-n1co-only-mobile.png"), animations: "disabled" });
 
-  // A touch device leaves in this tab: no second tab to lose.
-  await choice.click();
-  await page.waitForURL("https://pay-sandbox.n1co.shop/mock-e2e-only");
+  // n1co's back arrow follows the cancelUrl, landing our donor page inside the frame, which
+  // must reload it at the top. Chrome won't let a public page's frame navigate itself to
+  // 127.0.0.1 (local network access), so the browser drives that navigation here.
+  const n1coPage = page.frames().find((frame) => frame.url() === "https://pay-sandbox.n1co.shop/mock-e2e-only")!;
+  await n1coPage.goto(`${new URL(page.url()).origin}/donar?ruta=sv`).catch(() => {}); // the frame detaches as the top reloads
+  await page.waitForURL((url) => url.pathname === "/" && url.searchParams.get("ruta") === "sv");
+  await expect(page.getByLabel("Monto")).toBeVisible();
+  await expect(n1coEmbed).toHaveCount(0);
   expect(page.context().pages()).toHaveLength(1);
   expect(intentBodies.map((body) => body.amount)).toEqual(["1500"]);
   expect(errors).toEqual([]);
