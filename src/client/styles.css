@@ -4717,15 +4717,17 @@ pre {
     flex-basis: clamp(24px, 7.1vw, 28px);
   }
 
-  /* One line under the brand: "SU ENTREGA · Diezmo · $850.65 Editar". The
+  /* One line under the brand: "SU ENTREGA  Diezmo · $850.65 Editar". The
      bordered summary card and the redundant provider introduction give their
-     height to the hosted form; the brand title above is untouched. */
+     height to the hosted form; the brand title above is untouched. Space alone
+     separates the gray caps label from the bold summary: a separator glyph
+     would lead the second line whenever a narrow phone wraps the summary. */
   .donar-card-provider-step > .donar-provider-head {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     justify-content: center;
-    gap: 0 6px;
+    gap: 0 10px;
   }
 
   .donar-card-provider-step .donar-provider-head .donar-step-label {
@@ -4737,11 +4739,6 @@ pre {
     border: 0;
     border-radius: 0;
     padding: 0;
-  }
-
-  .donar-card-provider-step .donar-summary::before {
-    content: "·";
-    color: #767676;
   }
 
   .donar-card-provider-step .donar-summary-line {

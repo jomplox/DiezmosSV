@@ -103,6 +103,37 @@ async function expectTightProviderChrome(page: Page): Promise<void> {
   expect((await page.locator(".donar-provider-head").boundingBox())!.height).toBeLessThanOrEqual(26);
 }
 
+async function providerHeadLayout(page: Page): Promise<{
+  wrapped: boolean;
+  separator: string;
+  labelToSummaryGap: number;
+}> {
+  return page.locator(".donar-provider-head").evaluate((head) => {
+    const label = head.querySelector(".donar-step-label")!.getBoundingClientRect();
+    const line = head.querySelector(".donar-summary-line")!.getBoundingClientRect();
+    return {
+      wrapped: line.top >= label.bottom,
+      separator: getComputedStyle(head.querySelector(".donar-summary")!, "::before").content,
+      labelToSummaryGap: line.left - label.right
+    };
+  });
+}
+
+async function expectProviderHeadWithoutStrandedSeparator(page: Page): Promise<void> {
+  // One line on a 393pt phone, kept apart by space alone...
+  await page.setViewportSize({ width: 393, height: 852 });
+  const oneLine = await providerHeadLayout(page);
+  expect(oneLine.wrapped).toBe(false);
+  expect(oneLine.labelToSummaryGap).toBeGreaterThanOrEqual(8);
+  // ...so when a narrow phone wraps the summary under the label (an iPhone SE
+  // already does on staging), no separator glyph is left leading the second line.
+  await page.setViewportSize({ width: 320, height: 568 });
+  const wrapped = await providerHeadLayout(page);
+  expect(wrapped.wrapped).toBe(true);
+  expect(wrapped.separator).toBe("none");
+  await page.setViewportSize({ width: 393, height: 852 });
+}
+
 async function rememberNode(locator: Locator, key: string): Promise<void> {
   await locator.evaluate((element, storageKey) => {
     (window as Window & { __providerNodes?: Record<string, Element> }).__providerNodes ??= {};
@@ -1694,6 +1725,7 @@ test("Stripe bounds the rendered frame and preserves native scrolling without an
   await expect(stripeViewport).toBeVisible();
   expect(await providerHeadRowSpread(page)).toBeLessThanOrEqual(4);
   await expectTightProviderChrome(page);
+  await expectProviderHeadWithoutStrandedSeparator(page);
   // The 501c3 disclosure is one legal line: at most two balanced lines on a
   // phone, and the legal name never breaks across them.
   const introLines = await page.locator(".donar-handoff > .donar-intro").evaluate((intro) => {
