@@ -82,6 +82,16 @@ async function enterStripeHandoff(page: Page): Promise<void> {
   await page.getByRole("button", { name: "Continuar con su diezmo", exact: true }).click();
 }
 
+async function providerHeadRowSpread(page: Page): Promise<number> {
+  const boxes = await Promise.all([
+    page.locator(".donar-provider-head .donar-step-label").boundingBox(),
+    page.locator(".donar-provider-head .donar-summary-line").boundingBox(),
+    page.getByRole("button", { name: "Editar", exact: true }).boundingBox()
+  ]);
+  const centers = boxes.map((box) => box!.y + box!.height / 2);
+  return Math.max(...centers) - Math.min(...centers);
+}
+
 async function rememberNode(locator: Locator, key: string): Promise<void> {
   await locator.evaluate((element, storageKey) => {
     (window as Window & { __providerNodes?: Record<string, Element> }).__providerNodes ??= {};
@@ -538,6 +548,14 @@ test("SV embedded form uses the compact mobile provider shell", async ({ page },
     await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas" })).toBeVisible();
     await expect(page.getByRole("link", { name: "¿Problemas con el formulario? Continúe aquí" })).toBeInViewport();
   }
+  // Phones fold "SU ENTREGA" and the gift summary into one line under the brand and
+  // drop the redundant Wompi introduction, so the form starts higher.
+  const wompiIntro = page.getByText("Complete su entrega de forma segura con Wompi.", { exact: false });
+  await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas" })).toHaveCSS("font-size", "20px");
+  expect(await providerHeadRowSpread(page)).toBeLessThanOrEqual(4);
+  expect((await page.locator(".donar-provider-head").boundingBox())!.height).toBeLessThanOrEqual(40);
+  await expect(wompiIntro).toBeHidden();
+  expect((await embed.boundingBox())!.y).toBeLessThan(170);
   await page.screenshot({ path: testInfo.outputPath("sv-compact-mobile.png") });
   const frame = page.frames().find((frame) => frame.url().startsWith("https://mock.wompi.sv/"))!;
   const frameBox = (await embed.boundingBox())!;
@@ -546,6 +564,10 @@ test("SV embedded form uses the compact mobile provider shell", async ({ page },
   await expect.poll(() => frame.evaluate(() => window.scrollY)).toBeGreaterThan(0);
   expect(await page.evaluate(() => window.scrollY)).toBe(0);
   expect(errors).toEqual([]);
+  // Desktop keeps the stacked step label, bordered summary card and introduction.
+  await page.setViewportSize({ width: 852, height: 987 });
+  expect(await providerHeadRowSpread(page)).toBeGreaterThan(20);
+  await expect(wompiIntro).toBeVisible();
   await page.getByRole("button", { name: "Editar", exact: true }).click();
   await expect(page.getByLabel("Monto")).toBeVisible();
   await expect(page.locator(".donar-card-provider-step")).toHaveCount(0);
@@ -1650,6 +1672,8 @@ test("Stripe bounds the rendered frame and preserves native scrolling without an
   await page.setViewportSize({ width: 393, height: 852 });
   const stripeViewport = page.getByRole("region", { name: "Formulario seguro de Stripe" });
   await expect(stripeViewport).toBeVisible();
+  expect(await providerHeadRowSpread(page)).toBeLessThanOrEqual(4);
+  expect((await page.locator(".donar-provider-head").boundingBox())!.height).toBeLessThanOrEqual(40);
   const viewportMetrics = await stripeViewport.evaluate((element) => {
     const style = getComputedStyle(element);
     return {

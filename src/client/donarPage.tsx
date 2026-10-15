@@ -1127,10 +1127,14 @@ export function DonarPage() {
           <span>{DONAR_LANDING_HEADING}</span>
           {usDonation ? <UsFlagIcon className="donar-title-lane-flag" /> : <SvTitleWorldIcon />}
         </h1>
-        {step > 1 && (
-          <p className="donar-step-label">
-            {step === 2 && !usDonation ? DONAR_STEP_TITLE_DATOS : DONAR_STEP_TITLE_ENTREGA}
-          </p>
+        {step > 1 && !providerStep && <p className="donar-step-label">{DONAR_STEP_TITLE_DATOS}</p>}
+        {/* Provider steps pair the step label with the gift summary: stacked on
+            desktop, folded into one line on phones so the hosted form gains room. */}
+        {providerStep && (
+          <div className="donar-provider-head">
+            <p className="donar-step-label">{DONAR_STEP_TITLE_ENTREGA}</p>
+            {summary}
+          </div>
         )}
 
         {/* Paso 1 assurance: right under the heading, name the legal document this
@@ -1437,7 +1441,6 @@ export function DonarPage() {
             owns the embedded form and dynamically renders eligible methods. */}
         {step === 2 && usDonation && (
           <div className={`donar-stripe donar-step${givebutterAvailable ? " donar-stripe-has-provider-dock" : ""}`}>
-            {summary}
             <div className="donar-handoff">
               {/* tabIndex={-1} makes this programmatically focusable without adding a
                   tab stop: it is the landing point when the donor returns to Stripe. */}
@@ -1564,12 +1567,10 @@ export function DonarPage() {
           </div>
         )}
 
-        {/* Paso 3 — Entrega (SV door). Summary line above the existing Wompi
-            handoff: embedded checkout iframe, manual backup, polling, neutral close. */}
+        {/* Paso 3 — Entrega (SV door). The summary rides in the provider head above
+            the Wompi handoff: embedded checkout iframe, manual backup, polling, neutral close. */}
         {step === 3 && !usDonation && (
           <div className={`donar-step donar-wompi${stage === "widget" && intent?.n1coAvailable ? " donar-wompi-has-provider-dock" : ""}`}>
-            {summary}
-
             {stage === "widget" && intent && (
               <div className="donar-handoff">
                 {/* Above Wompi's tope the server mints only an n1co link: no Wompi form
@@ -1586,7 +1587,9 @@ export function DonarPage() {
                   </>
                 ) : n1coEmbedUrl ? (
                   <>
-                    <p className="donar-intro">
+                    {/* Only the generic line is redundant beside the frame on phones;
+                        the over-tope explanation says why n1co replaced Wompi. */}
+                    <p className={intent.paymentProvider === "N1CO" ? "donar-intro" : "donar-intro donar-provider-intro"}>
                       {intent.paymentProvider === "N1CO"
                         ? "Para entregas mayores a $1,000.00, complete su entrega de forma segura con n1co."
                         : "Complete su entrega de forma segura con n1co. Al finalizar, verá aquí la confirmación."}
@@ -1615,7 +1618,7 @@ export function DonarPage() {
                   <p className="donar-intro">Para entregas mayores a $1,000.00, complete su entrega de forma segura con n1co.</p>
                 ) : (
                 <>
-                <p className="donar-intro">Complete su entrega de forma segura con Wompi. Al finalizar, verá aquí la confirmación.</p>
+                <p className="donar-intro donar-provider-intro">Complete su entrega de forma segura con Wompi. Al finalizar, verá aquí la confirmación.</p>
                 {/* The iframe stays mounted for the WHOLE widget stage. Wompi posts
                     { message: "close" } both when the donor backs out and when it hands
                     off to the bank's 3DS challenge — and that challenge renders inside
