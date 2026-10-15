@@ -4675,10 +4675,10 @@ pre {
     grid-template-columns: 1fr auto auto 1fr;
     grid-template-rows: auto auto auto minmax(0, 1fr);
     column-gap: 8px;
-    row-gap: 10px;
+    row-gap: 8px;
     height: 100%;
     min-height: 0;
-    padding-top: 12px;
+    padding-top: 8px;
     padding-bottom: 0;
     overflow: hidden;
   }
@@ -4756,6 +4756,14 @@ pre {
     display: none;
   }
 
+  /* The chrome rows hug their ~16px text: "Atrás" and "Editar" keep their 38px
+     tap targets, which overflow into the row gaps instead of stretching the
+     rows. Nothing visible moves except the hosted form, which starts higher. */
+  .donar-card-provider-step .donar-change-door,
+  .donar-card-provider-step .donar-summary-edit {
+    margin-block: -8px;
+  }
+
   .donar-card-provider-step .donar-stripe,
   .donar-card-provider-step .donar-handoff {
     gap: 8px;
@@ -4831,7 +4839,10 @@ pre {
 
   .donar-card-provider-step .donar-wompi-hint {
     align-self: center;
-    margin-bottom: 4px;
+  }
+
+  .donar-card-provider-step > .donar-support {
+    margin-top: 0;
   }
 
   .donar-stripe-has-provider-dock {

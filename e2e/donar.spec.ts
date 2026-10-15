@@ -92,6 +92,17 @@ async function providerHeadRowSpread(page: Page): Promise<number> {
   return Math.max(...centers) - Math.min(...centers);
 }
 
+async function expectTightProviderChrome(page: Page): Promise<void> {
+  // Phone provider rows hug their text; the buttons keep 38px tap targets that
+  // overflow into the surrounding gaps instead of stretching the rows.
+  const back = page.getByRole("button", { name: /Atrás/ });
+  const edit = page.getByRole("button", { name: "Editar", exact: true });
+  expect((await back.boundingBox())!.height).toBeGreaterThanOrEqual(38);
+  expect((await edit.boundingBox())!.height).toBeGreaterThanOrEqual(38);
+  expect((await page.locator(".donar-card-top").boundingBox())!.height).toBeLessThanOrEqual(26);
+  expect((await page.locator(".donar-provider-head").boundingBox())!.height).toBeLessThanOrEqual(26);
+}
+
 async function rememberNode(locator: Locator, key: string): Promise<void> {
   await locator.evaluate((element, storageKey) => {
     (window as Window & { __providerNodes?: Record<string, Element> }).__providerNodes ??= {};
@@ -553,9 +564,20 @@ test("SV embedded form uses the compact mobile provider shell", async ({ page },
   const wompiIntro = page.getByText("Complete su entrega de forma segura con Wompi.", { exact: false });
   await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas" })).toHaveCSS("font-size", "20px");
   expect(await providerHeadRowSpread(page)).toBeLessThanOrEqual(4);
-  expect((await page.locator(".donar-provider-head").boundingBox())!.height).toBeLessThanOrEqual(40);
   await expect(wompiIntro).toBeHidden();
-  expect((await embed.boundingBox())!.y).toBeLessThan(170);
+  expect((await embed.boundingBox())!.y).toBeLessThan(120);
+  await expectTightProviderChrome(page);
+  // The escape hatch, the n1co row and the support line stack tight under the form.
+  const bottomStack = await Promise.all([
+    embed.boundingBox(),
+    page.getByRole("link", { name: "¿Problemas con el formulario? Continúe aquí" }).boundingBox(),
+    page.locator(".donar-provider-dock").boundingBox(),
+    page.locator(".donar-support").last().boundingBox()
+  ]);
+  for (let index = 1; index < bottomStack.length; index += 1) {
+    const above = bottomStack[index - 1]!;
+    expect(bottomStack[index]!.y - (above.y + above.height)).toBeLessThanOrEqual(8);
+  }
   await page.screenshot({ path: testInfo.outputPath("sv-compact-mobile.png") });
   const frame = page.frames().find((frame) => frame.url().startsWith("https://mock.wompi.sv/"))!;
   const frameBox = (await embed.boundingBox())!;
@@ -1673,7 +1695,7 @@ test("Stripe bounds the rendered frame and preserves native scrolling without an
   const stripeViewport = page.getByRole("region", { name: "Formulario seguro de Stripe" });
   await expect(stripeViewport).toBeVisible();
   expect(await providerHeadRowSpread(page)).toBeLessThanOrEqual(4);
-  expect((await page.locator(".donar-provider-head").boundingBox())!.height).toBeLessThanOrEqual(40);
+  await expectTightProviderChrome(page);
   const viewportMetrics = await stripeViewport.evaluate((element) => {
     const style = getComputedStyle(element);
     return {
