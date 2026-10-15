@@ -3683,12 +3683,6 @@ pre {
   vertical-align: -0.08em;
 }
 
-.donar-intro-flag {
-  display: inline-flex;
-  margin-left: 0.3em;
-  vertical-align: -0.08em;
-}
-
 /* Step label under the brand title on the working steps (Paso ≥2): a small
    caps-tracked Gotham line ("SUS DATOS", "SU ENTREGA") that orients without
    competing with the ceremonial header. #767676 clears WCAG AA (4.54:1). */
@@ -3752,6 +3746,13 @@ pre {
   color: inherit;
   text-decoration: underline;
   text-underline-offset: 0.15em;
+}
+
+/* The legal name is one phrase: the line wraps around it, not through it. An
+   inline-block (not nowrap) still wraps inside on a phone narrower than the name. */
+.donar-intro-legal {
+  display: inline-block;
+  max-width: 100%;
 }
 
 /* Tells the donor that name + email are collected on Wompi's sheet, not this form. */
@@ -4808,6 +4809,7 @@ pre {
     margin-top: 0;
     font-size: 13px;
     line-height: 1.35;
+    text-wrap: balance;
   }
 
   .donar-card-provider-step .donar-provider-viewport {

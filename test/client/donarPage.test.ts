@@ -1149,19 +1149,21 @@ describe("Stripe donar page source contract", () => {
   it("shows the production 501c3 explanation and mounts the Stripe form in place", () => {
     const intro = stripeIntro("Iglesia Ejemplo Central");
     expect(donarSource).toContain("stripeIntroSegments(branding.organizationName)");
-    expect(stripeIntroSegments("Iglesia Ejemplo Central").beneficiary).toContain(
-      "Iglesia Ejemplo Central en El Salvador"
-    );
     expect(intro).toContain("Friends of Iglesia Ejemplo Central (501c3)");
-    // The US door funds the SAME church — the intro says so, never implying a
-    // different beneficiary.
-    expect(intro).toContain("apoya a Iglesia Ejemplo Central en El Salvador");
+    // One legal line: who processes the gift. The beneficiary is named right
+    // below it by Stripe's "Donación a {organización}" line, which our worker
+    // sets — repeating it here wrapped the disclosure onto three ragged lines.
+    expect(intro).toBe("Procesado en EE. UU. por Friends of Iglesia Ejemplo Central (501c3).");
+    expect(intro).not.toContain("El Salvador");
+    // The legal name and "(501c3)" wrap as one unit, never mid-name.
+    expect(pageSource).toContain('<span className="donar-intro-legal">');
+    expect(stylesSource).toMatch(/\.donar-intro-legal\s*\{[^}]*display:\s*inline-block;[^}]*max-width:\s*100%/);
     expect(pageSource).toContain("<StripeDonationForm");
     expect(pageSource).toContain("session={stripeSessionAttempt.session}");
   });
 
   it("uses neutral donor copy when public branding has no configured organization", () => {
-    expect(stripeIntro(null)).toContain("apoya a esta iglesia en El Salvador");
+    expect(stripeIntro(null)).toBe("Procesado en EE. UU. por una organización estadounidense 501c3.");
     expect(stripeIntro("   ")).toContain("una organización estadounidense 501c3");
     expect(stripeIntro(null)).not.toMatch(/ExampleOrganization|ExamplePerson1/);
   });

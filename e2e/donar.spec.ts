@@ -407,7 +407,7 @@ test("uses neutral donor attribution when public branding has no configured name
   await page.getByRole("button", { name: "EE. UU." }).click();
   await page.getByLabel("Monto").fill("100.00");
   await page.getByRole("button", { name: "Continuar con su diezmo", exact: true }).click();
-  await expect(page.locator(".donar-intro")).toContainText("apoya a esta iglesia en El Salvador");
+  await expect(page.locator(".donar-intro")).toHaveText("Procesado en EE. UU. por una organización estadounidense 501c3.");
   await expect(page.getByText(/ExamplePerson1|ExampleOrganization/)).toHaveCount(0);
 });
 
@@ -1249,12 +1249,10 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   await expect(legalOrganizationLink).toHaveAttribute("target", "_blank");
   await expect(legalOrganizationLink).toHaveAttribute("rel", "noopener noreferrer");
   await expect(page.locator(".donar-intro")).toHaveText(
-    `Su aporte apoya a ${BRANDING_DISPLAY_NAME} en El Salvador y se procesa en EE. UU. por Friends of ${BRANDING_DISPLAY_NAME} (501c3).`
+    `Procesado en EE. UU. por Friends of ${BRANDING_DISPLAY_NAME} (501c3).`
   );
-  const introFlag = page.locator(".donar-intro .donar-flag");
-  await expect(introFlag).toBeVisible();
-  await expect(introFlag).toHaveAttribute("aria-hidden", "true");
-  expect(await introFlag.evaluate((element) => element.tagName)).toBe("IMG");
+  // The legal line carries no flag; the brand row's flag already marks the door.
+  await expect(page.locator(".donar-intro .donar-flag")).toHaveCount(0);
   await expect(
     page.getByText("Stripe mostrará en español las opciones disponibles para usted de forma segura.")
   ).toHaveCount(0);
@@ -1696,6 +1694,19 @@ test("Stripe bounds the rendered frame and preserves native scrolling without an
   await expect(stripeViewport).toBeVisible();
   expect(await providerHeadRowSpread(page)).toBeLessThanOrEqual(4);
   await expectTightProviderChrome(page);
+  // The 501c3 disclosure is one legal line: at most two balanced lines on a
+  // phone, and the legal name never breaks across them.
+  const introLines = await page.locator(".donar-handoff > .donar-intro").evaluate((intro) => {
+    const link = intro.querySelector(".donar-intro-organization-link");
+    if (!link) throw new Error("legal organization link is missing");
+    const lineHeight = parseFloat(getComputedStyle(intro).lineHeight);
+    return {
+      lines: Math.round(intro.getBoundingClientRect().height / lineHeight),
+      linkFragments: link.getClientRects().length
+    };
+  });
+  expect(introLines.lines).toBeLessThanOrEqual(2);
+  expect(introLines.linkFragments).toBe(1);
   const viewportMetrics = await stripeViewport.evaluate((element) => {
     const style = getComputedStyle(element);
     return {

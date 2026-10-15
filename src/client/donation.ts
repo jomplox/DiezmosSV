@@ -178,7 +178,6 @@ export function givebutterHostedUrl(
 }
 
 export function stripeIntroSegments(organizationName: string | null): {
-  beneficiary: string;
   processing: string;
   legalOrganizationName: string | null;
   legalOrganizationQualifier: string;
@@ -186,24 +185,22 @@ export function stripeIntroSegments(organizationName: string | null): {
   const name = organizationName?.trim();
   if (!name) {
     return {
-      beneficiary: "Su aporte apoya a esta iglesia en El Salvador",
-      processing: "y se procesa en EE. UU. por una organización estadounidense 501c3.",
+      processing: "Procesado en EE. UU. por una organización estadounidense 501c3.",
       legalOrganizationName: null,
       legalOrganizationQualifier: ""
     };
   }
   return {
-    beneficiary: `Su aporte apoya a ${name} en El Salvador`,
-    processing: "y se procesa en EE. UU. por",
+    processing: "Procesado en EE. UU. por",
     legalOrganizationName: `Friends of ${name}`,
     legalOrganizationQualifier: "(501c3)."
   };
 }
 
 export function stripeIntro(organizationName: string | null): string {
-  const { beneficiary, processing, legalOrganizationName, legalOrganizationQualifier } =
+  const { processing, legalOrganizationName, legalOrganizationQualifier } =
     stripeIntroSegments(organizationName);
-  return [beneficiary, processing, legalOrganizationName, legalOrganizationQualifier]
+  return [processing, legalOrganizationName, legalOrganizationQualifier]
     .filter(Boolean)
     .join(" ");
 }
