@@ -92,6 +92,48 @@ async function providerHeadRowSpread(page: Page): Promise<number> {
   return Math.max(...centers) - Math.min(...centers);
 }
 
+async function expectTightProviderChrome(page: Page): Promise<void> {
+  // Phone provider rows hug their text; the buttons keep 38px tap targets that
+  // overflow into the surrounding gaps instead of stretching the rows.
+  const back = page.getByRole("button", { name: /Atrás/ });
+  const edit = page.getByRole("button", { name: "Editar", exact: true });
+  expect((await back.boundingBox())!.height).toBeGreaterThanOrEqual(38);
+  expect((await edit.boundingBox())!.height).toBeGreaterThanOrEqual(38);
+  expect((await page.locator(".donar-card-top").boundingBox())!.height).toBeLessThanOrEqual(26);
+  expect((await page.locator(".donar-provider-head").boundingBox())!.height).toBeLessThanOrEqual(26);
+}
+
+async function providerHeadLayout(page: Page): Promise<{
+  wrapped: boolean;
+  separator: string;
+  labelToSummaryGap: number;
+}> {
+  return page.locator(".donar-provider-head").evaluate((head) => {
+    const label = head.querySelector(".donar-step-label")!.getBoundingClientRect();
+    const line = head.querySelector(".donar-summary-line")!.getBoundingClientRect();
+    return {
+      wrapped: line.top >= label.bottom,
+      separator: getComputedStyle(head.querySelector(".donar-summary")!, "::before").content,
+      labelToSummaryGap: line.left - label.right
+    };
+  });
+}
+
+async function expectProviderHeadWithoutStrandedSeparator(page: Page): Promise<void> {
+  // One line on a 393pt phone, kept apart by space alone...
+  await page.setViewportSize({ width: 393, height: 852 });
+  const oneLine = await providerHeadLayout(page);
+  expect(oneLine.wrapped).toBe(false);
+  expect(oneLine.labelToSummaryGap).toBeGreaterThanOrEqual(8);
+  // ...so when a narrow phone wraps the summary under the label (an iPhone SE
+  // already does on staging), no separator glyph is left leading the second line.
+  await page.setViewportSize({ width: 320, height: 568 });
+  const wrapped = await providerHeadLayout(page);
+  expect(wrapped.wrapped).toBe(true);
+  expect(wrapped.separator).toBe("none");
+  await page.setViewportSize({ width: 393, height: 852 });
+}
+
 async function rememberNode(locator: Locator, key: string): Promise<void> {
   await locator.evaluate((element, storageKey) => {
     (window as Window & { __providerNodes?: Record<string, Element> }).__providerNodes ??= {};
@@ -396,7 +438,7 @@ test("uses neutral donor attribution when public branding has no configured name
   await page.getByRole("button", { name: "EE. UU." }).click();
   await page.getByLabel("Monto").fill("100.00");
   await page.getByRole("button", { name: "Continuar con su diezmo", exact: true }).click();
-  await expect(page.locator(".donar-intro")).toContainText("apoya a esta iglesia en El Salvador");
+  await expect(page.locator(".donar-intro")).toHaveText("Procesado en EE. UU. por una organización estadounidense 501c3.");
   await expect(page.getByText(/ExamplePerson1|ExampleOrganization/)).toHaveCount(0);
 });
 
@@ -553,9 +595,20 @@ test("SV embedded form uses the compact mobile provider shell", async ({ page },
   const wompiIntro = page.getByText("Complete su entrega de forma segura con Wompi.", { exact: false });
   await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas" })).toHaveCSS("font-size", "20px");
   expect(await providerHeadRowSpread(page)).toBeLessThanOrEqual(4);
-  expect((await page.locator(".donar-provider-head").boundingBox())!.height).toBeLessThanOrEqual(40);
   await expect(wompiIntro).toBeHidden();
-  expect((await embed.boundingBox())!.y).toBeLessThan(170);
+  expect((await embed.boundingBox())!.y).toBeLessThan(120);
+  await expectTightProviderChrome(page);
+  // The escape hatch, the n1co row and the support line stack tight under the form.
+  const bottomStack = await Promise.all([
+    embed.boundingBox(),
+    page.getByRole("link", { name: "¿Problemas con el formulario? Continúe aquí" }).boundingBox(),
+    page.locator(".donar-provider-dock").boundingBox(),
+    page.locator(".donar-support").last().boundingBox()
+  ]);
+  for (let index = 1; index < bottomStack.length; index += 1) {
+    const above = bottomStack[index - 1]!;
+    expect(bottomStack[index]!.y - (above.y + above.height)).toBeLessThanOrEqual(8);
+  }
   await page.screenshot({ path: testInfo.outputPath("sv-compact-mobile.png") });
   const frame = page.frames().find((frame) => frame.url().startsWith("https://mock.wompi.sv/"))!;
   const frameBox = (await embed.boundingBox())!;
@@ -1227,12 +1280,10 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   await expect(legalOrganizationLink).toHaveAttribute("target", "_blank");
   await expect(legalOrganizationLink).toHaveAttribute("rel", "noopener noreferrer");
   await expect(page.locator(".donar-intro")).toHaveText(
-    `Su aporte apoya a ${BRANDING_DISPLAY_NAME} en El Salvador y se procesa en EE. UU. por Friends of ${BRANDING_DISPLAY_NAME} (501c3).`
+    `Procesado en EE. UU. por Friends of ${BRANDING_DISPLAY_NAME} (501c3).`
   );
-  const introFlag = page.locator(".donar-intro .donar-flag");
-  await expect(introFlag).toBeVisible();
-  await expect(introFlag).toHaveAttribute("aria-hidden", "true");
-  expect(await introFlag.evaluate((element) => element.tagName)).toBe("IMG");
+  // The legal line carries no flag; the brand row's flag already marks the door.
+  await expect(page.locator(".donar-intro .donar-flag")).toHaveCount(0);
   await expect(
     page.getByText("Stripe mostrará en español las opciones disponibles para usted de forma segura.")
   ).toHaveCount(0);
@@ -1673,7 +1724,21 @@ test("Stripe bounds the rendered frame and preserves native scrolling without an
   const stripeViewport = page.getByRole("region", { name: "Formulario seguro de Stripe" });
   await expect(stripeViewport).toBeVisible();
   expect(await providerHeadRowSpread(page)).toBeLessThanOrEqual(4);
-  expect((await page.locator(".donar-provider-head").boundingBox())!.height).toBeLessThanOrEqual(40);
+  await expectTightProviderChrome(page);
+  await expectProviderHeadWithoutStrandedSeparator(page);
+  // The 501c3 disclosure is one legal line: at most two balanced lines on a
+  // phone, and the legal name never breaks across them.
+  const introLines = await page.locator(".donar-handoff > .donar-intro").evaluate((intro) => {
+    const link = intro.querySelector(".donar-intro-organization-link");
+    if (!link) throw new Error("legal organization link is missing");
+    const lineHeight = parseFloat(getComputedStyle(intro).lineHeight);
+    return {
+      lines: Math.round(intro.getBoundingClientRect().height / lineHeight),
+      linkFragments: link.getClientRects().length
+    };
+  });
+  expect(introLines.lines).toBeLessThanOrEqual(2);
+  expect(introLines.linkFragments).toBe(1);
   const viewportMetrics = await stripeViewport.evaluate((element) => {
     const style = getComputedStyle(element);
     return {

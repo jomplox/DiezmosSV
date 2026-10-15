@@ -1445,20 +1445,23 @@ export function DonarPage() {
               {/* tabIndex={-1} makes this programmatically focusable without adding a
                   tab stop: it is the landing point when the donor returns to Stripe. */}
               <p className="donar-intro" ref={stripeIntroRef} tabIndex={-1}>
-                {stripeIntroduction.beneficiary}<span className="donar-intro-flag"><DonarFlagBadge country="sv" /></span>{" "}
                 {stripeIntroduction.processing}
                 {stripeIntroduction.legalOrganizationName && (
                   <>
                     {" "}
-                    <a
-                      className="donar-intro-organization-link"
-                      href={GIVEBUTTER_ABOUT_URL}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      {stripeIntroduction.legalOrganizationName}
-                    </a>{" "}
-                    {stripeIntroduction.legalOrganizationQualifier}
+                    {/* The legal name and its qualifier move to the next line as one unit
+                        instead of breaking mid-name or stranding "(501c3)". */}
+                    <span className="donar-intro-legal">
+                      <a
+                        className="donar-intro-organization-link"
+                        href={GIVEBUTTER_ABOUT_URL}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        {stripeIntroduction.legalOrganizationName}
+                      </a>{" "}
+                      {stripeIntroduction.legalOrganizationQualifier}
+                    </span>
                   </>
                 )}
               </p>
