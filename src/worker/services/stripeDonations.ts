@@ -15,7 +15,7 @@ const MAX_AMOUNT_CENTS = 500_000;
 const REQUEST_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const EIN_PATTERN = /^\d{2}-\d{7}$/;
 
-export const STRIPE_API_VERSION = "2026-07-29.dahlia" as const;
+export const STRIPE_API_VERSION = "2026-08-26.dahlia" as const;
 
 export class StripeDonationValidationError extends Error {
   constructor(readonly code: string, message: string) {
