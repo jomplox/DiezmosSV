@@ -84,8 +84,21 @@ describe("DTE PDF rendering", () => {
     expect(record.plain_json).toBe(originalJson);
   });
 
-  it("versions the black currency renderer as PDF evidence v4", () => {
-    expect(DTE_PDF_RENDERER_VERSION).toBe("cde-pdf:v5");
+  it("versions the thousands-separated amount renderer as PDF evidence v6", () => {
+    expect(DTE_PDF_RENDERER_VERSION).toBe("cde-pdf:v6");
+  });
+
+  it("prints amounts of $1,000 and more with a thousands separator", async () => {
+    const record = testDocument();
+    const plain = JSON.parse(record.plain_json) as Record<string, any>;
+    plain.cuerpoDocumento[0].valorUni = 1500;
+    plain.cuerpoDocumento[0].valor = 1500;
+    plain.resumen.valorTotal = 1500;
+    plain.resumen.pagos[0].montoPago = 1500;
+    record.plain_json = JSON.stringify(plain);
+    const text = await renderToText(record);
+    expect(text).toContain("1,500.00");
+    expect(text).not.toContain("1500.00");
   });
 
   it("renders the currency code in black like the surrounding label", async () => {

@@ -5,6 +5,7 @@ import {
   elSalvadorMonthKey,
   elSalvadorWeekKey,
   elSalvadorHourOfWeek,
+  municipalityDisplayLabel,
   type AnalyticsDocumentRow,
   type AnalyticsIntentRow,
   type AnalyticsRange
@@ -27,6 +28,7 @@ function doc(overrides: Partial<AnalyticsDocumentRow>): AnalyticsDocumentRow {
     accepted_at: "accepted_at" in overrides ? overrides.accepted_at! : "2026-05-04T18:00:30.000Z",
     transmission_deferred_at: "transmission_deferred_at" in overrides ? overrides.transmission_deferred_at! : null,
     direccion_departamento: "direccion_departamento" in overrides ? overrides.direccion_departamento! : "06",
+    direccion_municipio: "direccion_municipio" in overrides ? overrides.direccion_municipio! : "23",
     donor_pais: "donor_pais" in overrides ? overrides.donor_pais! : null,
     gift_type: "gift_type" in overrides ? overrides.gift_type! : "DIEZMO"
   };
@@ -188,12 +190,73 @@ describe("buildAnalytics — geographic distribution", () => {
       emails: [],
       range: FULL_RANGE,
       now: NOW,
-      labels: { department: (code) => `Dep ${code}`, country: (code) => `País ${code}` }
+      labels: {
+        department: (code) => `Dep ${code}`,
+        municipality: (department, code) => `Mun ${department}-${code}`,
+        country: (code) => `País ${code}`
+      }
     });
     const domestic = analytics.geography.departments.find((row) => row.code === "06");
     expect(domestic).toMatchObject({ count: 1, totalCents: 1000, label: "Dep 06" });
     const abroad = analytics.geography.foreign.find((row) => row.code === "US");
     expect(abroad).toMatchObject({ count: 1, totalCents: 2000, label: "País US" });
+  });
+});
+
+describe("buildAnalytics — municipio distribution", () => {
+  const labels = {
+    department: (code: string) => `Dep ${code}`,
+    country: (code: string) => `País ${code}`,
+    municipality: (department: string, code: string) => `Mun ${department}-${code}`
+  };
+
+  it("buckets domestic gifts by department plus CAT-013 municipio, largest total first", () => {
+    const analytics = buildAnalytics({
+      documents: [
+        doc({ id: "a", amount_cents: 1000, direccion_departamento: "06", direccion_municipio: "23" }),
+        doc({ id: "b", amount_cents: 4000, direccion_departamento: "06", direccion_municipio: "23" }),
+        // Same municipio code under another department is a different municipio.
+        doc({ id: "c", amount_cents: 2500, direccion_departamento: "05", direccion_municipio: "23" })
+      ],
+      intents: [],
+      emails: [],
+      range: FULL_RANGE,
+      now: NOW,
+      labels
+    });
+    expect(analytics.geography.municipalities).toEqual([
+      { code: "06-23", label: "Mun 06-23", count: 2, totalCents: 5000 },
+      { code: "05-23", label: "Mun 05-23", count: 1, totalCents: 2500 }
+    ]);
+  });
+
+  it("leaves foreign gifts and gifts without a municipio out of the municipio list", () => {
+    const analytics = buildAnalytics({
+      documents: [
+        doc({ id: "abroad", direccion_departamento: "00", direccion_municipio: "00", donor_pais: "US" }),
+        doc({ id: "legacy", direccion_departamento: "06", direccion_municipio: null })
+      ],
+      intents: [],
+      emails: [],
+      range: FULL_RANGE,
+      now: NOW,
+      labels
+    });
+    expect(analytics.geography.municipalities).toEqual([]);
+    // The legacy gift still counts toward its department.
+    expect(analytics.geography.departments.find((row) => row.code === "06")?.count).toBe(1);
+  });
+});
+
+describe("municipalityDisplayLabel", () => {
+  it("restores the department's accented casing on CAT-013's uppercase label", () => {
+    expect(municipalityDisplayLabel("AHUACHAPAN NORTE", "Ahuachapán")).toBe("Ahuachapán Norte");
+    expect(municipalityDisplayLabel("SAN SALVADOR CENTRO", "San Salvador")).toBe("San Salvador Centro");
+    expect(municipalityDisplayLabel("LA UNION SUR", "La Unión")).toBe("La Unión Sur");
+  });
+
+  it("falls back to word casing when the label does not start with the department", () => {
+    expect(municipalityDisplayLabel("SANTA ROSA DE LIMA", "La Unión")).toBe("Santa Rosa de Lima");
   });
 });
 

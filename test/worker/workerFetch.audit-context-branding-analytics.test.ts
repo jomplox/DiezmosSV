@@ -936,6 +936,7 @@ describe("analytics endpoint (Wompi lane)", () => {
       donor_document: "DUI-1",
       gift_type: "DIEZMO",
       direccion_departamento: "06",
+      direccion_municipio: "23",
       donor_pais: null,
       created_at: "2026-06-10T17:50:00.000Z",
       paid_at: "2026-06-10T17:55:00.000Z"
@@ -960,6 +961,10 @@ describe("analytics endpoint (Wompi lane)", () => {
     expect(analytics.giving.giftSplit.find((point: any) => point.key === "2026-06")?.diezmoCents).toBe(5000);
     // Geography buckets it under department 06.
     expect(analytics.geography.departments.find((row: any) => row.code === "06")?.count).toBe(1);
+    // ...and under its CAT-013 municipio, labeled in the department's casing.
+    expect(analytics.geography.municipalities).toEqual([
+      { code: "06-23", label: "San Salvador Centro", count: 1, totalCents: 5000 }
+    ]);
     // Funnel + email pick up the lane intent and delivery.
     expect(analytics.funnel).toMatchObject({ created: 1, datos: 1, paid: 1, completed: 1 });
     expect(analytics.email.weekly.reduce((sum: number, point: any) => sum + point.sent, 0)).toBe(1);

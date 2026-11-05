@@ -95,6 +95,7 @@ import {
 import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "../worker/services/orgLogo";
 import { getCat008Districts, getCat013Municipalities, type CatalogOption } from "../shared/catalogs";
 import { formatDui, isValidDui } from "../shared/dui";
+import { formatUsdAmount } from "../shared/money";
 import { formatNit, isValidNitFormat } from "../shared/nit";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1710,7 +1711,7 @@ function DonarThankYou({ monto, supportEmail }: { monto?: string; supportEmail: 
           <CheckCircle2 size={56} />
         </div>
         <h1>{DONAR_THANK_YOU_TITLE}</h1>
-        {monto && <p className="donar-thanks-amount">Monto: ${monto}</p>}
+        {monto && <p className="donar-thanks-amount">Monto: {formatUsdAmount(monto)}</p>}
         <DonarSupport supportEmail={supportEmail} />
         <p className="donar-intro">{DONAR_THANK_YOU_BODY}</p>
       </div>

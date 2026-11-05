@@ -4914,6 +4914,7 @@ export function analyticsDocumentRow(
     accepted_at: document.accepted_at ?? null,
     transmission_deferred_at: document.transmission_deferred_at ?? null,
     direccion_departamento: intent?.direccion_departamento ?? null,
+    direccion_municipio: intent?.direccion_municipio ?? null,
     donor_pais: intent?.donor_pais ?? null,
     gift_type: intent?.gift_type ?? null
   };

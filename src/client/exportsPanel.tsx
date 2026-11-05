@@ -16,6 +16,7 @@ import type {
   StripeAnnualStatementPreviewDonor
 } from "./types";
 import { openNativeDatePicker } from "./datePicker";
+import { formatCount, formatUsdAmount } from "../shared/money";
 import { environmentLabel } from "./displayText";
 import {
   addMonths,
@@ -78,7 +79,7 @@ function ExportTablePagination({
         <ChevronLeft size={15} />
         Anterior
       </button>
-      <span aria-live="polite">Página {page} de {totalPages} · {start}–{end} de {totalRows}</span>
+      <span aria-live="polite">Página {page} de {totalPages} · {formatCount(start)}–{formatCount(end)} de {formatCount(totalRows)}</span>
       <button type="button" className="ghost" disabled={page === totalPages} onClick={() => onPageChange(page + 1)}>
         Siguiente
         <ChevronRight size={15} />
@@ -176,9 +177,9 @@ export function ExportPanel({
         </button>
       </div>
       <div className="export-summary">
-        <strong>{preview.rowCount}</strong>
+        <strong>{formatCount(preview.rowCount)}</strong>
         <span>registros</span>
-        <strong>${preview.amountTotal}</strong>
+        <strong>{formatUsdAmount(preview.amountTotal)}</strong>
         <span>total</span>
       </div>
       <F960PreviewTable rows={preview.rows} resetKey={`${startDate}:${endDate}`} />
@@ -265,7 +266,7 @@ function F960PreviewTable({ rows, resetKey }: { rows: F960PreviewRow[]; resetKey
                 <td className="numeric">{row.fechaEmision}</td>
                 <td><StackedCell primary={row.nombre} secondary={row.correo} /></td>
                 <td className="mono">{row.nit || row.dui || "—"}</td>
-                <td className="numeric">${row.monto}</td>
+                <td className="numeric">{formatUsdAmount(row.monto)}</td>
                 <td className="mono">{row.periodo}</td>
                 <td className="mono">{shortCode(row.codigoGeneracion)}</td>
                 <td className="mono">{shortCode(row.sello)}</td>
@@ -420,7 +421,7 @@ export function StripeAnnualStatementPanel({
               return (
                 <tr key={donor.donorKey}>
                   <td><StackedCell primary={donor.donorName} secondary={donor.donorEmail ?? ""} /></td>
-                  <td className="numeric">{donor.count}</td>
+                  <td className="numeric">{formatCount(donor.count)}</td>
                   <td className="numeric">{donor.netTotalLabel}</td>
                   <td>{donor.hasEmail ? "Sí" : "—"}</td>
                   <td><button className="ghost" disabled={!donor.hasEmail || rowSending || anySending} onClick={() => void onSendDonor(donor)}><Download size={14} />{rowSending ? "Enviando" : "Enviar"}</button></td>
@@ -537,7 +538,7 @@ export function AnnualCertificatePanel({
                   <td>
                     <StackedCell primary={donor.donorName} secondary={donor.donorEmail ?? ""} />
                   </td>
-                  <td className="numeric">{donor.count}</td>
+                  <td className="numeric">{formatCount(donor.count)}</td>
                   <td className="numeric">{donor.totalLabel}</td>
                   <td>{donor.hasEmail ? "Sí" : "—"}</td>
                   <td>
