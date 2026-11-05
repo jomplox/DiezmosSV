@@ -50,6 +50,7 @@ import {
   credentialSettingsSections
 } from "./credentialSettings";
 import { environmentLabel, userFacingErrorMessage } from "./displayText";
+import { formatCents } from "../shared/money";
 import {
   CAT012_DEPARTMENTS,
   CAT014_UNITS,
@@ -580,7 +581,7 @@ export function CredentialsPanel({
                                   : "Constancia original"}
                             </strong>
                             <small>
-                              Estado {acknowledgment.status} · código {acknowledgment.failureCode} · neto ${(acknowledgment.netAmountCents / 100).toFixed(2)} USD
+                              Estado {acknowledgment.status} · código {acknowledgment.failureCode} · neto {formatCents(acknowledgment.netAmountCents)} USD
                             </small>
                             <div className="stripe-rotation-actions">
                               <button

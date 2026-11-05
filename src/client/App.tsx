@@ -76,7 +76,7 @@ import {
 } from "./fiscalCorrectionDialog";
 import { PASSWORD_POLICY_REQUIREMENTS, passwordPolicyFailures, passwordPolicySatisfied } from "../shared/passwordPolicy";
 import { isValidEmail } from "../shared/email";
-import { formatCents } from "../shared/money";
+import { formatCents, formatUsdAmount } from "../shared/money";
 import type { FiscalReceptorCorrection } from "../shared/fiscalCorrection";
 import {
   CAT012_DEPARTMENTS,
@@ -3711,7 +3711,7 @@ function AdvancedDteModal({
                   <div><dt>Donante</dt><dd>{form.donorName || "—"}</dd></div>
                   <div><dt>Documento</dt><dd>{form.donorDocument || "—"}</dd></div>
                   <div><dt>Correo</dt><dd>{form.donorEmail || "—"}</dd></div>
-                  <div><dt>Total</dt><dd>${form.valorTotal || "0.00"}</dd></div>
+                  <div><dt>Total</dt><dd>{formatUsdAmount(form.valorTotal)}</dd></div>
                 </dl>
                 <pre className="advanced-json-preview">{preview}</pre>
               </div>

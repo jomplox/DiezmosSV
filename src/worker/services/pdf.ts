@@ -8,7 +8,7 @@ import { formatDocument } from "../../shared/documentFormat";
 import { onlyDigits } from "../utils/guards";
 import type { DteDocumentRecord } from "../types";
 
-export const DTE_PDF_RENDERER_VERSION = "cde-pdf:v5";
+export const DTE_PDF_RENDERER_VERSION = "cde-pdf:v6";
 
 type PdfColor = ReturnType<typeof rgb>;
 
@@ -577,7 +577,7 @@ function formatDate(value: string | undefined): string {
 }
 
 function formatMoney(value: number, withSymbol = true): string {
-  return `${withSymbol ? "$" : ""}${value.toFixed(2)}`;
+  return `${withSymbol ? "$" : ""}${value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function formatQuantity(value: number): string {

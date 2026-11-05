@@ -6,6 +6,7 @@ import {
   normalizeCat020CountryCode
 } from "../../shared/catalogs";
 import { formatDui, isValidDui } from "../../shared/dui";
+import { formatCents } from "../../shared/money";
 import { formatNit, isValidNitFormat } from "../../shared/nit";
 import { requireSecret } from "../config";
 import type { DonationGiftType, DonationIntentDocumentType, DonationPaymentProvider, DonationIntentRecord, Env } from "../types";
@@ -453,7 +454,7 @@ async function mintLinkForIntent(env: Env, repo: Repository, intent: DonationInt
     action: "DONATION_INTENT_CREATED",
     entityType: "donation_intent",
     entityId: intent.id,
-    summary: `Intención de donación por ${(intent.amount_cents / 100).toFixed(2)} USD`,
+    summary: `Intención de donación por ${formatCents(intent.amount_cents)} USD`,
     metadata: { amountCents: intent.amount_cents, donorDocumentType: intent.donor_document_type }
   });
 
@@ -507,7 +508,7 @@ async function mintN1coLinkForIntent(env: Env, repo: Repository, intent: Donatio
     action: "DONATION_INTENT_CREATED",
     entityType: "donation_intent",
     entityId: intent.id,
-    summary: `Intención de donación por ${(intent.amount_cents / 100).toFixed(2)} USD`,
+    summary: `Intención de donación por ${formatCents(intent.amount_cents)} USD`,
     metadata: {
       amountCents: intent.amount_cents,
       donorDocumentType: intent.donor_document_type,
