@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   analyticsRangePresets,
+  barLabelIndices,
+  formatChartCents,
+  niceScale,
+  weeklyStats,
   formatMonthLabel,
   formatWeekLabel,
   monthlyChartModel,
@@ -122,5 +126,62 @@ describe("heatmapMax", () => {
       ])
     ).toBe(7);
     expect(heatmapMax([])).toBe(0);
+  });
+});
+
+describe("niceScale", () => {
+  it("rounds a money peak up to round dollar gridlines", () => {
+    // $59,800 peak -> gridlines every $20,000 up to $60,000 (values in cents).
+    expect(niceScale(5_980_000)).toEqual({ max: 6_000_000, ticks: [0, 2_000_000, 4_000_000, 6_000_000] });
+  });
+
+  it("keeps count axes on whole numbers", () => {
+    expect(niceScale(3, { integer: true })).toEqual({ max: 3, ticks: [0, 1, 2, 3] });
+    expect(niceScale(1, { integer: true })).toEqual({ max: 1, ticks: [0, 1] });
+  });
+
+  it("gives an empty series a single baseline", () => {
+    expect(niceScale(0)).toEqual({ max: 1, ticks: [0] });
+  });
+});
+
+describe("formatChartCents", () => {
+  it("labels chart values in whole dollars with thousands separators", () => {
+    expect(formatChartCents(2_500_000)).toBe("$25,000");
+    expect(formatChartCents(125_050)).toBe("$1,251");
+  });
+});
+
+describe("barLabelIndices", () => {
+  it("labels every bar when each label fits its slot", () => {
+    expect([...barLabelIndices([5, 9, 3], 60, () => 40)]).toEqual([0, 1, 2]);
+  });
+
+  it("labels only the peak and the latest bar when labels would collide", () => {
+    expect([...barLabelIndices([9, 3, 2, 4], 12, () => 40)].sort()).toEqual([0, 3]);
+  });
+
+  it("drops the latest label when a taller neighbouring bar would cut through it", () => {
+    expect([...barLabelIndices([5, 3, 9, 4], 12, () => 40)]).toEqual([2]);
+  });
+
+  it("skips zero-height bars", () => {
+    expect([...barLabelIndices([0, 0], 60, () => 20)]).toEqual([]);
+  });
+});
+
+describe("weeklyStats", () => {
+  it("summarizes the period total, weekly average and best week", () => {
+    expect(
+      weeklyStats([
+        { key: "2026-10-05", value: 10_000 },
+        { key: "2026-10-12", value: 40_000 },
+        { key: "2026-10-19", value: 25_000 }
+      ])
+    ).toEqual({ total: 75_000, average: 25_000, peak: { key: "2026-10-12", value: 40_000 } });
+  });
+
+  it("reports no best week for an empty series", () => {
+    expect(weeklyStats([])).toEqual({ total: 0, average: 0, peak: null });
   });
 });

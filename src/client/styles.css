@@ -5411,11 +5411,16 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
   display: flex;
   flex-direction: column;
   gap: 18px;
+  font-variant-numeric: tabular-nums;
 }
 
 .analytics-panel,
 .analytics-filters {
   padding: 20px;
+}
+
+.analytics-panel {
+  container-type: inline-size;
 }
 
 .analytics-filter-row {
@@ -5481,29 +5486,81 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
   color: var(--ink-secondary);
 }
 
+/* Six-column grid: each card declares its span so rows fill without empty bands. */
 .analytics-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 16px;
 }
 
+.analytics-span-2 {
+  grid-column: span 2;
+}
+
+.analytics-span-3 {
+  grid-column: span 3;
+}
+
+.analytics-span-4 {
+  grid-column: span 4;
+}
+
+.analytics-span-6 {
+  grid-column: 1 / -1;
+}
+
+.analytics-card-tall {
+  grid-row: span 2;
+}
+
+@container (max-width: 860px) {
+  .analytics-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .analytics-grid > .analytics-card {
+    grid-column: 1 / -1;
+    grid-row: auto;
+  }
+}
+
 .analytics-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
   border: 1px solid var(--line);
   border-radius: var(--card-radius);
-  padding: 14px;
+  padding: 16px 18px 18px;
   background: var(--surface);
   min-width: 0;
 }
 
-.analytics-card-wide {
-  grid-column: 1 / -1;
+.analytics-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px 16px;
 }
 
 .analytics-card-title {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 700;
   color: var(--ink);
-  margin-bottom: 10px;
+}
+
+.analytics-card-summary {
+  margin-top: 3px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink-muted);
+}
+
+.analytics-subtitle {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink-secondary);
+  margin-bottom: 6px;
 }
 
 .analytics-empty,
@@ -5513,7 +5570,6 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
 }
 
 .analytics-empty-small {
-  font-size: 12px;
   padding: 12px 0;
 }
 
@@ -5521,10 +5577,102 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
   color: var(--ink-muted);
 }
 
+/* ---- Figures (headline numbers above a chart or in a stats card) ---- */
+.analytics-figures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 32px;
+  margin: 0;
+}
+
+.analytics-figures dt {
+  font-size: 12px;
+  color: var(--ink-secondary);
+}
+
+.analytics-figures dd {
+  margin: 2px 0 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.analytics-figures dd small {
+  margin-left: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink-muted);
+}
+
+.analytics-figures-stacked {
+  flex-direction: column;
+}
+
+.analytics-projection dd {
+  color: var(--accent-ink);
+}
+
+/* ---- Legends ---- */
+.analytics-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+  color: var(--ink-secondary);
+}
+
+.analytics-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.analytics-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  background: var(--accent);
+}
+
+.analytics-swatch-soft {
+  background: var(--accent-tint-border);
+}
+
+.analytics-swatch-line,
+.analytics-swatch-prior {
+  width: 16px;
+  height: 0;
+  border-radius: 0;
+  border-top: 2px solid var(--accent);
+  background: none;
+}
+
+.analytics-swatch-prior {
+  border-top: 2px dashed var(--ink-muted);
+}
+
+.analytics-swatch-ok {
+  background: var(--ok);
+}
+
+.analytics-swatch-danger {
+  background: var(--danger);
+}
+
+/* ---- SVG charts ---- */
+.analytics-chart {
+  width: 100%;
+  min-width: 0;
+}
+
 .analytics-svg {
   width: 100%;
   height: auto;
   display: block;
+  overflow: visible;
 }
 
 .analytics-axis {
@@ -5532,23 +5680,30 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
   stroke-width: 1;
 }
 
-.analytics-axis-label,
-.analytics-legend {
-  font-size: 8px;
+.analytics-gridline {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+.analytics-axis-label {
+  font-size: 11px;
   fill: var(--ink-muted);
 }
 
-.analytics-legend-current,
-.analytics-legend-ok {
-  fill: var(--accent-ink);
+.analytics-axis-year {
+  font-weight: 650;
+  fill: var(--ink-secondary);
 }
 
-.analytics-legend-prior {
-  fill: var(--ink-muted);
-}
-
-.analytics-legend-danger {
-  fill: var(--danger-ink);
+.analytics-bar-value {
+  font-size: 11px;
+  font-weight: 650;
+  fill: var(--ink-secondary);
+  /* A surface-colored halo keeps a value legible where a line or bar passes behind it. */
+  paint-order: stroke;
+  stroke: var(--surface);
+  stroke-width: 3px;
+  stroke-linejoin: round;
 }
 
 .analytics-area {
@@ -5558,30 +5713,27 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
 .analytics-line {
   stroke: var(--accent);
   stroke-width: 2;
+  stroke-linejoin: round;
 }
 
 .analytics-line-prior {
-  stroke: var(--line-strong);
+  stroke: var(--ink-muted);
   stroke-width: 1.5;
   stroke-dasharray: 4 3;
 }
 
 .analytics-dot {
-  fill: var(--accent);
+  fill: var(--surface);
+  stroke: var(--accent);
+  stroke-width: 2;
 }
 
 .analytics-bar {
   fill: var(--accent);
 }
 
-.analytics-bar-returning,
-.analytics-bar-ofrenda {
+.analytics-bar-soft {
   fill: var(--accent-tint-border);
-}
-
-.analytics-bar-new,
-.analytics-bar-diezmo {
-  fill: var(--accent);
 }
 
 .analytics-bar-ok {
@@ -5605,7 +5757,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
 
 .analytics-funnel-row {
   display: grid;
-  grid-template-columns: 100px 1fr 48px;
+  grid-template-columns: 104px 1fr 48px;
   align-items: center;
   gap: 8px;
   font-size: 12px;
@@ -5620,7 +5772,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
   position: relative;
   background: var(--surface-muted);
   border-radius: 6px;
-  height: 24px;
+  height: 26px;
   overflow: hidden;
 }
 
@@ -5634,7 +5786,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
   position: absolute;
   top: 0;
   left: 8px;
-  line-height: 24px;
+  line-height: 26px;
   font-weight: 700;
   color: var(--accent-strong-ink);
 }
@@ -5645,19 +5797,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
   text-align: right;
 }
 
-.analytics-stats-block {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
 .analytics-stat {
   font-size: 13px;
   color: var(--ink-secondary);
-}
-
-.analytics-projection strong {
-  color: var(--accent-ink);
 }
 
 .audit-pagination {
@@ -5674,17 +5816,46 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
   overflow-x: auto;
 }
 
+/* Read-only tables: no row pointer or hover tint from the shared clickable-row style. */
+.analytics-view tbody tr {
+  cursor: default;
+}
+
+.analytics-view tbody tr:hover {
+  background: transparent;
+}
+
 .analytics-table {
   width: 100%;
+  min-width: 0;
   border-collapse: collapse;
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .analytics-table th,
 .analytics-table td {
   text-align: left;
-  padding: 6px 8px;
+  padding: 8px 8px;
   border-bottom: 1px solid var(--line);
+}
+
+.analytics-table th {
+  padding-top: 0;
+  font-size: 11px;
+}
+
+.analytics-table th:first-child,
+.analytics-table td:first-child {
+  padding-left: 0;
+}
+
+.analytics-table th:last-child,
+.analytics-table td:last-child {
+  padding-right: 0;
+}
+
+.analytics-table tbody tr:last-child td {
+  border-bottom: 0;
 }
 
 .analytics-table th.numeric,
@@ -5692,6 +5863,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
 .analytics-cohort th.numeric,
 .analytics-cohort td.numeric {
   text-align: right;
+  white-space: nowrap;
 }
 
 .analytics-donor-name {
@@ -5700,14 +5872,14 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
 }
 
 .analytics-donor-email {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-muted);
 }
 
 .analytics-cohort,
 .analytics-heatmap {
   border-collapse: collapse;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .analytics-heatmap {
@@ -5724,7 +5896,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
 
 .analytics-heatmap-help {
   max-width: 720px;
-  margin: -2px 0 10px;
+  margin: -4px 0 10px;
   color: var(--ink-muted);
   font-size: 12px;
   line-height: 1.45;
@@ -5732,14 +5904,18 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
 
 .analytics-cohort th,
 .analytics-cohort td {
-  padding: 4px 6px;
+  padding: 5px 8px;
   border: 1px solid var(--line);
   white-space: nowrap;
 }
 
 .analytics-cohort-cell {
   color: var(--accent-strong-ink);
-  font-weight: 600;
+  font-weight: 650;
+}
+
+.analytics-cohort-cell-strong {
+  color: var(--surface);
 }
 
 .analytics-heatmap th,
@@ -5750,14 +5926,15 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
 }
 
 .analytics-heatmap-hour {
-  font-size: 8px;
+  font-size: 10px;
   color: var(--ink-muted);
-  padding: 2px;
+  padding: 3px 0;
   font-weight: 500;
+  letter-spacing: 0;
 }
 
 .analytics-heatmap-day {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--ink-secondary);
   padding: 2px 6px;
   text-align: center;
@@ -5765,7 +5942,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
 }
 
 .analytics-heatmap-cell {
-  height: 18px;
+  height: 22px;
   padding: 0;
 }
 
@@ -5775,7 +5952,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
   justify-content: center;
   width: 100%;
   height: 100%;
-  min-height: 18px;
+  min-height: 22px;
   padding: 0;
   border: 0;
   border-radius: 0;
@@ -5814,16 +5991,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
 
 /* ---- Geography ---- */
 .analytics-geo {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.analytics-geo-title {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--ink-secondary);
-  margin-bottom: 6px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 18px 32px;
 }
 
 .analytics-geo-list {
@@ -5832,14 +6002,14 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 6px;
 }
 
 .analytics-geo-list li {
   display: grid;
-  grid-template-columns: 96px 1fr auto;
+  grid-template-columns: minmax(0, 12em) 1fr auto;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   font-size: 12px;
 }
 
@@ -5852,8 +6022,8 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
 
 .analytics-geo-track {
   background: var(--surface-muted);
-  border-radius: 5px;
-  height: 12px;
+  border-radius: 4px;
+  height: 10px;
   overflow: hidden;
 }
 

@@ -94,7 +94,47 @@ describe("Analítica view contract (usted-form Spanish, Wompi lane)", () => {
   });
 });
 
+describe("Analítica data on the charts", () => {
+  it("breaks the geography down by departamento, municipio and país", () => {
+    expect(viewSource).toContain('title="Departamentos" buckets={analytics.geography.departments}');
+    expect(viewSource).toContain('title="Municipios" buckets={analytics.geography.municipalities}');
+    expect(viewSource).toContain('title="Extranjero" buckets={analytics.geography.foreign}');
+  });
+
+  it("prints values on the weekly bars and summarizes the weekly series", () => {
+    expect(viewSource).toContain("barLabelIndices(");
+    expect(viewSource).toContain('className="analytics-bar-value');
+    expect(viewSource).toContain("Promedio semanal");
+    expect(viewSource).toContain("Mejor semana");
+  });
+
+  it("draws value gridlines on every bar and line chart", () => {
+    expect(viewSource).toContain("<ValueAxis");
+    expect(viewSource).toContain("niceScale(");
+  });
+
+  it("keeps cohort percentages legible on dark cells", () => {
+    expect(viewSource).toContain("analytics-cohort-cell-strong");
+    expect(stylesSource).toMatch(/\.analytics-cohort-cell-strong \{[^}]*color: var\(--surface\);/);
+  });
+
+  it("formats every count with a thousands separator", () => {
+    expect(viewSource).toContain("formatCount(stage.count)");
+    expect(viewSource).toContain("formatCount(donor.count)");
+    expect(viewSource).toContain("formatCount(analytics.lapsed.count)");
+  });
+});
+
 describe("Analítica styles", () => {
+  it("lets the donor tables fit their cards instead of inheriting the 680px table minimum", () => {
+    const tableRule = stylesSource.match(/\.analytics-table \{([^}]*)\}/)?.[1] ?? "";
+    expect(tableRule).toContain("min-width: 0;");
+  });
+
+  it("sets figures in tabular numerals", () => {
+    expect(stylesSource).toMatch(/\.analytics-view \{[^}]*font-variant-numeric: tabular-nums;/);
+  });
+
   it("limits the fixed table layout to the heatmap", () => {
     const sharedTableRule = stylesSource.match(/\.analytics-cohort,\s*\.analytics-heatmap\s*\{([^}]*)\}/)?.[1] ?? "";
     const heatmapRule = stylesSource.match(/}\s*\.analytics-heatmap\s*\{([^}]*)\}/)?.[1] ?? "";

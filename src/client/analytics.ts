@@ -152,3 +152,76 @@ export function heatmapMax(cells: AnalyticsHeatmapCell[]): number {
 }
 
 export const DAY_LABELS = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"];
+
+// ----- Chart scales and labels -----
+
+export interface ValueScale {
+  max: number;
+  ticks: number[];
+}
+
+// Rounds a series peak up to a "nice" axis top with 3–4 evenly spaced gridlines
+// (1, 2, 2.5 or 5 × a power of ten). Count axes stay on whole numbers.
+export function niceScale(peak: number, options: { integer?: boolean } = {}): ValueScale {
+  if (!(peak > 0)) {
+    return { max: 1, ticks: [0] };
+  }
+  const raw = peak / 4;
+  const magnitude = 10 ** Math.floor(Math.log10(raw));
+  const multipliers = options.integer ? [1, 2, 5, 10] : [1, 2, 2.5, 5, 10];
+  const multiplier = multipliers.find((candidate) => candidate * magnitude >= raw) ?? 10;
+  let step = Number((multiplier * magnitude).toPrecision(12));
+  if (options.integer) {
+    step = Math.max(1, Math.ceil(step));
+  }
+  const max = Math.ceil(peak / step) * step;
+  const ticks: number[] = [];
+  for (let tick = 0; tick <= max; tick += step) {
+    ticks.push(Number(tick.toPrecision(12)));
+  }
+  return { max, ticks };
+}
+
+const WHOLE_DOLLARS = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 0
+});
+
+// Axis and bar labels read in whole dollars ("$25,000"); exact cents stay in the
+// tooltips and tables.
+export function formatChartCents(amountCents: number): string {
+  return WHOLE_DOLLARS.format(amountCents / 100);
+}
+
+// Which bars get a printed value. Every non-empty bar when each label fits its slot;
+// otherwise only the peak and the latest bar, so labels never overlap. The latest label
+// is dropped when a taller bar within half a label's width would cut through it.
+export function barLabelIndices(values: number[], slotWidth: number, labelWidth: (index: number) => number): Set<number> {
+  const filled = values.flatMap((value, index) => (value > 0 ? [index] : []));
+  if (filled.every((index) => labelWidth(index) + 4 <= slotWidth)) {
+    return new Set(filled);
+  }
+  const peak = filled.reduce((best, index) => (values[index] > values[best] ? index : best), filled[0]);
+  const latest = filled[filled.length - 1];
+  const reach = Math.ceil(labelWidth(latest) / 2 / slotWidth);
+  const clear = values.slice(Math.max(0, latest - reach), latest).every((value) => value <= values[latest]);
+  return new Set(clear ? [peak, latest] : [peak]);
+}
+
+export interface WeeklyStats {
+  total: number;
+  average: number;
+  peak: { key: string; value: number } | null;
+}
+
+export function weeklyStats(points: Array<{ key: string; value: number }>): WeeklyStats {
+  const total = points.reduce((sum, point) => sum + point.value, 0);
+  const peak = points.reduce<WeeklyStats["peak"]>((best, point) => (!best || point.value > best.value ? point : best), null);
+  return {
+    total,
+    average: points.length > 0 ? Math.round(total / points.length) : 0,
+    peak: peak ? { key: peak.key, value: peak.value } : null
+  };
+}
