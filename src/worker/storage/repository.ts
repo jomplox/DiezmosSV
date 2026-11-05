@@ -1302,7 +1302,7 @@ export class Repository {
       Pick<
         DteDocumentRecord,
         "id" | "wompi_event_id" | "environment" | "status" | "donor_email" | "donor_name" | "amount_cents" | "issued_at" | "accepted_at" | "transmission_deferred_at"
-      > & { direccion_departamento: string | null; donor_pais: string | null; gift_type: string | null }
+      > & { direccion_departamento: string | null; direccion_municipio: string | null; donor_pais: string | null; gift_type: string | null }
     >
   > {
     return listWompiLaneDocumentsForAnalyticsRepository(this.db, range, environment, cursor, limit);

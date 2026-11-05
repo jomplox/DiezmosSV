@@ -18,7 +18,7 @@ export async function listWompiLaneDocumentsForAnalytics(
     Pick<
       DteDocumentRecord,
       "id" | "wompi_event_id" | "environment" | "status" | "donor_email" | "donor_name" | "amount_cents" | "issued_at" | "accepted_at" | "transmission_deferred_at"
-    > & { direccion_departamento: string | null; donor_pais: string | null; gift_type: string | null }
+    > & { direccion_departamento: string | null; direccion_municipio: string | null; donor_pais: string | null; gift_type: string | null }
   >
 > {
   const conditions = [
@@ -37,7 +37,8 @@ export async function listWompiLaneDocumentsForAnalytics(
     .prepare(
       `SELECT d.id, d.wompi_event_id, d.environment, d.status, d.donor_email, d.donor_name,
               d.amount_cents, d.issued_at, d.accepted_at, d.transmission_deferred_at,
-              i.direccion_departamento AS direccion_departamento, i.donor_pais AS donor_pais, i.gift_type AS gift_type
+              i.direccion_departamento AS direccion_departamento, i.direccion_municipio AS direccion_municipio,
+              i.donor_pais AS donor_pais, i.gift_type AS gift_type
        FROM dte_documents d
        LEFT JOIN donation_intents i ON i.document_id = d.id
        WHERE ${conditions.join(" AND ")}
@@ -48,7 +49,7 @@ export async function listWompiLaneDocumentsForAnalytics(
       Pick<
         DteDocumentRecord,
         "id" | "wompi_event_id" | "environment" | "status" | "donor_email" | "donor_name" | "amount_cents" | "issued_at" | "accepted_at" | "transmission_deferred_at"
-      > & { direccion_departamento: string | null; donor_pais: string | null; gift_type: string | null }
+      > & { direccion_departamento: string | null; direccion_municipio: string | null; donor_pais: string | null; gift_type: string | null }
     >();
   return rows.results ?? [];
 }

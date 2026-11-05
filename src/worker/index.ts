@@ -113,8 +113,20 @@ import {
   stripeUsYearWindow,
   type StripeAnnualStatementSendRequest
 } from "./services/stripeAnnualStatement";
-import { AnalyticsCapacityError, computeAnalytics, elSalvadorRangeWindow, type AnalyticsRange } from "./services/analytics";
-import { CAT012_DEPARTMENTS, CAT020_COUNTRIES, CAT022_DOCUMENT_TYPES, findCatalogOption } from "../shared/catalogs";
+import {
+  AnalyticsCapacityError,
+  computeAnalytics,
+  elSalvadorRangeWindow,
+  municipalityDisplayLabel,
+  type AnalyticsRange
+} from "./services/analytics";
+import {
+  CAT012_DEPARTMENTS,
+  CAT020_COUNTRIES,
+  CAT022_DOCUMENT_TYPES,
+  findCatalogOption,
+  getCat013Municipalities
+} from "../shared/catalogs";
 import { stripeUsConfiguredLegalNameForDisplay } from "../shared/stripeUsConfiguration";
 import { aggregateDonorContacts, buildContactsCsv, resolveContactColumns, contactsCsvFilename } from "./services/contacts";
 import { buildDonorExplorerCsv, donorExplorerCsvFilename } from "./services/donorExport";
@@ -3645,6 +3657,11 @@ async function handleAnalytics(ctx: ApiRouteContext): Promise<Response> {
   try {
     const analytics = await computeAnalytics(ctx.repo, range, environment, now, {
       department: (code) => findCatalogOption(CAT012_DEPARTMENTS, code)?.label ?? code,
+      municipality: (department, code) => {
+        const option = findCatalogOption(getCat013Municipalities(department), code);
+        const departmentLabel = findCatalogOption(CAT012_DEPARTMENTS, department)?.label ?? "";
+        return option ? municipalityDisplayLabel(option.label, departmentLabel) : `${department}-${code}`;
+      },
       country: (code) => findCatalogOption(CAT020_COUNTRIES, code)?.label ?? code
     });
     return jsonResponse({ analytics });

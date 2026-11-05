@@ -14,7 +14,8 @@ const MAX_ANALYTICS_BYTES = 8 * 1024 * 1024;
 // An authenticated document-email amendment can fill its 256 KiB request body.
 // With the remaining selected fields at their enforced maxima, one normalized
 // document row is conservatively at most 264,156 serialized bytes (256 KiB email,
-// 1,500 escaped-name bytes, 512 fixed/framing bytes); 31 rows are 8,188,836
+// 1,500 escaped-name bytes, 512 fixed/framing bytes, which cover the two-digit
+// departamento and municipio codes); 31 rows are 8,188,836
 // bytes, below the shared 8 MiB boundary (32 would exceed it).
 const MAX_ANALYTICS_DOCUMENT_PAGE_SIZE = 31;
 
@@ -79,6 +80,7 @@ export interface AnalyticsDocumentRow {
   // Correlacionados desde donation_intents por el LEFT JOIN del lector (pueden ser
   // null cuando el documento del carril Wompi no tiene intent asociado — legado).
   direccion_departamento: string | null;
+  direccion_municipio: string | null;
   donor_pais: string | null;
   gift_type: DonationGiftType | null;
 }
@@ -301,6 +303,7 @@ export interface AnalyticsResult {
   };
   geography: {
     departments: GeoBucket[];
+    municipalities: GeoBucket[];
     foreign: GeoBucket[];
   };
   funnel: FunnelMetrics;
@@ -312,17 +315,51 @@ export interface AnalyticsResult {
   projection: ProjectionMetrics;
 }
 
-// CAT-012 / CAT-020 label resolution is passed in so the pure function stays
-// dependency-free; the endpoint injects the real catalog lookups.
+// CAT-012 / CAT-013 / CAT-020 label resolution is passed in so the pure function stays
+// dependency-free; the endpoint injects the real catalog lookups. CAT-013 codes are
+// scoped by department, so a municipio resolves from both codes.
 export interface LabelResolvers {
   department: (code: string) => string;
+  municipality: (department: string, code: string) => string;
   country: (code: string) => string;
 }
 
 const DEFAULT_LABELS: LabelResolvers = {
   department: (code) => code,
+  municipality: (department, code) => `${department}-${code}`,
   country: (code) => code
 };
+
+const SPANISH_CONNECTORS = new Set(["de", "del", "la", "las", "los", "y", "el"]);
+
+const stripAccents = (value: string) => value.normalize("NFD").replace(/\p{M}/gu, "");
+
+function wordCase(value: string, keepFirstConnector = false): string {
+  return value
+    .toLocaleLowerCase("es")
+    .split(" ")
+    .map((word, index) =>
+      SPANISH_CONNECTORS.has(word) && (index > 0 || keepFirstConnector)
+        ? word
+        : word.charAt(0).toLocaleUpperCase("es") + word.slice(1)
+    )
+    .join(" ");
+}
+
+// CAT-013 labels are uppercase without accents ("LA UNION SUR"). For display, a label
+// that starts with its department takes the department's CAT-012 spelling ("La Unión
+// Sur"); any other label is word-cased with Spanish connectors in lowercase.
+export function municipalityDisplayLabel(raw: string, departmentLabel: string): string {
+  const label = raw.normalize("NFC").trim();
+  const chars = [...label];
+  const key = chars.map((char) => stripAccents(char)).join("").toLocaleUpperCase("es");
+  const departmentKey = stripAccents(departmentLabel.normalize("NFC")).toLocaleUpperCase("es");
+  if (departmentKey && (key === departmentKey || key.startsWith(`${departmentKey} `))) {
+    const rest = chars.slice([...departmentLabel.normalize("NFC")].length).join("").trim();
+    return rest ? `${departmentLabel} ${wordCase(rest, true)}` : departmentLabel;
+  }
+  return wordCase(label);
+}
 
 export interface BuildAnalyticsInput {
   documents: AnalyticsDocumentRow[];
@@ -493,8 +530,9 @@ function geography(
   accepted: AnalyticsDocumentRow[],
   intentByDoc: Map<string, AnalyticsIntentRow>,
   labels: LabelResolvers
-): { departments: GeoBucket[]; foreign: GeoBucket[] } {
+): AnalyticsResult["geography"] {
   const departments = new Map<string, { count: number; total: number }>();
+  const municipalities = new Map<string, { department: string; municipality: string; count: number; total: number }>();
   const foreign = new Map<string, { count: number; total: number }>();
   for (const doc of accepted) {
     // direccion_departamento / donor_pais are LEFT JOINed onto the doc row from the
@@ -515,11 +553,28 @@ function geography(
       bucket.count += 1;
       bucket.total += doc.amount_cents;
       departments.set(dep, bucket);
+      // CAT-013 "00" is the foreign placeholder; a legacy intent may carry no municipio.
+      const mun = doc.direccion_municipio ?? "";
+      if (mun && mun !== "00") {
+        const key = `${dep}-${mun}`;
+        const place = municipalities.get(key) ?? { department: dep, municipality: mun, count: 0, total: 0 };
+        place.count += 1;
+        place.total += doc.amount_cents;
+        municipalities.set(key, place);
+      }
     }
   }
   return {
     departments: [...departments.entries()]
       .map(([code, { count, total }]) => ({ code, label: labels.department(code), count, totalCents: total }))
+      .sort((a, b) => b.totalCents - a.totalCents),
+    municipalities: [...municipalities.entries()]
+      .map(([code, { department, municipality, count, total }]) => ({
+        code,
+        label: labels.municipality(department, municipality),
+        count,
+        totalCents: total
+      }))
       .sort((a, b) => b.totalCents - a.totalCents),
     foreign: [...foreign.entries()]
       .map(([code, { count, total }]) => ({ code, label: labels.country(code), count, totalCents: total }))

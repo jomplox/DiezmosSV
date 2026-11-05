@@ -475,6 +475,7 @@ export interface AnalyticsResponse {
   };
   geography: {
     departments: AnalyticsGeoBucket[];
+    municipalities: AnalyticsGeoBucket[];
     foreign: AnalyticsGeoBucket[];
   };
   funnel: AnalyticsFunnel;
