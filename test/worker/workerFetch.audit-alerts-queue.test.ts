@@ -6,7 +6,7 @@ import { IssuancePipeline } from "../../src/worker/services/pipeline";
 import { MhClient } from "../../src/worker/services/mhClient";
 import { Repository } from "../../src/worker/storage/repository";
 import type { WompiWebhook } from "../../src/worker/types";
-import { makeDocument as testDocument } from "./fixtures";
+import { makeDocument as testDocument, makeIntent } from "./fixtures";
 import {
   advancedCdeDraft,
   advancedFailingDocument,
@@ -77,6 +77,7 @@ describe("audit pagination", () => {
 describe("pipeline failure alerts", () => {
   it("sends an operational alert when a Wompi-triggered DTE fails", async () => {
     const db = new InMemoryD1();
+    db.donationIntents.push({ ...makeIntent({ id: "di_alert_1", amount_cents: 2500, wompi_id_enlace: 555001 }) });
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
     const secret = "wompi-secret";
     const rawBody = JSON.stringify({
@@ -86,6 +87,8 @@ describe("pipeline failure alerts", () => {
       IdTransaccion: "wompi_alert_tx_1",
       ResultadoTransaccion: "ExitosaAprobada",
       EsProductiva: false,
+      IdExterno: "di_alert_1",
+      EnlacePago: { Id: 555001, IdentificadorEnlaceComercio: "di_alert_1" },
       cliente: {
         DocumentoIdentidad: "10000000-1",
         Nombre: "Example",

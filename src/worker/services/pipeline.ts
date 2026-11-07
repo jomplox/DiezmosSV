@@ -4,7 +4,7 @@ import type { IntentDonorOverride } from "../domain/dteBuilder";
 import { DocumentSchemaValidationError, validateCde } from "../domain/schema";
 import { signMhDocument } from "../domain/signer";
 import { amountCents, donorName, isApprovedDonation, normalizeWompiWebhook } from "../domain/wompi";
-import { assertValidDui, cleanDui, isDuiDocumentType } from "../../shared/dui";
+import { assertValidDui, isDuiDocumentType } from "../../shared/dui";
 import {
   legacyIssuanceAttemptId,
   Repository,
@@ -59,6 +59,8 @@ const WOMPI_INTENT_QUARANTINED_MESSAGE =
   "El evento Wompi está en cuarentena porque no coincide con una intención lista.";
 const WOMPI_INVALID_DONOR_DUI_MESSAGE =
   "Los datos del donante contienen un DUI inválido.";
+const WOMPI_NOT_DONATION_LINK_MESSAGE =
+  "El pago Wompi no proviene de un enlace creado por /donar; no se emite comprobante de donación.";
 const FISCAL_CORRECTION_EXISTING_DOCUMENT_MISMATCH_MESSAGE =
   "El CDE preexistente no coincide con la corrección fiscal vigente o con la intención Wompi enlazada. Requiere reconciliación manual; no se transmitió a MH.";
 
@@ -323,15 +325,34 @@ export class IssuancePipeline {
       });
       return null;
     }
-    const intent = correlation.kind === "ready" ? correlation.intent : null;
-    const donorOverride = intent
-      ? donorOverrideFromIntent(intent, payload)
-      : undefined;
+    // Any link on the Wompi negocio inherits its webhook URL, including links other
+    // teams create to sell event tickets. Only a /donar intent proves the payment is a
+    // donation, so an unbound link is terminal before a control number is allocated.
+    if (correlation.kind === "legacy") {
+      await this.repo.createAudit({
+        action: "WOMPI_NOT_DONATION_LINK",
+        entityType: "wompi_event",
+        entityId: wompiEventId,
+        summary: WOMPI_NOT_DONATION_LINK_MESSAGE,
+        metadata: {
+          linkId: payload.EnlacePago?.Id ?? null,
+          linkName: payload.EnlacePago?.IdentificadorEnlaceComercio ?? null
+        }
+      });
+      await this.repo.recordWompiIssuanceFailure(wompiEventId, activeAttemptId, {
+        code: "WOMPI_NOT_DONATION_LINK",
+        message: WOMPI_NOT_DONATION_LINK_MESSAGE
+      });
+      await this.repo.markWompiEventProcessed(wompiEventId);
+      return null;
+    }
+    const intent = correlation.intent;
+    const donorOverride = donorOverrideFromIntent(intent, payload);
     // Validate the donor DUI BEFORE allocating a control sequence. A malformed DUI is a
     // permanent input failure; letting buildCdeDocument throw it AFTER nextControlSequence
     // burns a control number on every queue retry, opening a permanent fiscal gap. Reject
     // it as terminal here — no sequence consumed, no DTE created.
-    const duiReason = invalidWompiDonorDuiReason(payload, donorOverride);
+    const duiReason = invalidWompiDonorDuiReason(donorOverride);
     if (duiReason) {
       await this.repo.createAudit({
         action: "WOMPI_INVALID_DONOR_DUI",
@@ -1859,13 +1880,8 @@ function cleanNullable(value: string | null | undefined): string | null {
 // DUI ("13") only when DocumentoIdentidad carries the 9 digits a DUI needs, so a
 // document that is not a DUI simply passes. Returns a human-friendly reason on failure,
 // else null. Runs BEFORE nextControlSequence so a bad DUI never consumes a control number.
-function invalidWompiDonorDuiReason(payload: WompiWebhook, override: IntentDonorOverride | undefined): string | null {
-  if (override) {
-    return isDuiDocumentType(override.tipoDocumento) ? duiValidationReason(override.numDocumento) : null;
-  }
-  const donorDocumentRaw = cleanNullable(payload.Cliente?.DocumentoIdentidad);
-  const donorIsDui = donorDocumentRaw !== null && cleanDui(donorDocumentRaw).length === 9;
-  return donorIsDui ? duiValidationReason(donorDocumentRaw) : null;
+function invalidWompiDonorDuiReason(override: IntentDonorOverride): string | null {
+  return isDuiDocumentType(override.tipoDocumento) ? duiValidationReason(override.numDocumento) : null;
 }
 
 function duiValidationReason(value: string | null): string | null {

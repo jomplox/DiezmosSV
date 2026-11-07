@@ -688,24 +688,6 @@ describe("donation intent correlation", () => {
     expect(metadata).toMatchObject({ intentAmountCents: 2500, eventAmountCents: 3000 });
   });
 
-  it("leaves legacy payloads (no intent id) unchanged: fallback receptor, no intent lookup", async () => {
-    const db = new InMemoryD1();
-    // A static-link payload whose IdentificadorEnlaceComercio is not a "di_" intent id.
-    const webhook = correlationWebhook({
-      IdExterno: undefined,
-      EnlacePago: undefined,
-      enlacePago: { Id: 123, IdentificadorEnlaceComercio: "DONACION-legacy" }
-    });
-    const eventId = seedWompiEvent(db, webhook);
-
-    const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
-
-    const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
-    expect(cde.receptor).toMatchObject({ nombre: "Fallback Cliente", correo: "fallback@example.org" });
-    expect(cde.receptor.direccion).not.toEqual(INTENT_ADDRESS);
-    expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DONATION_INTENT_COMPLETED" }));
-  });
-
   it("quarantines when the webhook link id does not match the intent's minted link", async () => {
     const db = new InMemoryD1();
     seedIntentRow(db); // wompi_id_enlace: 987654
@@ -932,18 +914,45 @@ describe("donation intent correlation", () => {
     expect(outbound).not.toHaveBeenCalled();
   });
 
+  // Production 2026-11-06: an event-registration link was created under the same Wompi
+  // negocio, inherited its webhook URL, and the raw webhook path issued a Comprobante de
+  // Donación for a ticket. Only a /donar intent can make an approved Wompi payment a
+  // donation.
+  it("never issues a CDE for an approved payment from a link /donar did not create", async () => {
+    const db = new InMemoryD1();
+    const webhook = correlationWebhook({
+      IdExterno: "Conferencia 2026 — Entrada general",
+      EnlacePago: { Id: 777001, IdentificadorEnlaceComercio: "Conferencia 2026 — Entrada general" },
+      IdTransaccion: "wompi_foreign_link_tx",
+      cliente: { Nombre: "Asistente", Apellidos: "Evento", EMail: "asistente@example.org" }
+    });
+    const eventId = seedWompiEvent(db, webhook);
+    const outbound = vi.fn();
+    vi.stubGlobal("fetch", outbound);
+
+    const result = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+
+    expect(result).toBeNull();
+    expect(db.documents).toHaveLength(0);
+    expect(db.nextSequence).toBe(1);
+    expect(outbound).not.toHaveBeenCalled();
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "WOMPI_NOT_DONATION_LINK", entity_type: "wompi_event", entity_id: eventId })
+    );
+    expect(db.wompiEvents.find((event) => event.id === eventId)).toMatchObject({
+      processed_at: expect.any(String),
+      issuance_status: "FAILED",
+      issuance_error_code: "WOMPI_NOT_DONATION_LINK"
+    });
+  });
+
   it("treats an invalid donor DUI as terminal: no control sequence, no document, audited", async () => {
     const db = new InMemoryD1();
-    // A raw legacy webhook (no intent) whose DocumentoIdentidad looks like a DUI (9
-    // digits) but fails the check digit. buildCdeDocument would declare it type 13 and
-    // throw AFTER the control sequence is allocated, so a queue retry would burn a
-    // control number on every attempt — the guard must reject it BEFORE allocation.
-    const webhook = correlationWebhook({
-      IdExterno: undefined,
-      EnlacePago: undefined,
-      IdTransaccion: "wompi_bad_dui_tx",
-      cliente: { DocumentoIdentidad: "12345678-9", Nombre: "Mal", Apellidos: "DUI", EMail: "mal@example.org", CodigoPais: "SV" }
-    });
+    // An intent whose DUI fails the check digit. buildCdeDocument would throw it AFTER
+    // the control sequence is allocated, so a queue retry would burn a control number on
+    // every attempt — the guard must reject it BEFORE allocation.
+    seedIntentRow(db, { donor_document: "12345678-9" });
+    const webhook = correlationWebhook({ IdTransaccion: "wompi_bad_dui_tx" });
     const eventId = seedWompiEvent(db, webhook);
 
     const result = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
@@ -973,9 +982,8 @@ describe("donation intent correlation", () => {
 
   it("rejects deterministic CDE schema failures before allocating a control sequence", async () => {
     const db = new InMemoryD1();
+    seedIntentRow(db);
     const webhook = correlationWebhook({
-      IdExterno: undefined,
-      EnlacePago: undefined,
       IdTransaccion: "wompi_oversized_email_tx",
       cliente: {
         DocumentoIdentidad: "",
@@ -1001,12 +1009,8 @@ describe("donation intent correlation", () => {
   it("does not requeue an invalid-DUI Wompi event after terminal processing", async () => {
     const db = new InMemoryD1();
     const queued: IssuanceMessage[] = [];
-    const webhook = correlationWebhook({
-      IdExterno: undefined,
-      EnlacePago: undefined,
-      IdTransaccion: "wompi_bad_dui_sweep_tx",
-      cliente: { DocumentoIdentidad: "12345678-9", Nombre: "Mal", Apellidos: "DUI", EMail: "mal@example.org", CodigoPais: "SV" }
-    });
+    seedIntentRow(db, { donor_document: "12345678-9" });
+    const webhook = correlationWebhook({ IdTransaccion: "wompi_bad_dui_sweep_tx" });
     const eventId = seedWompiEvent(db, webhook);
     const pipeline = new IssuancePipeline({
       ...(await pipelineEnv(db)),

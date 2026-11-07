@@ -3,6 +3,7 @@ import worker from "../../src/worker/index";
 import { EnvironmentNotAllowedError } from "../../src/worker/services/environmentPolicy";
 import { IssuancePipeline } from "../../src/worker/services/pipeline";
 import type { WompiWebhook } from "../../src/worker/types";
+import { makeIntent } from "./fixtures";
 import { TEST_RESEND_REQUEST_ID } from "./support/documentDeliveryFixtures";
 import {
   advancedCdeDraft,
@@ -1209,6 +1210,7 @@ describe("Wompi webhook integration", () => {
 
   it("normalizes the stored raw Wompi body before generating the queued CDE", async () => {
     const db = new InMemoryD1();
+    db.donationIntents.push({ ...makeIntent({ id: "di_pipeline_1", amount_cents: 2500, wompi_id_enlace: 555002 }) });
     const secret = "wompi-secret";
     const rawBody = JSON.stringify({
       IdCuenta: "acct_1",
@@ -1217,6 +1219,8 @@ describe("Wompi webhook integration", () => {
       IdTransaccion: "wompi_pipeline_tx_1",
       ResultadoTransaccion: "ExitosaAprobada",
       EsProductiva: false,
+      IdExterno: "di_pipeline_1",
+      EnlacePago: { Id: 555002, IdentificadorEnlaceComercio: "di_pipeline_1" },
       cliente: {
         DocumentoIdentidad: "10000000-1",
         Nombre: "Example",
