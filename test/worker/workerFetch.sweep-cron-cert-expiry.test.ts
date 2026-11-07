@@ -9,7 +9,7 @@ import {
   FakeArchiveBucket,
   InMemoryD1
 } from "./support/inMemoryD1";
-import { makeDocument as testDocument } from "./fixtures";
+import { makeDocument as testDocument, makeIntent } from "./fixtures";
 import { emisorConfig } from "./support/dteFixtures";
 import { installWorkerFetchGlobals } from "./support/workerFetchGlobals";
 import { wompiEventForReservation } from "./support/wompiEventFixtures";
@@ -50,13 +50,20 @@ describe("issuance dead-letter and stalled-event sweep", () => {
     const db = new InMemoryD1();
     db.nextSequence = 31;
     const eventId = "wompi_bad_country";
+    db.donationIntents.push({ ...makeIntent({
+      id: "di_bad_country",
+      amount_cents: 1000,
+      wompi_id_enlace: 555003,
+      donor_pais: "ZZ",
+      direccion_departamento: "00",
+      direccion_municipio: "00",
+      direccion_distrito: "00"
+    }) });
     const webhook = {
       ...wompiSample,
       IdTransaccion: "wompi_bad_country_tx",
-      Cliente: {
-        ...wompiSample.Cliente,
-        CodigoPais: "ZZ"
-      }
+      IdExterno: "di_bad_country",
+      EnlacePago: { ...wompiSample.EnlacePago, Id: 555003, IdentificadorEnlaceComercio: "di_bad_country" }
     };
     db.wompiEvents.push(wompiEventForReservation({
       id: eventId,
