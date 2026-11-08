@@ -40,6 +40,8 @@ const validators = {
   invalidacion: ajv.compile(invalidacionSchema)
 };
 
+// The detail is operator-safe: Ajv builds it from schema paths and schema-authored
+// rules ("must NOT have more than 100 characters"), never from the failing value.
 export class DocumentSchemaValidationError extends OperatorSafeIssuanceError {
   constructor(
     readonly documentLabel: string,
@@ -47,7 +49,9 @@ export class DocumentSchemaValidationError extends OperatorSafeIssuanceError {
   ) {
     super(
       documentLabel === "CDE" ? "CDE_SCHEMA" : "ISSUANCE_SCHEMA",
-      `La validación del esquema ${documentLabel} falló.`
+      detail
+        ? `La validación del esquema ${documentLabel} falló: ${detail}`
+        : `La validación del esquema ${documentLabel} falló.`
     );
     this.name = "DocumentSchemaValidationError";
   }

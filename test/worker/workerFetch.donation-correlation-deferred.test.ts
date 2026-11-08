@@ -1004,6 +1004,10 @@ describe("donation intent correlation", () => {
     expect(db.nextSequence).toBe(1);
     expect(db.audits.filter((audit) => audit.action === "WOMPI_INVALID_CDE_INPUT")).toHaveLength(1);
     expect(db.wompiEvents.find((event) => event.id === eventId)?.processed_at).toEqual(expect.any(String));
+    // The operator sees which field failed, never the donor's value.
+    const expected = "La validación del esquema CDE falló: /receptor/correo must NOT have more than 100 characters";
+    expect(db.wompiEvents.find((event) => event.id === eventId)?.issuance_error_message).toBe(expected);
+    expect(db.audits.find((audit) => audit.action === "WOMPI_INVALID_CDE_INPUT")?.summary).toBe(expected);
   });
 
   it("does not requeue an invalid-DUI Wompi event after terminal processing", async () => {
