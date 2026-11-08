@@ -10,6 +10,7 @@ import {
   RECEPTOR_ADDRESS_FALLBACK,
   resolveDonorComplemento
 } from "../../src/worker/domain/dteBuilder";
+import { DocumentSchemaValidationError, validateCde } from "../../src/worker/domain/schema";
 import type { DteDocumentRecord, EmisorConfig, WompiWebhook } from "../../src/worker/types";
 import { emisorConfig } from "./fixtures";
 
@@ -131,6 +132,54 @@ describe("DTE builders", () => {
     expect(document.cuerpoDocumento[0].valor).toBe(1.11);
     expect(document.resumen.valorTotal).toBe(1.11);
     expect(document.resumen.pagos[0].montoPago).toBe(1.11);
+  });
+
+  // A float multipleOf check rejected ~12% of cent amounts (21.15 / 1e-8 is
+  // 2114999999.9999998), stranding completed entregas without a CDE. Every cent amount
+  // is an exact multiple of the schema's 0.01 and 1e-8 as MH reads the JSON.
+  it("builds a schema-valid CDE for every cent amount up to $1,000", () => {
+    const document = buildCdeDocument({ ...wompiSample, Monto: "21.15" } as WompiWebhook, emisorConfig, {
+      sequence: 1,
+      issuedAt: new Date("2026-10-29T20:38:49.827-06:00")
+    }) as Record<string, any>;
+    const rejected: number[] = [];
+    for (let cents = 1; cents <= 100_000; cents += 1) {
+      const amount = Number((cents / 100).toFixed(2));
+      document.cuerpoDocumento[0].valorUni = amount;
+      document.cuerpoDocumento[0].valor = amount;
+      document.resumen.valorTotal = amount;
+      document.resumen.pagos[0].montoPago = amount;
+      try {
+        validateCde(document);
+      } catch {
+        rejected.push(amount);
+      }
+    }
+
+    expect(rejected.slice(0, 10)).toEqual([]);
+  });
+
+  it.each([
+    ["/resumen/valorTotal", "must be multiple of 0.01", (draft: Record<string, any>) => {
+      draft.resumen.valorTotal = 21.155;
+    }],
+    ["/cuerpoDocumento/0/valor", "must be multiple of 1e-8", (draft: Record<string, any>) => {
+      draft.cuerpoDocumento[0].valor = 21.150000001;
+    }]
+  ])("still rejects an amount finer than the schema allows at %s", (path, message, corrupt) => {
+    const draft = buildCdeDocument(wompiSample as WompiWebhook, emisorConfig, {
+      sequence: 1,
+      issuedAt: new Date("2026-06-02T14:05:20.742-06:00")
+    }) as Record<string, any>;
+    corrupt(draft);
+
+    let detail = "";
+    try {
+      buildAdvancedCdeDocument(draft, emisorConfig, { sequence: 2, environment: "00" });
+    } catch (error) {
+      detail = error instanceof DocumentSchemaValidationError ? error.detail : String(error);
+    }
+    expect(detail).toBe(`${path} ${message}`);
   });
 
   it("pins the CDE descripcion to DONACIÓN even when the Wompi link carries a product name", () => {
