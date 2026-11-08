@@ -10,7 +10,7 @@ import {
   RECEPTOR_ADDRESS_FALLBACK,
   resolveDonorComplemento
 } from "../../src/worker/domain/dteBuilder";
-import { DocumentSchemaValidationError } from "../../src/worker/domain/schema";
+import { DocumentSchemaValidationError, validateCde } from "../../src/worker/domain/schema";
 import type { DteDocumentRecord, EmisorConfig, WompiWebhook } from "../../src/worker/types";
 import { emisorConfig } from "./fixtures";
 
@@ -138,16 +138,21 @@ describe("DTE builders", () => {
   // 2114999999.9999998), stranding completed entregas without a CDE. Every cent amount
   // is an exact multiple of the schema's 0.01 and 1e-8 as MH reads the JSON.
   it("builds a schema-valid CDE for every cent amount up to $1,000", () => {
-    const rejected: string[] = [];
+    const document = buildCdeDocument({ ...wompiSample, Monto: "21.15" } as WompiWebhook, emisorConfig, {
+      sequence: 1,
+      issuedAt: new Date("2026-10-29T20:38:49.827-06:00")
+    }) as Record<string, any>;
+    const rejected: number[] = [];
     for (let cents = 1; cents <= 100_000; cents += 1) {
-      const monto = (cents / 100).toFixed(2);
+      const amount = Number((cents / 100).toFixed(2));
+      document.cuerpoDocumento[0].valorUni = amount;
+      document.cuerpoDocumento[0].valor = amount;
+      document.resumen.valorTotal = amount;
+      document.resumen.pagos[0].montoPago = amount;
       try {
-        buildCdeDocument({ ...wompiSample, Monto: monto } as WompiWebhook, emisorConfig, {
-          sequence: 1,
-          issuedAt: new Date("2026-10-29T20:38:49.827-06:00")
-        });
+        validateCde(document);
       } catch {
-        rejected.push(monto);
+        rejected.push(amount);
       }
     }
 
